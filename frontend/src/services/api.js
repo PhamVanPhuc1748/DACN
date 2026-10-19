@@ -10,7 +10,21 @@ export async function predictImage(file){
  const form=new FormData();form.append('file',file);
  let response;try{response=await fetch(`${BASE_URL}/predict`,{method:'POST',body:form});}catch{throw new Error('Không kết nối được FastAPI. Kiểm tra server và CORS.');}
  if(!response.ok){let message=`API trả lỗi ${response.status}`;try{const body=await response.json();message=typeof body.detail==='string'?body.detail:message;}catch{}throw new Error(message);}
- const data=await response.json();
- if(typeof data.label!=='string'||typeof data.confidence!=='number'||typeof data.abnormal!=='boolean')throw new Error('Kết quả API thiếu label, confidence hoặc abnormal.');
- return {...data,id:data.id||`PIG-${Date.now()}`,createdAt:data.createdAt||new Date().toISOString(),source:'FastAPI /predict'};
+
+const data = await response.json();
+
+if (typeof data.disease !== 'string' ||
+    typeof data.confidence !== 'number') {
+  throw new Error('Kết quả API không đúng định dạng.');
+}
+
+return {
+  id: `PIG-${Date.now()}`,
+  label: data.disease,
+  confidence: data.confidence / 100,
+  abnormal: true,
+  detections: [],
+  createdAt: new Date().toISOString(),
+  source: 'FastAPI MOCK - Chưa tích hợp AI thật'
+};
 }

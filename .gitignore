@@ -1,0 +1,19 @@
+# Môi trường ảo Python
+venv/
+.env
+__pycache__/
+*.pyc
+
+# Dữ liệu ảnh và models (quá nặng để push lên Git)
+data/
+ml_workspace/weights/*.pt
+ml_workspace/weights/*.h5
+ml_workspace/weights/*.onnx
+
+# IDEs
+.vscode/
+.idea/
+
+# Hệ điều hành
+.DS_Store
+Thumbs.db

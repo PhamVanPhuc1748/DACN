@@ -1,2 +1,66 @@
-import {BrainCircuit,Server,Layers,Image,Info,CheckCircle2,Workflow} from 'lucide-react';import {modelInfo} from '../data/mock';import {USE_MOCK} from '../services/api';
-export default function Model(){const details=[{icon:BrainCircuit,label:'Mô hình đề xuất',value:modelInfo.name},{icon:Layers,label:'Phiên bản giao diện',value:modelInfo.version},{icon:Image,label:'Định dạng đầu vào',value:modelInfo.input},{icon:Server,label:'Chế độ kết nối',value:USE_MOCK?'Mock API (mô phỏng)':'FastAPI (cấu hình thật)'}];return <div className="space-y-6"><div className="panel p-6 flex flex-wrap gap-5 items-center justify-between"><div className="flex gap-4 items-center"><div className="bg-brand-50 p-4 rounded-2xl text-brand-700"><BrainCircuit size={36}/></div><div><h2 className="text-xl font-extrabold">Thông tin mô hình Deep Learning</h2><p className="subtle mt-1">Theo dõi cấu hình và trạng thái tích hợp model</p></div></div><span className="pill pill-warn">Chỉ là bản mô tả demo</span></div><div className="grid md:grid-cols-2 xl:grid-cols-4 gap-4">{details.map(d=><div className="panel p-5" key={d.label}><d.icon size={23} className="text-brand-600 mb-4"/><div className="text-sm text-slate-500">{d.label}</div><div className="font-bold mt-2 text-slate-800">{d.value}</div></div>)}</div><div className="grid lg:grid-cols-2 gap-5"><section className="panel p-6"><h3 className="section-title">Chỉ số đánh giá mô hình</h3><p className="subtle mt-1 mb-5">Chưa có kết quả thực nghiệm được xác thực</p><div className="grid grid-cols-2 gap-4">{modelInfo.metrics.map(m=><div key={m.name} className="rounded-xl p-5 bg-slate-50 border border-slate-100"><div className="text-sm text-slate-500">{m.name}</div><p className="text-3xl font-extrabold mt-2">{m.value}</p></div>)}</div><p className="text-xs text-amber-700 mt-5 bg-amber-50 p-3 rounded-lg">Không tự tạo số Accuracy / mAP. Điền các chỉ số từ kết quả đánh giá tập Test sau khi nhóm train mô hình.</p></section><section className="panel p-6"><h3 className="section-title mb-5">Quy trình xử lý dự kiến</h3><div className="space-y-4">{['Tải ảnh da heo từ giao diện React','FastAPI tiếp nhận ảnh, kiểm tra định dạng','Tiền xử lý và chạy mô hình YOLO / classifier','Trả JSON nhãn, confidence, bounding boxes','Frontend hiển thị kết quả và lưu lịch sử'].map((t,i)=><div className="flex items-center gap-3" key={t}><span className="w-8 h-8 shrink-0 rounded-lg bg-blue-50 text-brand-700 flex items-center justify-center text-sm font-bold">{i+1}</span><p className="text-sm text-slate-700">{t}</p></div>)}</div></section></div><div className="panel p-6"><h3 className="section-title flex gap-2 items-center"><Workflow size={20} className="text-brand-600"/> Chuẩn tích hợp Backend</h3><p className="subtle mt-2 mb-4">Đổi <code>VITE_USE_MOCK=false</code> trong file .env để gửi ảnh thực sự qua FastAPI.</p><pre className="overflow-x-auto rounded-xl bg-slate-900 text-blue-100 text-xs md:text-sm p-5 leading-7">{`POST /predict\nContent-Type: multipart/form-data\nForm field: file\n\nResponse JSON:\n{\n  "id": "PIG-0001",\n  "label": "Bất thường",\n  "confidence": 0.94,\n  "abnormal": true,\n  "detections": [\n    {"label":"Vùng bất thường", "confidence":0.91, "bbox":[30,40,200,220]}\n  ]\n}`}</pre><div className="mt-4 flex gap-2 text-sm text-slate-500"><Info size={18} className="shrink-0"/><p>bbox ở tọa độ pixel ảnh gốc [x1, y1, x2, y2]. Trường detections có thể là mảng rỗng nếu model chỉ làm classification.</p></div></div><div className="flex gap-2 text-sm text-slate-500"><CheckCircle2 size={18} className="text-emerald-500 shrink-0"/> Giao diện có thể hoạt động độc lập trước khi nhóm AI hoàn thành train model.</div></div>}
+import { BrainCircuit, Server, Layers, Image, Info, Workflow } from 'lucide-react';
+import { modelInfo } from '../data/mock';
+import { USE_MOCK } from '../services/api';
+
+export default function Model() {
+  const details = [
+    { icon: BrainCircuit, label: 'Mô hình đề xuất', value: modelInfo.name },
+    { icon: Layers, label: 'Phiên bản giao diện', value: modelInfo.version },
+    { icon: Image, label: 'Định dạng đầu vào', value: modelInfo.input },
+    { icon: Server, label: 'Chế độ kết nối', value: USE_MOCK ? 'API mô phỏng' : 'FastAPI' },
+  ];
+  const steps = ['Tải ảnh da heo từ giao diện', 'FastAPI tiếp nhận và kiểm tra định dạng', 'Tiền xử lý ảnh rồi chạy bộ phân loại', 'Trả về nhãn, độ tin cậy và vùng phát hiện', 'Hiển thị kết quả và lưu lịch sử trên thiết bị'];
+
+  return (
+    <div className="space-y-5">
+      <section className="surface flex flex-wrap items-center justify-between gap-4 p-5 md:p-6">
+        <div className="flex items-center gap-4">
+          <span className="grid h-12 w-12 place-items-center rounded-xl bg-[#e7efe7] text-brand-700"><BrainCircuit size={24} strokeWidth={1.7} /></span>
+          <div><h2 className="section-title">Thông tin mô hình</h2><p className="subtle mt-1">Cấu hình hiện tại và trạng thái tích hợp</p></div>
+        </div>
+        <span className={`pill ${USE_MOCK ? 'pill-warn' : 'pill-ok'}`}>{USE_MOCK ? 'Bản mô tả thử nghiệm' : 'Đã kết nối API'}</span>
+      </section>
+
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {details.map(({ icon: Icon, label, value }) => <div className="surface p-4" key={label}><Icon size={18} className="mb-4 text-[#718875]" strokeWidth={1.8} /><p className="text-xs text-[#818c83]">{label}</p><p className="mt-1.5 text-sm font-semibold leading-relaxed text-[#3e4d43]">{value}</p></div>)}
+      </section>
+
+      <div className="grid gap-5 xl:grid-cols-2">
+        <section className="surface p-5 md:p-6">
+          <h3 className="section-title">Chỉ số đánh giá</h3><p className="subtle mt-1">Chưa có kết quả thực nghiệm được xác thực</p>
+          <div className="mt-5 grid grid-cols-2 gap-3">
+            {modelInfo.metrics.map((metric) => <div key={metric.name} className="rounded-lg border border-[#e7ebe5] bg-[#f8f9f6] p-4"><p className="text-xs text-[#7e8980]">{metric.name}</p><p className="mt-2 text-lg font-semibold text-[#415247]">{metric.value}</p></div>)}
+          </div>
+          <p className="mt-4 rounded-lg bg-[#f7f0dc] p-3 text-xs leading-relaxed text-[#74591c]">Không có chỉ số accuracy hoặc mAP được điền sẵn. Hãy cập nhật số liệu sau khi đánh giá trên tập test.</p>
+        </section>
+
+        <section className="surface p-5 md:p-6">
+          <h3 className="section-title">Luồng xử lý dự kiến</h3>
+          <div className="mt-5 space-y-0">
+            {steps.map((step, index) => <div className="relative flex gap-3 pb-4 last:pb-0" key={step}>
+              {index < steps.length - 1 && <span className="absolute left-[13px] top-7 h-[calc(100%-8px)] w-px bg-[#dce5dc]" />}
+              <span className="relative grid h-7 w-7 shrink-0 place-items-center rounded-full bg-[#e8efe8] text-xs font-semibold text-brand-700">{index + 1}</span>
+              <p className="pt-1 text-sm leading-relaxed text-[#59675d]">{step}</p>
+            </div>)}
+          </div>
+        </section>
+      </div>
+
+      <section className="surface p-5 md:p-6">
+        <h3 className="section-title flex items-center gap-2"><Workflow size={18} className="text-[#718875]" />Kết nối backend</h3>
+        <p className="subtle mt-1">Đặt <code className="rounded bg-[#f1f3ef] px-1.5 py-0.5 text-xs">VITE_USE_MOCK=false</code> trong file <code className="rounded bg-[#f1f3ef] px-1.5 py-0.5 text-xs">.env</code> để gửi ảnh đến FastAPI.</p>
+        <pre className="mt-4 overflow-x-auto rounded-lg bg-[#263b30] p-4 text-xs leading-6 text-[#e1ebe3] md:text-sm">{`POST /predict
+Content-Type: multipart/form-data
+Form field: file
+
+Response JSON:
+{
+  "disease": "Tên lớp dự đoán",
+  "confidence": 0.94,
+  "detections": []
+}`}</pre>
+        <p className="mt-3 flex gap-2 text-xs leading-relaxed text-[#7d887f]"><Info size={15} className="mt-0.5 shrink-0" />Tọa độ bounding box dùng pixel của ảnh gốc. Mảng detections có thể rỗng nếu mô hình chỉ phân loại toàn ảnh.</p>
+      </section>
+    </div>
+  );
+}

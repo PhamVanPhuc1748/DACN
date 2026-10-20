@@ -17,6 +17,7 @@ dist/
 # IDEs
 .vscode/
 .idea/
+.1devtool/
 
 # Hệ điều hành
 .DS_Store

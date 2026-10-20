@@ -1,5 +1,41 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-:root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#172b4d;background:#f4f8fd;font-synthesis:none}*{box-sizing:border-box}body{margin:0;min-width:320px}button,input,select{font:inherit}button{cursor:pointer}button:disabled{cursor:not-allowed}::selection{background:#bfdbfe}.panel{@apply bg-white border border-slate-200/80 rounded-2xl shadow-sm}.btn-primary{@apply inline-flex items-center justify-center gap-2 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-xl px-4 py-3 transition-colors disabled:opacity-50}.btn-secondary{@apply inline-flex items-center justify-center gap-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold rounded-xl px-4 py-3 transition-colors}.pill{@apply inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold}.pill-ok{@apply bg-emerald-50 text-emerald-700}.pill-bad{@apply bg-rose-50 text-rose-700}.pill-warn{@apply bg-amber-50 text-amber-700}.section-title{@apply text-lg font-bold text-slate-800}.subtle{@apply text-sm text-slate-500}
+
+:root {
+  font-family: 'Segoe UI', 'Helvetica Neue', sans-serif;
+  color: #28362f;
+  background: #f1f3ef;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+::selection { background: #c4d7c6; color: #203b30; }
+:focus-visible { outline: 3px solid #d8a949; outline-offset: 3px; }
+
+.display-type { font-family: Georgia, 'Times New Roman', serif; letter-spacing: -0.035em; }
+.surface { background: #fff; border: 1px solid #e1e6df; border-radius: 17px; }
+.surface-soft { background: #f8f9f6; border: 1px solid #e5e9e2; border-radius: 14px; }
+.btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 9px; padding: 12px 17px; color: #fff; background: #315b49; border: 1px solid #315b49; border-radius: 9px; font-weight: 650; transition: background .18s ease, transform .18s ease; }
+.btn-primary:hover:not(:disabled) { background: #244a39; transform: translateY(-1px); }
+.btn-secondary { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 14px; color: #34443b; background: #fff; border: 1px solid #dbe1d9; border-radius: 9px; font-weight: 600; transition: background .18s ease, border-color .18s ease; }
+.btn-secondary:hover:not(:disabled) { background: #f4f6f1; border-color: #bec9bd; }
+.pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 6px 10px; font-size: 12px; font-weight: 650; white-space: nowrap; }
+.pill-ok { color: #2c6044; background: #e6f1e8; }
+.pill-bad { color: #994938; background: #f8e8e3; }
+.pill-warn { color: #805c18; background: #f6efd9; }
+.section-title { color: #2b3931; font-size: 16px; font-weight: 700; letter-spacing: -.01em; }
+.subtle { color: #7b867d; font-size: 13px; line-height: 1.55; }
+.field { width: 100%; border: 1px solid #dce2da; border-radius: 9px; background: white; padding: 11px 13px; color: #34443b; outline: none; }
+.field:focus { border-color: #6e9278; box-shadow: 0 0 0 3px #e2ece2; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}

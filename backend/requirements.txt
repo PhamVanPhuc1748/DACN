@@ -4,4 +4,4 @@ pydantic
 python-multipart
 Pillow
 numpy
-# torch # Sẽ cài đặt tùy theo môi trường (CPU/GPU)
+# torch

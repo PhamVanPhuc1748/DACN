@@ -4,11 +4,15 @@ venv/
 __pycache__/
 *.pyc
 
-# Dữ liệu ảnh và models (quá nặng để push lên Git)
-data/
+# Thư mục dữ liệu ảnh gốc và models (quá nặng để push lên Git)
+/data/
 ml_workspace/weights/*.pt
 ml_workspace/weights/*.h5
 ml_workspace/weights/*.onnx
+
+# Frontend dependencies & build
+node_modules/
+dist/
 
 # IDEs
 .vscode/

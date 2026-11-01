@@ -2,7 +2,7 @@
 
 An original dark cyan/teal research command-center UI for Windows, on Flet 0.28.3.
 
-## Running (PowerShell, inside nam_desktop)
+## Running (PowerShell, inside PigSkinTech)
 
 ```powershell
 python -m venv .venv
@@ -32,4 +32,4 @@ Original images are copied into the local `case_images/` archive when an inspect
 The UI does not create fake diagnoses. It is a research aid and is not a veterinary diagnosis tool. The supplied dataset/run statistics come from the user-provided screenshots and must be cross-checked with the final research files.
 
 ## Integration into DACN repo
-Copy this folder to `D:\DACN\nam_desktop` **after backing up the current Flet work**. Do not overwrite the entire DACN repository. Work on branch `devN`; `.venv`, local database and model weight files are excluded from git.
+Copy this folder to `D:\DACN\PigSkinTech` **after backing up the current Flet work**. Do not overwrite the entire DACN repository. Work on branch `devN`; `.venv`, local database and model weight files are excluded from git.

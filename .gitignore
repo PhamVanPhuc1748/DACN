@@ -19,13 +19,13 @@ ml_workspace/weights/*.onnx
 Thumbs.db
 
 # PigSkin desktop runtime files and model weights
-nam_desktop/.venv/
-nam_desktop/__pycache__/
-nam_desktop/**/__pycache__/
-nam_desktop/*.pyc
-nam_desktop/**/*.pyc
-nam_desktop/pigskin_history.db*
-nam_desktop/case_images/
-nam_desktop/models/*.pth
-nam_desktop/models/*.pt
-nam_desktop/models/*.onnx
+PigSkinTech/.venv/
+PigSkinTech/__pycache__/
+PigSkinTech/**/__pycache__/
+PigSkinTech/*.pyc
+PigSkinTech/**/*.pyc
+PigSkinTech/pigskin_history.db*
+PigSkinTech/case_images/
+PigSkinTech/models/*.pth
+PigSkinTech/models/*.pt
+PigSkinTech/models/*.onnx

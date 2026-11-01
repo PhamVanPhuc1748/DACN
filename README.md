@@ -7,7 +7,7 @@ Dự án kết hợp Deep Learning (Computer Vision) và phát triển ứng d�
 - `ml_workspace/`: Source code huấn luyện mô hình học máy.
 - `backend/`: API server phục vụ model (FastAPI).
 - `mobile_app/`: Source code ứng dụng di động.
-- `nam_desktop/`: Ứng dụng nghiên cứu desktop bằng Flet.
+- `PigSkinTech/`: Ứng dụng nghiên cứu desktop bằng Flet.
 - `docs/`: Tài liệu và báo cáo đồ án.
 
 ## Cài đặt môi trường
@@ -27,10 +27,10 @@ uvicorn app.main:app --reload
 
 ### 3. Ứng dụng nghiên cứu desktop (Flet)
 ```powershell
-cd nam_desktop
+cd PigSkinTech
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe main.py
 ```
 
-Ứng dụng lưu database và ảnh hồ sơ cục bộ; các dữ liệu runtime, dataset và model weights không được commit. Muốn bật suy luận MobileNetV2 cần cung cấp checkpoint tương thích tại `nam_desktop/models/best.pth` cùng `nam_desktop/models/classes.json` theo đúng thứ tự nhãn huấn luyện.
+Ứng dụng lưu database và ảnh hồ sơ cục bộ; các dữ liệu runtime, dataset và model weights không được commit. Muốn bật suy luận MobileNetV2 cần cung cấp checkpoint tương thích tại `PigSkinTech/models/best.pth` cùng `PigSkinTech/models/classes.json` theo đúng thứ tự nhãn huấn luyện.

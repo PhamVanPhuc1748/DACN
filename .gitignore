@@ -9,6 +9,7 @@ __pycache__/
 ml_workspace/weights/*.pt
 ml_workspace/weights/*.h5
 ml_workspace/weights/*.onnx
+ml_workspace/runs/
 
 # Frontend dependencies & build
 node_modules/

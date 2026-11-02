@@ -1,61 +1,62 @@
-# Đồ án Chuyên ngành: Ứng dụng Phát hiện Bệnh trên Da Heo (Desktop App)
+# PigSkin AI Studio
 
-Hệ thống ứng dụng Desktop nguyên bản (Python Flet) kết hợp Deep Learning (Computer Vision) để chẩn đoán, phát hiện các bệnh da liễu phổ biến ở heo thông qua hình ảnh.
+Ứng dụng desktop phục vụ nghiên cứu và rà soát ảnh tổn thương da heo. Nhánh `devP` đưa giao diện Flet vào dự án, kết nối suy luận với checkpoint huấn luyện thật và đọc kết quả train từ các artifact của training workspace. Đây là công cụ nghiên cứu hỗ trợ người dùng; điểm số mô hình không thay thế kết luận của bác sĩ thú y.
 
----
+## Phạm vi được đưa lên `devP`
 
-## 📂 Cấu trúc thư mục dự án
+- **Giao diện desktop:** các màn hình Tổng quan, Phân tích ảnh, Lịch sử, Dữ liệu, Huấn luyện và Mô hình; có giao diện sáng/tối, xem trước ảnh, thông tin hồ sơ và điểm nhấn minh họa vùng da.
+- **Suy luận bằng checkpoint thật:** app tìm run hoàn chỉnh gần nhất, đọc cấu hình/lớp/chuẩn hóa từ run và gọi worker bằng Python có PyTorch. Hỗ trợ `mobilenet_v2`, `mobilenet_v3_large` và `efficientnet_b0`; hiện chỉ nhận checkpoint phân loại đơn nhãn.
+- **Thông tin dữ liệu và đánh giá:** số lượng ảnh được đếm từ manifest; cấu hình và metric được đọc từ `config.json` và `final_metrics.json`. App đối chiếu SHA-256 manifest nếu run có lưu hash.
+- **Hồ sơ cục bộ:** lịch sử ca và ảnh được lưu trên máy bằng SQLite và thư mục `PigSkinTech/case_images/`.
+- **Tách môi trường huấn luyện:** mã train cũ trong `ml_workspace/src` đã được gỡ khỏi repo. Việc huấn luyện chạy trong training workspace riêng; app này đọc artifact để đánh giá và suy luận.
+
+Không đưa dataset, trọng số, database cá nhân, ảnh ca bệnh hay tài liệu báo cáo/nghiên cứu đã tạo vào commit này. Backend API là luồng riêng và hiện chưa được nối với suy luận checkpoint thật của ứng dụng desktop; các thay đổi backend đang có trong working tree không thuộc commit này.
+
+## Chạy ứng dụng trên Windows
+
+Cài Python, tạo môi trường và cài các thư viện giao diện:
+
+```powershell
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -r PigSkinTech/requirements.txt
+.\run_app.bat
+```
+
+`PigSkinTech/requirements.txt` chỉ cài Flet và Pillow. PyTorch/TorchVision cần được cài trong môi trường của training workspace theo đúng cấu hình CPU/CUDA của máy; app không tự cài các thư viện này.
+
+## Kết nối training workspace
+
+App cần một run hoàn chỉnh có cấu trúc tương tự:
 
 ```text
-DACN/
-├── PigSkinTech/           # Ứng dụng Desktop chính (Flet Desktop UI từ devN)
-│   ├── main.py            # Giao diện chính (Tổng quan, Phân tích ảnh, Lịch sử, Dataset, Huấn luyện, Mô hình)
-│   ├── services/
-│   │   ├── inference.py   # Module nạp trọng số MobileNetV2 và chạy suy luận ảnh
-│   │   └── store.py       # Cơ sở dữ liệu SQLite cục bộ (pigskin_history.db) và lưu trữ ảnh ca bệnh
-│   ├── models/            # Trọng số mô hình (.pth) và danh sách nhãn classes.json
-│   ├── requirements.txt   # Thư viện phục vụ Desktop App (flet, Pillow, torch, torchvision)
-│   └── README.md
-├── backend/               # API Server dự phòng (FastAPI)
-│   ├── app/
-│   │   ├── main.py        # Các endpoints (/predict, /health)
-│   │   └── ...
-│   └── requirements.txt
-├── ml_workspace/          # Môi trường nghiên cứu & huấn luyện mô hình Deep Learning
-│   ├── notebooks/         # Jupyter Notebooks thực nghiệm
-│   └── weights/           # Trọng số mô hình (.pt, .onnx)
-├── data/                  # Dữ liệu ảnh thô và manifest phân chia (không push git)
-│   ├── raw/               # Ảnh thô tải về từ Roboflow
-│   ├── splits/            # File manifest phân tầng (train.csv, val.csv, test.csv)
-│   └── reports/           # Thống kê phân bố nhãn
-├── docs/                  # Tài liệu phân tích, kiến trúc hệ thống và báo cáo đồ án
-├── run_app.bat            # Script khởi chạy 1-click ứng dụng Desktop (Flet)
-└── run_app.py             # Script Python khởi chạy ứng dụng Desktop
+PigSkinResearchStudio/
+├── .venv/Scripts/python.exe
+└── ml_workspace/runs/<run-name>/
+    ├── best_model.pt
+    ├── config.json
+    └── final_metrics.json
 ```
 
----
+Trong PowerShell, đặt đường dẫn workspace trước khi mở app:
 
-## 🚀 Hướng dẫn khởi chạy ứng dụng Desktop
-
-### Cách 1: Khởi chạy 1-click (Khuyên dùng trên Windows)
-Chỉ cần nhấp đúp chuột vào file:
-👉 **`run_app.bat`**
-Hệ thống sẽ tự động khởi chạy giao diện Desktop **PigSkin AI Studio** (Flet).
-
-### Cách 2: Khởi chạy bằng lệnh qua Terminal
 ```powershell
-# Kích hoạt môi trường và chạy trực tiếp
-.\venv\Scripts\python.exe run_app.py
-
-# Hoặc chạy từ trong thư mục PigSkinTech:
-cd PigSkinTech
-..\venv\Scripts\python.exe main.py
+$env:PIGSKIN_RESEARCH_ROOT = 'E:\code\PigSkinResearchStudio'
+.\run_app.bat
 ```
 
----
+`config.json` cần chứa danh sách lớp, tên kiến trúc và thông tin tiền xử lý tương ứng với checkpoint. Nếu đường dẫn không được đặt, app thử các vị trí mặc định trong thư mục `E:\code` và repo hiện tại. Khi không có run hợp lệ, app sẽ báo thiếu dữ liệu/checkpoint thay vì tạo số liệu thay thế.
 
-## 💡 Điểm nổi bật của giao diện Desktop (Flet)
-1. **Giao diện Command Center:** Hỗ trợ chuyển đổi mượt mà giữa 2 giao diện Sáng (Light) và Tối (Dark).
-2. **Quản lý ca bệnh hoàn chỉnh:** Nhập mã số heo (Ear Tag), trang trại, vị trí vết thương, ngày khởi phát và các triệu chứng lâm sàng.
-3. **Lưu trữ cục bộ:** Tự động tạo bản sao lưu ảnh gốc vào `case_images/` và lưu trữ lịch sử kiểm tra trong SQLite `pigskin_history.db`.
-4. **Hỗ trợ suy luận trực tiếp:** Sẵn sàng tích hợp trọng số MobileNetV2 (`models/best.pth` và `models/classes.json`).
+## Đọc kết quả dự đoán
+
+App hiển thị tối đa 5 lớp có điểm cao nhất. Điểm softmax là điểm số thô của mô hình, **chưa được hiệu chuẩn thành xác suất chẩn đoán**. Hãy dùng kết quả để rà soát nghiên cứu và nhờ người có chuyên môn xác minh.
+
+## Các file chính
+
+| File | Vai trò |
+|---|---|
+| `PigSkinTech/main.py` | Giao diện Flet và điều hướng các màn hình |
+| `PigSkinTech/services/inference.py` | Kiểm tra ảnh, tìm run và gọi suy luận |
+| `PigSkinTech/services/inference_worker.py` | Nạp checkpoint bằng PyTorch/TorchVision và trả điểm dự đoán |
+| `PigSkinTech/services/project_data.py` | Đọc cấu hình, metric, manifest và thống kê run |
+| `PigSkinTech/services/store.py` | Lưu hồ sơ và trạng thái rà soát cục bộ |
+| `.gitignore` | Loại dataset, checkpoint, database và artifact cục bộ khỏi Git |

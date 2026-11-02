@@ -1,0 +1,123 @@
+{
+  "model": "mobilenet_v2",
+  "label_mode": "single",
+  "classes": [
+    "Healthy",
+    "Infected_Bacterial_Erysipelas",
+    "Infected_Bacterial_Greasy_Pig_Disease",
+    "Infected_Environmental_Dermatitis",
+    "Infected_Environmental_Sunburn",
+    "Infected_Fungal_Pityriasis_Rosea",
+    "Infected_Fungal_Ringworm",
+    "Infected_Parasitic_Mange",
+    "Infected_Viral_Foot_and_Mouth_Disease",
+    "Infected_Viral_Swinepox"
+  ],
+  "class_to_index": {
+    "Healthy": 0,
+    "Infected_Bacterial_Erysipelas": 1,
+    "Infected_Bacterial_Greasy_Pig_Disease": 2,
+    "Infected_Environmental_Dermatitis": 3,
+    "Infected_Environmental_Sunburn": 4,
+    "Infected_Fungal_Pityriasis_Rosea": 5,
+    "Infected_Fungal_Ringworm": 6,
+    "Infected_Parasitic_Mange": 7,
+    "Infected_Viral_Foot_and_Mouth_Disease": 8,
+    "Infected_Viral_Swinepox": 9
+  },
+  "image_size": 224,
+  "normalization": {
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ]
+  },
+  "augmentation": {
+    "enabled": true,
+    "horizontal_flip_probability": 0.5,
+    "rotation_degrees": 10.0,
+    "brightness": 0.1,
+    "contrast": 0.1,
+    "saturation": 0.05,
+    "hue": 0.0
+  },
+  "multilabel_threshold": 0.5,
+  "pretrained": true,
+  "weights_source": "torchvision ImageNet DEFAULT",
+  "epochs": 30,
+  "head_epochs": 5,
+  "head_lr": 0.001,
+  "finetune_lr": 0.0001,
+  "batch_size": 16,
+  "num_workers": 0,
+  "weight_decay": 0.0001,
+  "early_stopping_patience": 12,
+  "seed": 42,
+  "optimizer": "Adam",
+  "loss": "CrossEntropyLoss",
+  "manifest": "E:\\code\\PigSkinResearchStudio\\data\\splits\\pig_skin_single_label_v4\\manifest.csv",
+  "manifest_sha256": "a0495be4d254b981442ede9d8e481465ed72a70dd3597d7a6ca07eda81a6416c",
+  "summary": {
+    "rows": 2017,
+    "split_counts": {
+      "test": 201,
+      "train": 1576,
+      "val": 240
+    },
+    "class_counts": {
+      "train": {
+        "Healthy": 202,
+        "Infected_Bacterial_Erysipelas": 151,
+        "Infected_Bacterial_Greasy_Pig_Disease": 159,
+        "Infected_Environmental_Dermatitis": 136,
+        "Infected_Environmental_Sunburn": 154,
+        "Infected_Fungal_Pityriasis_Rosea": 168,
+        "Infected_Fungal_Ringworm": 146,
+        "Infected_Parasitic_Mange": 189,
+        "Infected_Viral_Foot_and_Mouth_Disease": 132,
+        "Infected_Viral_Swinepox": 139
+      },
+      "val": {
+        "Healthy": 31,
+        "Infected_Bacterial_Erysipelas": 30,
+        "Infected_Bacterial_Greasy_Pig_Disease": 17,
+        "Infected_Environmental_Dermatitis": 25,
+        "Infected_Environmental_Sunburn": 24,
+        "Infected_Fungal_Pityriasis_Rosea": 17,
+        "Infected_Fungal_Ringworm": 24,
+        "Infected_Parasitic_Mange": 24,
+        "Infected_Viral_Foot_and_Mouth_Disease": 27,
+        "Infected_Viral_Swinepox": 21
+      },
+      "test": {
+        "Healthy": 26,
+        "Infected_Bacterial_Erysipelas": 14,
+        "Infected_Bacterial_Greasy_Pig_Disease": 31,
+        "Infected_Environmental_Dermatitis": 21,
+        "Infected_Environmental_Sunburn": 13,
+        "Infected_Fungal_Pityriasis_Rosea": 26,
+        "Infected_Fungal_Ringworm": 13,
+        "Infected_Parasitic_Mange": 20,
+        "Infected_Viral_Foot_and_Mouth_Disease": 21,
+        "Infected_Viral_Swinepox": 16
+      }
+    },
+    "groups": 2017,
+    "cross_split_group_leaks": 0,
+    "cross_split_exact_hash_leaks": 0
+  },
+  "device_requested": "cuda",
+  "device": "cuda",
+  "gpu_name": "NVIDIA GeForce RTX 4050 Laptop GPU",
+  "gpu_memory_gib": 5.99658203125,
+  "deterministic_algorithms": true,
+  "cublas_workspace_config": ":4096:8",
+  "torch_version": "2.5.1+cu121",
+  "torchvision_version": "0.20.1+cu121"
+}

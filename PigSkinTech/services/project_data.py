@@ -50,12 +50,19 @@ def training_roots():
 
 def _run_candidates():
     candidates = []
+    runs_directories = []
     for root in training_roots():
         runs_dir = root / "ml_workspace" / "runs"
         if not runs_dir.is_dir() and root.name == "ml_workspace":
             runs_dir = root / "runs"
-        if not runs_dir.is_dir():
-            continue
+        if runs_dir.is_dir() and runs_dir not in runs_directories:
+            runs_directories.append(runs_dir)
+
+    bundled_runs = APP_ROOT / "models" / "runs"
+    if bundled_runs.is_dir() and bundled_runs not in runs_directories:
+        runs_directories.append(bundled_runs)
+
+    for runs_dir in runs_directories:
         for folder in runs_dir.iterdir():
             if not folder.is_dir():
                 continue
@@ -110,7 +117,9 @@ def active_run():
 
     manifest_path = Path(config.get("manifest", ""))
     if not manifest_path.is_absolute():
-        manifest_path = (training_roots()[0] / manifest_path).resolve()
+        roots = training_roots()
+        manifest_root = roots[0] if roots else folder
+        manifest_path = (manifest_root / manifest_path).resolve()
     data = None
     if manifest_path.is_file():
         try:

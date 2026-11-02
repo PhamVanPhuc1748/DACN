@@ -22,3 +22,15 @@ dist/
 # Hệ điều hành
 .DS_Store
 Thumbs.db
+
+# PigSkin desktop runtime files and model weights
+PigSkinTech/.venv/
+PigSkinTech/__pycache__/
+PigSkinTech/**/__pycache__/
+PigSkinTech/*.pyc
+PigSkinTech/**/*.pyc
+PigSkinTech/pigskin_history.db*
+PigSkinTech/case_images/
+PigSkinTech/models/*.pth
+PigSkinTech/models/*.pt
+PigSkinTech/models/*.onnx

@@ -1,0 +1,3 @@
+flet==0.28.3
+Pillow>=12,<13
+# For real inference separately install matching torch and torchvision builds.

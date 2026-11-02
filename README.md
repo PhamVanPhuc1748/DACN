@@ -19,6 +19,10 @@ DACN/
 │   │   ├── components/    # Layout, Sidebar, Bounding Box Canvas
 │   │   └── services/      # Kết nối API FastAPI & quản lý lịch sử
 │   └── package.json
+├── PigSkinTech/           # Ứng dụng nghiên cứu desktop độc lập bằng Python Flet (devN)
+│   ├── main.py
+│   ├── services/          # Suy luận MobileNetV2 và lưu trữ SQLite cục bộ
+│   └── requirements.txt
 ├── ml_workspace/          # Môi trường nghiên cứu & huấn luyện mô hình Deep Learning
 │   ├── src/               # data_loader, model, train, evaluate, utils
 │   ├── notebooks/         # Jupyter Notebooks thực nghiệm
@@ -37,7 +41,7 @@ DACN/
 
 ## 🚀 Hướng dẫn khởi chạy ứng dụng Desktop
 
-### Cách 1: Khởi chạy 1-click (Khuyên dùng trên Windows)
+### Cách 1: Khởi chạy 1-click Web Fullstack (Khuyên dùng trên Windows)
 Chỉ cần nhấp đúp chuột vào file:
 👉 **`run_app.bat`**
 Hệ thống sẽ tự động bật Backend, bật Frontend và mở giao diện ứng dụng trên trình duyệt máy tính của bạn tại:
@@ -62,3 +66,12 @@ npm install
 npm run dev
 ```
 Mở trình duyệt truy cập: `http://localhost:5173/`.
+
+### Cách 3: Ứng dụng nghiên cứu desktop Flet (PigSkinTech từ devN)
+```powershell
+cd PigSkinTech
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
+```
+Ứng dụng lưu database và ảnh hồ sơ cục bộ; các dữ liệu runtime, dataset và model weights không được commit. Muốn bật suy luận MobileNetV2 cần cung cấp checkpoint tương thích tại `PigSkinTech/models/best.pth` cùng `PigSkinTech/models/classes.json` theo đúng thứ tự nhãn huấn luyện.

@@ -1,6 +1,6 @@
 # Đồ án Chuyên ngành: Ứng dụng Phát hiện Bệnh trên Da Heo (Desktop App)
 
-Hệ thống ứng dụng Desktop kết hợp Deep Learning (Computer Vision) và FastAPI Backend để chẩn đoán, phát hiện các bệnh da liễu phổ biến ở heo thông qua hình ảnh.
+Hệ thống ứng dụng Desktop nguyên bản (Python Flet) kết hợp Deep Learning (Computer Vision) để chẩn đoán, phát hiện các bệnh da liễu phổ biến ở heo thông qua hình ảnh.
 
 ---
 
@@ -8,23 +8,20 @@ Hệ thống ứng dụng Desktop kết hợp Deep Learning (Computer Vision) v�
 
 ```text
 DACN/
-├── backend/               # API Server xử lý tiền xử lý ảnh và chạy suy luận mô hình (FastAPI)
+├── PigSkinTech/           # Ứng dụng Desktop chính (Flet Desktop UI từ devN)
+│   ├── main.py            # Giao diện chính (Tổng quan, Phân tích ảnh, Lịch sử, Dataset, Huấn luyện, Mô hình)
+│   ├── services/
+│   │   ├── inference.py   # Module nạp trọng số MobileNetV2 và chạy suy luận ảnh
+│   │   └── store.py       # Cơ sở dữ liệu SQLite cục bộ (pigskin_history.db) và lưu trữ ảnh ca bệnh
+│   ├── models/            # Trọng số mô hình (.pth) và danh sách nhãn classes.json
+│   ├── requirements.txt   # Thư viện phục vụ Desktop App (flet, Pillow, torch, torchvision)
+│   └── README.md
+├── backend/               # API Server dự phòng (FastAPI)
 │   ├── app/
-│   │   ├── main.py        # Các endpoints (/predict, /health, CORS)
+│   │   ├── main.py        # Các endpoints (/predict, /health)
 │   │   └── ...
-│   └── requirements.txt   # Thư viện phục vụ backend
-├── frontend/              # Giao diện ứng dụng Desktop (React + Vite + TailwindCSS)
-│   ├── src/
-│   │   ├── pages/         # Dashboard, Phân tích (Analyze), Lịch sử (History), Model info
-│   │   ├── components/    # Layout, Sidebar, Bounding Box Canvas
-│   │   └── services/      # Kết nối API FastAPI & quản lý lịch sử
-│   └── package.json
-├── PigSkinTech/           # Ứng dụng nghiên cứu desktop độc lập bằng Python Flet (devN)
-│   ├── main.py
-│   ├── services/          # Suy luận MobileNetV2 và lưu trữ SQLite cục bộ
 │   └── requirements.txt
 ├── ml_workspace/          # Môi trường nghiên cứu & huấn luyện mô hình Deep Learning
-│   ├── src/               # data_loader, model, train, evaluate, utils
 │   ├── notebooks/         # Jupyter Notebooks thực nghiệm
 │   └── weights/           # Trọng số mô hình (.pt, .onnx)
 ├── data/                  # Dữ liệu ảnh thô và manifest phân chia (không push git)
@@ -32,46 +29,33 @@ DACN/
 │   ├── splits/            # File manifest phân tầng (train.csv, val.csv, test.csv)
 │   └── reports/           # Thống kê phân bố nhãn
 ├── docs/                  # Tài liệu phân tích, kiến trúc hệ thống và báo cáo đồ án
-├── run_app.bat            # Script khởi chạy 1-click toàn bộ hệ thống trên Desktop
-├── plan.md                # Kế hoạch chi tiết phân chia dataset chống rò rỉ dữ liệu
-└── app_roadmap_plan.md    # Kế hoạch phát triển các tính năng ứng dụng thực tế
+├── run_app.bat            # Script khởi chạy 1-click ứng dụng Desktop (Flet)
+└── run_app.py             # Script Python khởi chạy ứng dụng Desktop
 ```
 
 ---
 
 ## 🚀 Hướng dẫn khởi chạy ứng dụng Desktop
 
-### Cách 1: Khởi chạy 1-click Web Fullstack (Khuyên dùng trên Windows)
+### Cách 1: Khởi chạy 1-click (Khuyên dùng trên Windows)
 Chỉ cần nhấp đúp chuột vào file:
 👉 **`run_app.bat`**
-Hệ thống sẽ tự động bật Backend, bật Frontend và mở giao diện ứng dụng trên trình duyệt máy tính của bạn tại:
-- **Giao diện Desktop:** [http://localhost:5173/](http://localhost:5173/)
-- **Tài liệu API Swagger:** [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+Hệ thống sẽ tự động khởi chạy giao diện Desktop **PigSkin AI Studio** (Flet).
 
-### Cách 2: Khởi chạy thủ công từng phần
-
-#### 1. Khởi động Backend (FastAPI)
-```bash
-# Kích hoạt môi trường ảo
-.\venv\Scripts\activate
-
-# Khởi chạy server FastAPI tại port 8000
-python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --reload
-```
-
-#### 2. Khởi động Frontend (React / Vite)
-```bash
-cd frontend
-npm install
-npm run dev
-```
-Mở trình duyệt truy cập: `http://localhost:5173/`.
-
-### Cách 3: Ứng dụng nghiên cứu desktop Flet (PigSkinTech từ devN)
+### Cách 2: Khởi chạy bằng lệnh qua Terminal
 ```powershell
+# Kích hoạt môi trường và chạy trực tiếp
+.\venv\Scripts\python.exe run_app.py
+
+# Hoặc chạy từ trong thư mục PigSkinTech:
 cd PigSkinTech
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe main.py
+..\venv\Scripts\python.exe main.py
 ```
-Ứng dụng lưu database và ảnh hồ sơ cục bộ; các dữ liệu runtime, dataset và model weights không được commit. Muốn bật suy luận MobileNetV2 cần cung cấp checkpoint tương thích tại `PigSkinTech/models/best.pth` cùng `PigSkinTech/models/classes.json` theo đúng thứ tự nhãn huấn luyện.
+
+---
+
+## 💡 Điểm nổi bật của giao diện Desktop (Flet)
+1. **Giao diện Command Center:** Hỗ trợ chuyển đổi mượt mà giữa 2 giao diện Sáng (Light) và Tối (Dark).
+2. **Quản lý ca bệnh hoàn chỉnh:** Nhập mã số heo (Ear Tag), trang trại, vị trí vết thương, ngày khởi phát và các triệu chứng lâm sàng.
+3. **Lưu trữ cục bộ:** Tự động tạo bản sao lưu ảnh gốc vào `case_images/` và lưu trữ lịch sử kiểm tra trong SQLite `pigskin_history.db`.
+4. **Hỗ trợ suy luận trực tiếp:** Sẵn sàng tích hợp trọng số MobileNetV2 (`models/best.pth` và `models/classes.json`).

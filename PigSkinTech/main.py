@@ -1,11 +1,14 @@
 """PigSkin AI Studio - original desktop research dashboard (Flet 0.28.3)."""
 import base64
 import asyncio
+import random
 from collections import Counter
 from datetime import datetime
 import json
 import flet as ft
 from pathlib import Path
+from io import BytesIO
+from PIL import Image as PILImage, ImageOps, UnidentifiedImageError
 from services.inference import inspect_image,predict,model_ready,model_status
 from services.project_data import active_run,display_class
 from services.store import recent,save,delete,update_review,update_case
@@ -112,19 +115,102 @@ def main(page:ft.Page):
     subtitle=label('Theo dõi sức khỏe da heo',12,QUIET)
     screen_switcher=ft.AnimatedSwitcher(
         content=ft.Column(expand=True,scroll=ft.ScrollMode.AUTO,spacing=17),
-        duration=170,reverse_duration=120,
+        duration=220,reverse_duration=165,
         switch_in_curve=ft.AnimationCurve.EASE_OUT,
         switch_out_curve=ft.AnimationCurve.EASE_IN,
-        transition=ft.AnimatedSwitcherTransition.FADE,
+        transition=ft.AnimatedSwitcherTransition.SCALE,
         expand=True)
     nav=[]
     active_page={'index':0}
     theme_choice={'value':'light'}
+    particle_motion={'enabled':True}
+    motion_button_ref={'control':None}
+    particle_states=[]
+    particle_icons=(ft.Icons.PETS,ft.Icons.AGRICULTURE,ft.Icons.GRASS,
+        ft.Icons.CAMERA_ALT_OUTLINED,ft.Icons.HEALTH_AND_SAFETY_OUTLINED,
+        ft.Icons.WATER_DROP_OUTLINED,ft.Icons.MEDICAL_SERVICES_OUTLINED,ft.Icons.BIOTECH)
+    particle_layer=ft.Stack(left=0,top=0,right=0,bottom=0,clip_behavior=ft.ClipBehavior.HARD_EDGE)
+
+    def toggle_particle_motion(e):
+        particle_motion['enabled']=not particle_motion['enabled']
+        for state in particle_states:
+            state['control'].opacity=state['opacity'] if particle_motion['enabled'] else 0
+        button=motion_button_ref['control']
+        if button:
+            button.icon=ft.Icons.ANIMATION if particle_motion['enabled'] else ft.Icons.MOTION_PHOTOS_OFF
+            button.tooltip='Tắt hiệu ứng icon nền' if particle_motion['enabled'] else 'Bật hiệu ứng icon nền'
+        page.update()
+
+    def seed_particles():
+        width=float(page.window.width or 1510)
+        height=float(page.window.height or 920)
+        palette_colors=(PRIMARY,GREEN,PINK,SLATE)
+        for icon in particle_icons:
+            size=random.randint(17,29)
+            opacity=random.uniform(.15,.25)
+            control=ft.Container(width=size,height=size,
+                left=random.uniform(0,max(1,width-size)),
+                top=random.uniform(0,max(1,height-size)),
+                opacity=opacity,
+                rotate=random.uniform(-.15,.15),
+                animate_position=ft.Animation(1450,ft.AnimationCurve.LINEAR),
+                animate_rotation=ft.Animation(1450,ft.AnimationCurve.LINEAR),
+                animate_opacity=ft.Animation(220,ft.AnimationCurve.EASE_OUT),
+                content=ft.Icon(icon,color=random.choice(palette_colors),size=size))
+            particle_layer.controls.append(control)
+            particle_states.append({
+                'control':control,'x':control.left,'y':control.top,'size':size,
+                'speed':random.uniform(10,28),'drift':random.uniform(-9,9),
+                'rotation':control.rotate,'opacity':opacity,
+            })
+
+    async def animate_particles():
+        while True:
+            await asyncio.sleep(1.45)
+            if not particle_motion['enabled']:
+                continue
+            width=float(page.width or page.window.width or 1510)
+            height=float(page.height or page.window.height or 920)
+            for state in particle_states:
+                state['x']+=state['drift']+random.uniform(-9,9)
+                state['y']+=state['speed']+random.uniform(-5,7)
+                if state['x'] < -state['size']:
+                    state['x']=width
+                elif state['x'] > width:
+                    state['x']=-state['size']
+                if state['y'] > height+state['size']:
+                    state['x']=random.uniform(0,max(1,width-state['size']))
+                    state['y']=-state['size']-random.uniform(0,height*.12)
+                state['rotation']+=random.uniform(-.12,.12)
+                state['control'].left=state['x']
+                state['control'].top=state['y']
+                state['control'].rotate=state['rotation']
+            page.update()
+
+    seed_particles()
 
     def notify(message,color=None):
         color=PRIMARY if color is None else color
         page.snack_bar=ft.SnackBar(content=label(message,13,INK),bgcolor=PANEL)
         page.snack_bar.open=True;page.update()
+
+    def case_thumbnail(image_path,size=48):
+        path=Path(image_path or '')
+        if path.is_file():
+            try:
+                with PILImage.open(path) as source:
+                    thumb=ImageOps.fit(source.convert('RGB'),(size*2,size*2))
+                    buffer=BytesIO()
+                    thumb.save(buffer,format='JPEG',quality=72,optimize=True)
+                preview=ft.Image(src_base64=base64.b64encode(buffer.getvalue()).decode('ascii'),
+                    width=size,height=size,fit=ft.ImageFit.COVER)
+            except (OSError,UnidentifiedImageError,ValueError):
+                preview=ft.Icon(ft.Icons.IMAGE_SEARCH_OUTLINED,size=20,color=QUIET)
+        else:
+            preview=ft.Icon(ft.Icons.IMAGE_SEARCH_OUTLINED,size=20,color=QUIET)
+        return ft.Container(width=size,height=size,bgcolor=INNER,border=ft.border.all(1,BORDER),
+            border_radius=7,clip_behavior=ft.ClipBehavior.ANTI_ALIAS,alignment=ft.alignment.center,
+            content=preview)
 
     def dashboard():
         rows=recent()
@@ -161,14 +247,30 @@ def main(page:ft.Page):
             confidence=f" • {item['confidence']*100:.1f}% softmax" if item['confidence'] is not None else ''
             context=' • '.join(value for value in (item.get('farm_name'),item.get('body_site')) if value)
             queue_lines.append(ft.Container(padding=9,border=ft.border.only(bottom=ft.BorderSide(1,BORDER)),
-                content=ft.Row([ft.Column([label(f"{item.get('case_id') or 'Hồ sơ cũ'}  /  {item.get('animal_id') or 'Chưa gắn mã cá thể'}",12,PRIMARY,True),
+                content=ft.Row([case_thumbnail(item.get('image_path')),
+                    ft.Column([label(f"{item.get('case_id') or 'Hồ sơ cũ'}  /  {item.get('animal_id') or 'Chưa gắn mã cá thể'}",12,PRIMARY,True),
                     label(f"{item['filename']} • {context or 'Chưa có thông tin vị trí/cơ sở'}",10),
                     label(f"{prediction}{confidence}",11,INK)],spacing=3,expand=True),
-                    label(review_labels.get(status,'CHỜ RÀ SOÁT'),9,STRAW if status=='needs_review' else GREEN,True)])))
+                    label(review_labels.get(status,'CHỜ RÀ SOÁT'),9,STRAW if status=='needs_review' else GREEN,True)],spacing=11)))
+        empty_guide=ft.Row([
+            ft.Container(expand=1,padding=10,border=ft.border.all(1,BORDER),border_radius=7,
+                on_click=lambda _:navigate(1),ink=True,content=ft.Column([
+                    ft.Row([ft.Icon(ft.Icons.ADD_A_PHOTO,color=PRIMARY,size=17),label('Tiếp nhận ảnh',12,INK,True)],spacing=7),
+                    label('Chọn ảnh vùng da cần xem.',11)])),
+            ft.Container(expand=1,padding=10,border=ft.border.all(1,BORDER),border_radius=7,
+                on_click=lambda _:navigate(1),ink=True,content=ft.Column([
+                    ft.Row([ft.Icon(ft.Icons.ASSIGNMENT_OUTLINED,color=SLATE,size=17),label('Ghi nhận ca',12,INK,True)],spacing=7),
+                    label('Thêm mã heo và dấu hiệu.',11)])),
+            ft.Container(expand=1,padding=10,border=ft.border.all(1,BORDER),border_radius=7,
+                on_click=lambda _:navigate(2),ink=True,content=ft.Column([
+                    ft.Row([ft.Icon(ft.Icons.FACT_CHECK_OUTLINED,color=GREEN,size=17),label('Rà soát',12,INK,True)],spacing=7),
+                    label('Kiểm tra lại gợi ý AI.',11)])),
+        ],spacing=8)
         cases=block([ft.Row([caption_head('Hồ sơ cần theo dõi','Ảnh và nhận định mới nhất',ft.Icons.VIEW_LIST),
                     ft.Container(expand=True),ft.TextButton('MỞ LỊCH SỬ',on_click=lambda _:navigate(2))]),
-                    *(queue_lines or [label('Chưa có hồ sơ. Tạo ca đầu tiên từ màn hình Phân tích ảnh.',12)]),
-                    ft.TextButton('TIẾP NHẬN ẢNH MỚI',icon=ft.Icons.ADD_A_PHOTO,on_click=lambda _:navigate(1))],expand=3,padding=14)
+                    *(queue_lines or [label('Chưa có hồ sơ trong database trên thiết bị này.',12),empty_guide]),
+                    *([ft.TextButton('TIẾP NHẬN ẢNH MỚI',icon=ft.Icons.ADD_A_PHOTO,on_click=lambda _:navigate(1))] if queue_lines else [])],
+                    expand=3,padding=14)
         system=block([caption_head('Thiết bị nghiên cứu','Các thành phần ứng dụng',ft.Icons.HUB),
             ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE,color=GREEN,size=17),label('Ứng dụng máy tính',11,INK,True)]),
             ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE,color=GREEN,size=17),label('Lưu hồ sơ trên thiết bị',11,INK,True)]),
@@ -716,6 +818,7 @@ def main(page:ft.Page):
             scroll=ft.ScrollMode.AUTO,spacing=16)
         for n,b in enumerate(nav):
             b.bgcolor=NAV_SELECTED if n==index else SIDEBAR
+            b.border=ft.border.only(left=ft.BorderSide(2,PRIMARY if n==index else SIDEBAR))
             b.content.controls[0].color=PRIMARY if n==index else QUIET
             b.content.controls[1].color=INK if n==index else QUIET
         page.update()
@@ -724,6 +827,8 @@ def main(page:ft.Page):
         render_shell(active_page['index'])
     def render_shell(index):
         apply_palette(theme_choice['value'])
+        for state in particle_states:
+            state['control'].content.color=random.choice((PRIMARY,GREEN,PINK,SLATE))
         page.bgcolor=BG
         page.theme_mode=ft.ThemeMode.LIGHT if theme_choice['value']=='light' else ft.ThemeMode.DARK
         page.theme=ft.Theme(color_scheme_seed=PRIMARY,font_family='Segoe UI',visual_density=ft.VisualDensity.STANDARD)
@@ -746,9 +851,10 @@ def main(page:ft.Page):
             nav.append(ft.Container(ink=True,bgcolor=NAV_SELECTED if idx==index else SIDEBAR,
                 padding=ft.padding.symmetric(horizontal=12,vertical=11),border_radius=7,
                 animate=ft.Animation(150,ft.AnimationCurve.EASE_OUT),
+                border=ft.border.only(left=ft.BorderSide(2,PRIMARY if idx==index else SIDEBAR)),
                 on_click=lambda e,i=idx:navigate(i),content=ft.Row([ft.Icon(icon,size=18,color=PRIMARY if idx==index else QUIET),
                     label(name,13,INK if idx==index else QUIET,idx==index)],spacing=11)))
-        sidebar=ft.Container(width=228,bgcolor=SIDEBAR,padding=16,
+        sidebar=ft.Container(width=228,bgcolor=ft.Colors.with_opacity(.76,SIDEBAR),padding=16,
             content=ft.Column([
             ft.Row([pig_mark(42),
                 ft.Column([label('PigSkin AI',18,INK,True),label('Nghiên cứu da heo',11,QUIET)],spacing=2)]),
@@ -764,6 +870,11 @@ def main(page:ft.Page):
         theme_button=ft.IconButton(icon=ft.Icons.LIGHT_MODE if theme_choice['value']=='dark' else ft.Icons.DARK_MODE,
             tooltip='Chuyển sang giao diện sáng' if theme_choice['value']=='dark' else 'Chuyển sang giao diện tối',
             on_click=toggle_theme)
+        motion_button=ft.IconButton(
+            icon=ft.Icons.ANIMATION if particle_motion['enabled'] else ft.Icons.MOTION_PHOTOS_OFF,
+            tooltip='Tắt hiệu ứng icon nền' if particle_motion['enabled'] else 'Bật hiệu ứng icon nền',
+            on_click=toggle_particle_motion)
+        motion_button_ref['control']=motion_button
         header=ft.Container(bgcolor=PANEL,height=58,
             padding=ft.padding.symmetric(horizontal=24,vertical=8),
             border=ft.border.only(bottom=ft.BorderSide(1,BORDER)),content=ft.Row([
@@ -771,15 +882,17 @@ def main(page:ft.Page):
                 ft.Container(bgcolor=INNER,border_radius=6,padding=ft.padding.symmetric(horizontal=10,vertical=7),
                     content=ft.Row([ft.Container(width=7,height=7,bgcolor=GREEN if model_ready() else STRAW,border_radius=4),
                         label('Checkpoint sẵn sàng' if model_ready() else 'Chưa có checkpoint',11,INK)] ,spacing=7)),
-                theme_button],spacing=12))
+                motion_button,theme_button],spacing=8))
         workspace=ft.Container(expand=True,bgcolor=PANEL,border=ft.border.all(1,BORDER),border_radius=16,
             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,content=ft.Column([
                 header,ft.Container(content=screen_switcher,padding=24,expand=True)],expand=True,spacing=0))
         page.controls.clear()
-        page.add(ft.Container(expand=True,bgcolor=BG,padding=8,
-            content=ft.Row([sidebar,workspace],spacing=8,expand=True,vertical_alignment=ft.CrossAxisAlignment.STRETCH)))
+        shell=ft.Container(expand=True,padding=8,
+            content=ft.Row([sidebar,workspace],spacing=8,expand=True,vertical_alignment=ft.CrossAxisAlignment.STRETCH))
+        page.add(ft.Stack(expand=True,controls=[particle_layer,shell],clip_behavior=ft.ClipBehavior.HARD_EDGE))
         navigate(index)
     render_shell(0)
+    page.run_task(animate_particles)
 
 if __name__=='__main__':
     ft.app(target=main)

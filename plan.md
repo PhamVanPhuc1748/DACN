@@ -164,3 +164,6 @@ DACN/
 | **2** | Viết và chạy `ml_workspace/src/dataset_cleaner.py` tạo `data/splits/v1/` | Bộ file manifest `.csv` và `dataset_info.yaml` |
 | **3** | Chạy kiểm tra tự động `verify_splits.py` | 100% test pass (Zero Leakage, Zero Missing) |
 | **4** | Hoàn thiện `data_loader.py` trong `ml_workspace` | DataLoader sẵn sàng kết nối vào `train.py` |
+## Cập nhật vị trí công cụ ML (2026-10-27)
+
+Theo yêu cầu tách GUI khỏi repo, code train, audit, review, split và manifest generator đã được chuyển sang `E:\code\PigSkinResearchStudio`. Các đường dẫn `ml_workspace/src/` trong kế hoạch dưới đây là mô tả lịch sử/ý tưởng, không còn là vị trí code hiện hành trong DACN.

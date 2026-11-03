@@ -10,7 +10,7 @@ from pathlib import Path
 from io import BytesIO
 from PIL import Image as PILImage, ImageOps, UnidentifiedImageError
 from services.inference import inspect_image,predict,model_ready,model_status
-from services.project_data import active_run,display_class
+from services.project_data import active_run,available_model_runs,display_class,APP_MODEL_NAMES
 from services.store import recent,save,delete,update_review,update_case
 
 PALETTES={
@@ -52,9 +52,17 @@ def caption_head(title,sub=None,icon=None):
 
 def kpi(name,value,icon,color=None,sub=''):
     color=PRIMARY if color is None else color
+    def icon_hover(e):
+        e.control.rotate=.10 if e.data=='true' else 0
+        e.control.update()
+    icon_mark=ft.Container(width=30,height=30,bgcolor=INNER,border_radius=8,
+        alignment=ft.alignment.center,rotate=0,
+        animate_rotation=ft.Animation(180,ft.AnimationCurve.EASE_OUT),
+        on_hover=icon_hover,
+        content=ft.Icon(icon,color=color,size=17))
     return ft.Container(expand=1,bgcolor=PANEL,padding=ft.padding.symmetric(horizontal=16,vertical=14),
          border=ft.border.only(right=ft.BorderSide(1,BORDER)),
-         content=ft.Column([label(name,12,QUIET,True),label(value,28,INK),
+         content=ft.Column([ft.Row([label(name,12,QUIET,True),ft.Container(expand=True),icon_mark]),label(value,28,INK),
             label(sub,11,color)],spacing=5))
 
 def meter(name,value,color=None,caption=''):
@@ -62,16 +70,22 @@ def meter(name,value,color=None,caption=''):
     return ft.Column([ft.Row([label(name,12,INK),ft.Container(expand=True),label(f'{value*100:.1f}%',12,color,True)]),
         ft.ProgressBar(value=value,color=color,bgcolor=BAR_BG,bar_height=6),label(caption,11)],spacing=8)
 
-def pig_mark(size=42):
+def pig_mark(size=42,animation_ref=None):
     """Small pig-snout mark used as the app's subject-specific visual cue."""
-    return ft.Container(width=size,height=size,bgcolor=CHIP_BG,border_radius=13,
+    snout=ft.Container(width=32,height=21,bgcolor=PINK,
+        border=ft.border.all(.55,'#303630'),border_radius=10,
+        alignment=ft.alignment.center,scale=1.0,rotate=0,
+        animate_scale=ft.Animation(760,ft.AnimationCurve.EASE_IN_OUT),
+        animate_rotation=ft.Animation(760,ft.AnimationCurve.EASE_IN_OUT),
+        content=ft.Row([
+            ft.Container(width=4,height=7,bgcolor='#75464B',border_radius=4),
+            ft.Container(width=4,height=7,bgcolor='#75464B',border_radius=4),
+        ],alignment=ft.MainAxisAlignment.CENTER,spacing=6))
+    if animation_ref is not None:
+        animation_ref['control']=snout
+    return ft.Container(width=size,height=size,bgcolor=PANEL,border=ft.border.all(1,BORDER),border_radius=13,
         alignment=ft.alignment.center,
-        content=ft.Container(width=29,height=19,bgcolor=PINK,border_radius=9,
-            alignment=ft.alignment.center,
-            content=ft.Row([
-                ft.Container(width=4,height=7,bgcolor='#75464B',border_radius=4),
-                ft.Container(width=4,height=7,bgcolor='#75464B',border_radius=4),
-            ],alignment=ft.MainAxisAlignment.CENTER,spacing=6)))
+        content=snout)
 
 def skin_scan_motif(size=104):
     """A small, abstract skin-scan illustration for image-related empty states."""
@@ -110,7 +124,12 @@ def main(page:ft.Page):
     page.bgcolor=BG; page.theme_mode=ft.ThemeMode.LIGHT
     page.window.width=1510;page.window.height=920;page.window.min_width=1000;page.window.min_height=690
     page.theme=ft.Theme(color_scheme_seed=PRIMARY,font_family='Segoe UI',visual_density=ft.VisualDensity.STANDARD)
-    selected={'path':None,'info':None,'result':None,'record_id':None}
+    model_runs=available_model_runs()
+    default_model=model_runs.get('mobilenet_v2') or next(iter(model_runs.values()),None)
+    selected={'path':None,'info':None,'result':None,'record_id':None,
+              'model_run':default_model['name'] if default_model else None}
+    def selected_model_run():
+        return next((run for run in model_runs.values() if run['name']==selected['model_run']),None)
     page_title=label('Tổng quan',22,INK,True)
     subtitle=label('Theo dõi sức khỏe da heo',12,QUIET)
     screen_switcher=ft.AnimatedSwitcher(
@@ -125,6 +144,7 @@ def main(page:ft.Page):
     theme_choice={'value':'light'}
     particle_motion={'enabled':True}
     motion_button_ref={'control':None}
+    dashboard_pig_ref={'control':None,'phase':False}
     particle_states=[]
     particle_icons=(ft.Icons.PETS,ft.Icons.AGRICULTURE,ft.Icons.GRASS,
         ft.Icons.CAMERA_ALT_OUTLINED,ft.Icons.HEALTH_AND_SAFETY_OUTLINED,
@@ -135,10 +155,13 @@ def main(page:ft.Page):
         particle_motion['enabled']=not particle_motion['enabled']
         for state in particle_states:
             state['control'].opacity=state['opacity'] if particle_motion['enabled'] else 0
+        if dashboard_pig_ref['control'] and not particle_motion['enabled']:
+            dashboard_pig_ref['control'].scale=1.0
+            dashboard_pig_ref['control'].rotate=0
         button=motion_button_ref['control']
         if button:
             button.icon=ft.Icons.ANIMATION if particle_motion['enabled'] else ft.Icons.MOTION_PHOTOS_OFF
-            button.tooltip='Tắt hiệu ứng icon nền' if particle_motion['enabled'] else 'Bật hiệu ứng icon nền'
+            button.tooltip='Tắt hiệu ứng chuyển động' if particle_motion['enabled'] else 'Bật hiệu ứng chuyển động'
         page.update()
 
     def seed_particles():
@@ -185,6 +208,11 @@ def main(page:ft.Page):
                 state['control'].left=state['x']
                 state['control'].top=state['y']
                 state['control'].rotate=state['rotation']
+            if active_page['index']==0 and dashboard_pig_ref['control']:
+                dashboard_pig_ref['phase']=not dashboard_pig_ref['phase']
+                nose=dashboard_pig_ref['control']
+                nose.scale=1.045 if dashboard_pig_ref['phase'] else 1.0
+                nose.rotate=.035 if dashboard_pig_ref['phase'] else -.02
             page.update()
 
     seed_particles()
@@ -225,7 +253,7 @@ def main(page:ft.Page):
         inferred=len(inferred_rows)
         class_counts=Counter(item['predicted_class'] for item in inferred_rows)
         header=ft.Container(bgcolor=HEADER_BG,border=ft.border.all(1,BORDER),border_radius=12,padding=17,
-            content=ft.Row([pig_mark(46),
+            content=ft.Row([pig_mark(46,dashboard_pig_ref),
                 ft.Column([label('Trạm theo dõi sức khỏe đàn heo',21,INK,True),
                     label('Tiếp nhận ảnh da, ghi nhận dấu hiệu và xem lại kết quả nghiên cứu.',12)],spacing=4,expand=True),
                 skin_scan_motif(96),
@@ -358,6 +386,7 @@ def main(page:ft.Page):
         switch_in_curve=ft.AnimationCurve.EASE_OUT,expand=True)
     analysis_progress=ft.ProgressBar(value=None,color=PRIMARY,bgcolor=BAR_BG,visible=False)
     analysis_busy={'value':False}
+    model_selector_ref={'control':None}
     analysis_button=None
     choose_button=None
     clear_button=None
@@ -400,6 +429,16 @@ def main(page:ft.Page):
         if r and r.get('model_info'):
             controls.append(label(f"Mô hình: {r['model_info']}",10))
         result_switcher.content=ft.Column(controls,spacing=13)
+
+    def change_prediction_model(e):
+        selected['model_run']=e.control.value
+        selected['result']=None
+        chosen=selected_model_run()
+        title=APP_MODEL_NAMES.get(chosen['config'].get('model'),'Model AI') if chosen else 'Model AI'
+        notice.value=f'Đã chọn {title}. Hãy kiểm tra ảnh để chạy model này.'
+        notice.color=SLATE
+        render_result()
+        page.update()
 
     def selected_file(e):
         if not e.files: return
@@ -450,11 +489,12 @@ def main(page:ft.Page):
         if analysis_button: analysis_button.disabled=True
         if choose_button: choose_button.disabled=True
         if clear_button: clear_button.disabled=True
+        if model_selector_ref['control']: model_selector_ref['control'].disabled=True
         notice.value='Đang chạy mô hình trên ảnh…';notice.color=SLATE
         page.update()
         try:
             info=inspect_image(source_path)
-            result=await asyncio.to_thread(predict,source_path)
+            result=await asyncio.to_thread(predict,source_path,selected.get('model_run'))
             if selected['path']!=source_path:
                 return
             case={'animal_id':animal_id_field.value or '', 'farm_name':farm_field.value or '',
@@ -476,6 +516,8 @@ def main(page:ft.Page):
             if analysis_button: analysis_button.disabled=False
             if choose_button: choose_button.disabled=False
             if clear_button: clear_button.disabled=False
+            if model_selector_ref['control']:
+                model_selector_ref['control'].disabled=bool(selected['record_id'])
             page.update()
 
     def clear_image(e):
@@ -504,6 +546,21 @@ def main(page:ft.Page):
     def analysis():
         nonlocal analysis_button,choose_button,clear_button
         render_result()
+        model_options=[]
+        for model_name,run in model_runs.items():
+            score=run.get('validation_macro_f1')
+            text=APP_MODEL_NAMES[model_name]
+            if score is not None:
+                text+=f" • Val macro-F1 {score*100:.1f}% • {run['name']}"
+            model_options.append(ft.dropdown.Option(run['name'],text))
+        model_selector=ft.Dropdown(label='Model dự đoán',width=365,dense=True,
+            value=selected['model_run'],options=model_options,
+            on_change=change_prediction_model,disabled=not model_options or bool(selected['record_id']))
+        model_selector_ref['control']=model_selector
+        chosen_run=selected_model_run()
+        chosen_config=chosen_run['config'] if chosen_run else {}
+        chosen_model=APP_MODEL_NAMES.get(chosen_config.get('model'),'Chưa có model')
+        chosen_size=chosen_config.get('image_size',224)
         case_header=ft.Container(bgcolor=HEADER_BG,border=ft.border.all(1,BORDER),border_radius=12,padding=14,
             content=ft.Row([ft.Icon(ft.Icons.FOLDER_SHARED_OUTLINED,color=PRIMARY,size=22),
                 ft.Column([label('Hồ sơ tiếp nhận',11,PRIMARY,True),case_identifier],spacing=3,expand=True),
@@ -524,14 +581,22 @@ def main(page:ft.Page):
         result_panel=block([ft.Row([caption_head('Nhận định từ mô hình','Kết quả hỗ trợ nghiên cứu',ft.Icons.BIOTECH),
                     ft.Container(expand=True),ft.Container(bgcolor=CHIP_BG,padding=8,border_radius=6,
                         content=label('Phân loại ảnh',10,PINK,True))]),
+                    ft.Row([ft.Icon(ft.Icons.PSYCHOLOGY_OUTLINED,color=PRIMARY,size=18),
+                        label('Chọn mô hình',11,INK,True),ft.Container(expand=True),model_selector],spacing=7),
+                    label('Checkpoint được chọn theo validation macro-F1 trên cùng manifest v4.',10),
                     ft.Container(content=result_switcher,bgcolor=INNER,padding=18,border_radius=8,height=430,
                         alignment=ft.alignment.top_left),
                     ft.Divider(color=BORDER,height=1),
                     ft.Row([ft.Icon(ft.Icons.MEMORY,color=SLATE,size=17),
-                        label('MobileNetV2 • 10 lớp • input 224×224',11,INK,True)]),
-                    label('Checkpoint: '+('đã phát hiện file' if model_ready() else 'chưa tích hợp'),11,STRAW),
+                        label(f'{chosen_model} • {len(chosen_config.get("classes",[]))} lớp • input {chosen_size}×{chosen_size}',11,INK,True)]),
+                    label('Checkpoint: '+('đã phát hiện file' if chosen_run and model_ready(chosen_run['name']) else 'chưa tích hợp'),11,STRAW),
                     label('Đây là phân loại toàn ảnh; hiện chưa có bounding box/segmentation.',10),
-                    label('Softmax chưa hiệu chuẩn, không phải xác suất bệnh. Cần chuyên gia xác minh.',10,STRAW)],expand=2)
+                    label('Softmax chưa hiệu chuẩn, không phải xác suất bệnh.',10,STRAW),
+                    ft.Container(bgcolor=STATUS_BG,border=ft.border.all(1,BORDER),border_radius=8,padding=10,
+                        content=ft.Row([ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED,color=STRAW,size=20),
+                            ft.Column([label('Kết quả chỉ mang tính tham khảo',12,STRAW,True),
+                                label('Đây không phải chẩn đoán thú y. Cần bác sĩ thú y hoặc chuyên gia xác minh; không thay thế việc khám và kết luận chuyên môn.',11,INK)],
+                                spacing=3,expand=True)],spacing=8,vertical_alignment=ft.CrossAxisAlignment.START))],expand=2)
         clinical_context=block([ft.Row([caption_head('Thông tin quan sát','Ghi nhận tại thời điểm tiếp nhận, chưa phải kết luận bệnh',ft.Icons.ASSIGNMENT_OUTLINED),
                 ft.Container(expand=True),label('Lưu cùng hồ sơ',10,GREEN,True),
                 ft.OutlinedButton('Ca mới',icon=ft.Icons.ADD,on_click=start_new_case)]),
@@ -761,7 +826,7 @@ def main(page:ft.Page):
 
     def model():
         status=model_status()
-        run=status.get('run')
+        run=selected_model_run() or status.get('run')
         config=run.get('config',{}) if run else {}
         def dependency_row(name,path,available):
             color=GREEN if available else STRAW
@@ -872,7 +937,7 @@ def main(page:ft.Page):
             on_click=toggle_theme)
         motion_button=ft.IconButton(
             icon=ft.Icons.ANIMATION if particle_motion['enabled'] else ft.Icons.MOTION_PHOTOS_OFF,
-            tooltip='Tắt hiệu ứng icon nền' if particle_motion['enabled'] else 'Bật hiệu ứng icon nền',
+            tooltip='Tắt hiệu ứng chuyển động' if particle_motion['enabled'] else 'Bật hiệu ứng chuyển động',
             on_click=toggle_particle_motion)
         motion_button_ref['control']=motion_button
         header=ft.Container(bgcolor=PANEL,height=58,

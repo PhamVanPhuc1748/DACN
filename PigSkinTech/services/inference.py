@@ -13,8 +13,8 @@ MAX_BYTES = 10 * 1024 * 1024
 WORKER = ROOT / "services" / "inference_worker.py"
 
 
-def _current_run():
-    return active_run()
+def _current_run(run_name=None):
+    return active_run(run_name)
 
 
 def inspect_image(path):
@@ -45,8 +45,8 @@ def labels():
     return names
 
 
-def model_ready():
-    run = _current_run()
+def model_ready(run_name=None):
+    run = _current_run(run_name)
     return bool(run and run["checkpoint"].is_file() and run["config"].get("classes"))
 
 
@@ -61,10 +61,10 @@ def model_status():
     }
 
 
-def predict(path):
+def predict(path, run_name=None):
     """Run the matching model in the training environment and return actual scores."""
     info = inspect_image(path)
-    run = _current_run()
+    run = _current_run(run_name)
     if not run:
         return {
             "mode": "unavailable", "label": None, "confidence": None, "scores": [],

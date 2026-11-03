@@ -22,6 +22,12 @@ CLASS_NAMES_VI = {
     "Infected_Viral_Swinepox": "Đậu heo",
 }
 
+APP_MODEL_NAMES = {
+    "mobilenet_v2": "MobileNetV2",
+    "efficientnet_b0": "EfficientNet-B0",
+}
+APP_MODEL_MANIFEST_SHA256 = "dba25e5585884d3bcb7039e1e6bd921ab73e123cf53334792e973742efe9ea99"
+
 
 def display_class(name):
     """Return a Vietnamese display name while keeping the model's original label."""
@@ -103,12 +109,17 @@ def _read_manifest(path):
     }
 
 
-def active_run():
-    """Return the newest complete local run and counts read from its manifest."""
+def active_run(run_name=None):
+    """Return a complete local run, optionally selecting its exact run folder."""
     candidates = _run_candidates()
     if not candidates:
         return None
-    folder = max(candidates, key=lambda item: item.name)
+    if run_name:
+        folder = next((item for item in candidates if item.name == run_name), None)
+        if folder is None:
+            return None
+    else:
+        folder = max(candidates, key=lambda item: item.name)
     try:
         config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
         metrics = json.loads((folder / "final_metrics.json").read_text(encoding="utf-8"))
@@ -140,6 +151,30 @@ def active_run():
         "metrics": metrics,
         "data": data,
     }
+
+
+def available_model_runs():
+    """Choose one comparable checkpoint per supported architecture by validation macro-F1."""
+    best = {}
+    for folder in _run_candidates():
+        try:
+            config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+            model_name = config.get("model")
+            if model_name not in APP_MODEL_NAMES:
+                continue
+            if config.get("manifest_sha256") != APP_MODEL_MANIFEST_SHA256:
+                continue
+            validation = json.loads((folder / "best_validation.json").read_text(encoding="utf-8"))
+            macro_f1 = float(validation.get("macro_f1"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+        previous = best.get(model_name)
+        if previous is None or (macro_f1, folder.name) > (previous["validation_macro_f1"], previous["name"]):
+            run = active_run(folder.name)
+            if run:
+                run["validation_macro_f1"] = macro_f1
+                best[model_name] = run
+    return best
 
 
 def torch_python():

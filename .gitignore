@@ -35,3 +35,5 @@ PigSkinTech/case_images/
 PigSkinTech/models/*.pth
 PigSkinTech/models/*.pt
 PigSkinTech/models/*.onnx
+backend/*.db
+backend/*.db-journal

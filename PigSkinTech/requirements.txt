@@ -1,3 +1,5 @@
 flet==0.28.3
 Pillow>=12,<13
-# For real inference separately install matching torch and torchvision builds.
+pyodbc>=5.2,<6
+# Real inference uses the isolated interpreter configured in models/runtime.json.
+# Do not add torch here unless intentionally moving inference into the Studio venv.

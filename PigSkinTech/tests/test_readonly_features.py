@@ -15,11 +15,6 @@ from services.dataset_audit import audit_dataset
 
 class ImageValidationTests(unittest.TestCase):
     def test_integrated_model_assets_and_training_preprocessing_are_verified(self):
-        if not inference.model_ready():
-            self.skipTest(
-                'Model weights and private handoff assets are provisioned locally, '
-                'not tracked in this repository.'
-            )
         self.assertTrue(inference.model_ready())
         specification = inference.model_spec()
         self.assertEqual(specification['run_id'], '20261103_125653')
@@ -81,6 +76,26 @@ class ImageValidationTests(unittest.TestCase):
             Image.new('RGB', (40, 20)).save(path, exif=exif)
             info = inference.inspect_image(path)
             self.assertEqual((info['width'], info['height']), (20, 40))
+
+    def test_relative_ai_runtime_candidate_is_resolved_from_runtime_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root)
+            model_folder = folder / 'models'
+            runtime_folder = folder / 'ai_runtime'
+            model_folder.mkdir()
+            runtime_folder.mkdir()
+            executable = runtime_folder / 'python.exe'
+            executable.write_bytes(b'placeholder')
+            config = model_folder / 'runtime.json'
+            config.write_text(json.dumps({
+                'python_executable': '',
+                'python_candidates': ['../ai_runtime/python.exe'],
+            }), encoding='utf-8')
+            with patch.object(inference, 'RUNTIME_CONFIG', config), patch.object(
+                    inference, 'EXECUTABLE_DIR', folder / 'app'), patch.object(
+                    inference, 'ROOT', folder), patch.dict(
+                    inference.os.environ, {'PIGSKIN_AI_PYTHON': ''}):
+                self.assertEqual(inference._external_python(), executable.resolve())
 
 
 class ExperimentValidationTests(unittest.TestCase):

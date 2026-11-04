@@ -262,7 +262,7 @@ def support_messages(thread_id, actor_id, actor_role):
 
 
 def support_unread_count(actor_id, actor_role):
-    """Count support conversations awaiting this side's attention."""
+    """Count unread user replies or staff conversations awaiting a response."""
     initialize()
     with conn() as connection:
         role = _require_active_role(connection, actor_id, {'user', 'expert', 'admin'},
@@ -276,9 +276,16 @@ def support_unread_count(actor_id, actor_role):
                 WHERE user_id=? AND user_unread=1 AND status<>'closed' ''',
                 (actor_id,)).fetchone()
         else:
+            # Staff badges are an action queue, not a read receipt. A thread is
+            # pending only when it is open and its latest message came from the
+            # owning user. This avoids counting stale/inconsistent open rows
+            # whose latest message was already sent by staff.
             row = connection.execute('''SELECT COUNT(*) AS count
-                FROM dbo.support_threads
-                WHERE status='open' ''').fetchone()
+                FROM dbo.support_threads t
+                WHERE t.status='open'
+                  AND (SELECT TOP (1) m.sender_id
+                       FROM dbo.support_messages m
+                       WHERE m.thread_id=t.id ORDER BY m.id DESC)=t.user_id''').fetchone()
     return row['count'] or 0
 
 

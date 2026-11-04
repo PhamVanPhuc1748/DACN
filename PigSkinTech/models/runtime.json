@@ -1,0 +1,9 @@
+{
+  "python_executable": "C:\\Users\\ADMIN\\AppData\\Local\\Programs\\Python\\Python310\\python.exe",
+  "python_candidates": [
+    "ai_runtime\\python.exe",
+    "ai_runtime\\Scripts\\python.exe",
+    "..\\ai_runtime\\Scripts\\python.exe"
+  ],
+  "purpose": "Isolated verified PyTorch inference runtime; PigSkin Studio .venv remains unchanged."
+}

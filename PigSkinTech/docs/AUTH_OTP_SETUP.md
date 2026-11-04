@@ -35,14 +35,17 @@ backward-compatible, idempotent SQL proposal is
 3. Adds the OTP challenge table and a rate-limit index. Only salted, peppered
    digests are stored; OTP plaintext is never stored.
 
-The approved migration was applied to the local `PigSkinAI` database on
-2026-11-04 after creating and verifying a `COPY_ONLY` SQL Server backup. The
-backup is stored locally and is not included in this repository. All three
-existing account rows, including their email, password hashes, and roles, were
-fingerprint-checked and remained unchanged. OTP remains unavailable until an
-email or SMS provider and the OTP pepper are configured.
-When applying this migration with `sqlcmd`, enable `QUOTED_IDENTIFIER` with
-the `-I` option; filtered indexes require that SQL session setting.
+The migration is prepared but must not be run against the real `PigSkinAI`
+database until the owner explicitly approves it. Before approval, take and
+verify a `COPY_ONLY` SQL Server backup, record fingerprints/counts for existing
+accounts, and confirm the target server/database. After execution, verify the
+same account fields and roles again. The script uses one transaction, rolls
+back on error, is safe to rerun after success, and refuses unexpected partial
+schemas rather than attempting to repair them silently.
+
+When the owner approves execution with `sqlcmd`, use `-b` so SQL errors produce
+a failing exit code. The migration sets the required filtered-index session
+options itself; `-I` may still be used explicitly for `QUOTED_IDENTIFIER`.
 
 The prior first-signup-as-Admin behavior is intentionally removed for new
 registrations. To provision an administrator in a brand-new installation,
@@ -73,13 +76,21 @@ Port 587 uses STARTTLS. Set `PIGSKIN_SMTP_SSL=1` for implicit TLS (typically
 port 465). The app only reports that SMTP accepted the message; it cannot
 guarantee delivery to the recipient's inbox.
 
-For Gmail, create a Google App Password after enabling 2-Step Verification,
-then run
+For the Gmail sender `namt3869@gmail.com`, create a Google App Password after
+enabling 2-Step Verification, then run
 `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\configure_gmail_otp.ps1`
 from the application folder. The script prompts for the App Password without
 echoing it, generates a fresh random OTP pepper, and saves the values in the
 current Windows user's environment. Do not paste the App Password into chat or
 source files. Restart the application after configuration.
+
+Before running the helper, the owner must supply only the Gmail App Password at
+its hidden local prompt. Do not send it in chat. The helper fills
+`PIGSKIN_SMTP_HOST=smtp.gmail.com`, port `587`, sender/user, and a newly generated
+32-byte OTP pepper in the current Windows user environment. No
+`PIGSKIN_SMTP_SSL` value is needed for port 587 because the application uses
+STARTTLS by default. Use `PIGSKIN_SMTP_SSL=1` only with an implicit-TLS endpoint
+such as port 465.
 
 ### SMS provider
 
@@ -101,11 +112,9 @@ generic to avoid disclosing whether an account exists.
 
 ## Safe verification
 
-The OTP unit tests use scripted database connections and mock providers. The
-migration and SQL-backed OTP create/verify/expiry/one-use/hourly-limit paths
-were also exercised on uniquely named disposable LocalDB databases seeded
-with the legacy `dbo.users` schema and an Admin row. The email, password hash,
-and role remained unchanged; the migration succeeded twice; and both test
-databases were removed afterward. The migration is not auto-applied by
-application startup; it was separately approved, backed up, and applied to
-`PigSkinAI` as described above.
+The OTP unit tests use scripted database connections and mock providers. Before
+applying to the real database, exercise the migration on a uniquely named
+disposable LocalDB database seeded with the legacy `dbo.users` schema and
+representative rows. Confirm that email, password hashes, roles and row counts
+remain unchanged and that a second execution succeeds. This validation must not
+target `PigSkinAI`. The migration is never auto-applied by application startup.

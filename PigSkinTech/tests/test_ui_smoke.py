@@ -29,6 +29,15 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn('await asyncio.to_thread(predict,path)', source)
         self.assertIn('await asyncio.to_thread(prewarm_ai_worker)', source)
 
+    def test_shared_workspace_uses_one_persistent_scroll_column(self):
+        source=inspect.getsource(app.main)
+        self.assertIn(
+            'workspace_body=ft.Column(expand=True,scroll=ft.ScrollMode.AUTO,spacing=17)',
+            source,
+        )
+        self.assertIn('workspace_body.controls.clear()',source)
+        self.assertNotIn('workspace_body.content=',source)
+
     def text_values(self, control):
         values=[]
         pending=[control]
@@ -120,8 +129,8 @@ class UISmokeTests(unittest.TestCase):
         nav=next(control for control in sidebar.controls
                  if isinstance(control,app.ft.Column) and
                  any(getattr(item,'tooltip',None)=='Dataset' for item in control.controls))
-        workspace_body=shell.controls[1].content.controls[1]
-        previous_content=workspace_body.content
+        workspace_container=shell.controls[1].content.controls[1]
+        workspace_body=workspace_container.content
         account={'id':7,'email':'admin@example.test','display_name':'Admin',
                  'role':'admin','active':True}
         with patch.object(app,'current_account',return_value=account), patch.object(
@@ -136,9 +145,56 @@ class UISmokeTests(unittest.TestCase):
                 self.assertEqual(item.bgcolor,app.NAV_SELECTED)
                 self.assertTrue(all(other.bgcolor==app.SIDEBAR for other in nav.controls
                                     if other is not item))
-                self.assertIsNot(workspace_body.content,previous_content)
-                self.assertEqual(len(workspace_body.content.controls),expected_sections)
-                previous_content=workspace_body.content
+                self.assertIs(workspace_container.content,workspace_body)
+                self.assertEqual(len(workspace_body.controls),expected_sections)
+
+    def test_user_history_renders_saved_record_and_search_controls(self):
+        page=FakePage()
+        user={'id':7,'email':'user@example.test','display_name':'User',
+              'role':'user','active':True,'created_at':'2026-11-03 10:00:00'}
+        totals={'total':1,'pending':1,'second_review':0,'published':0,
+                'inferred':1,'authored':0}
+        record={
+            'id':1021,'case_id':'PS-001021','animal_id':'PIG-001',
+            'filename':'case.webp','created_at':'2026-11-04 21:19:09',
+            'predicted_class':'Infected_Environmental_Dermatitis',
+            'confidence':0.845,'farm_name':'','body_site':'','onset_date':'',
+            'entered_at':'','symptoms':'Tổn thương da','scores_json':'[]',
+            'result_status':'not_started','image_path':'','expert_id':None,
+            'review_status':'needs_review','expert_result':None,
+            'expert_notes':None,'review_note':'',
+        }
+        with patch.object(app,'account_count',return_value=1), patch.object(
+            app,'authenticate',return_value=user), patch.object(
+            app,'current_account',return_value=user), patch.object(
+            app,'recent',return_value=[record]), patch.object(
+            app,'count_cases',return_value=1), patch.object(
+            app,'case_summary',return_value=totals), patch.object(
+            app,'unseen_result_count',return_value=0), patch.object(
+            app,'support_unread_count',return_value=0), patch.object(
+            app,'support_threads',return_value=[]):
+            app.main(page)
+            self.click(self.controls_of_type(
+                page.controls[0],app.ft.ElevatedButton)[0])
+            shell=page.controls[0]
+            sidebar=shell.controls[0].content
+            nav=next(control for control in sidebar.controls
+                     if isinstance(control,app.ft.Column) and
+                     any(getattr(item,'tooltip',None)=='Lịch sử'
+                         for item in control.controls))
+            history=next(item for item in nav.controls if item.tooltip=='Lịch sử')
+            history.on_click(types.SimpleNamespace(control=history))
+            workspace_container=shell.controls[1].content.controls[1]
+            workspace_body=workspace_container.content
+            values=self.text_values(workspace_body)
+            self.assertIn('PS-001021 • PIG-001',values)
+            self.assertIn('1 bản ghi phù hợp',values)
+            history_block=workspace_body.controls[0]
+            search_row=history_block.content.controls[1]
+            self.assertFalse(bool(search_row.wrap))
+            records_region=history_block.content.controls[4]
+            self.assertEqual(records_region.height,420)
+            self.assertEqual(records_region.content.scroll,app.ft.ScrollMode.AUTO)
 
     def test_model_operations_build_with_verified_checkpoint(self):
         controls = build_model_view(app.PALETTES['dark'], app.label,
@@ -174,6 +230,8 @@ class UISmokeTests(unittest.TestCase):
             'Hệ thống hỗ trợ nhận diện và thẩm định bệnh da trên heo.',
             self.text_values(root),
         )
+        self.assertNotIn('Mã OTP',self.text_values(root))
+        self.assertNotIn('Quên mật khẩu?',self.text_values(root))
         hero_text=next(
             value for value in self.text_values(root)
             if value.startswith('Chăm sóc đàn heo')
@@ -185,7 +243,8 @@ class UISmokeTests(unittest.TestCase):
         page=FakePage()
         user={'id':7,'email':'user@example.test','display_name':'User',
               'role':'user','active':True,'created_at':'2026-11-03 10:00:00'}
-        with patch.object(app,'account_count',return_value=2), patch.object(
+        with patch.dict(app.os.environ,{'PIGSKIN_ENABLE_OTP':'1'}), patch.object(
+            app,'account_count',return_value=2), patch.object(
             app,'find_verified_contact',return_value=user), patch.object(
             app,'OTPService',
             side_effect=app.OTPNotConfiguredError(
@@ -214,6 +273,7 @@ class UISmokeTests(unittest.TestCase):
     def test_registration_and_recovery_views_build_for_email_and_phone(self):
         state={
             'mode':'register','method':'otp','channel':'email','step':'form',
+            'otp_enabled':False,
             'contact':'','display_name':'','password':'','confirm_password':'',
             'new_password':'','code':'','show_password':False,'loading':False,
             'message':'',
@@ -221,6 +281,8 @@ class UISmokeTests(unittest.TestCase):
         actions={name:(lambda *_:None) for name in (
             'render','submit','request','verify','resend','register_unverified'
         )}
+        direct_registration=[]
+        actions['register_unverified']=lambda *_:direct_registration.append(True)
         register_view=app.build_auth_view(state,actions)
         register_text=self.text_values(register_view)
         self.assertIn('Tạo tài khoản mới',register_text)
@@ -229,14 +291,14 @@ class UISmokeTests(unittest.TestCase):
                 register_view,app.ft.TextButton
             )
         ]
-        self.assertIn('Tạo tài khoản không cần gửi mã',register_button_labels)
-        self.assertTrue(any(
-            'khôi phục tài khoản sau này sẽ cần OTP' in value
-            for value in register_text
-        ))
+        self.assertNotIn('Tạo tài khoản không cần gửi mã',register_button_labels)
+        self.assertNotIn('Mã OTP',register_button_labels)
+        self.assertIn('Tạo tài khoản',register_text)
+        self.click(self.controls_of_type(register_view,app.ft.ElevatedButton)[0])
+        self.assertEqual(direct_registration,[True])
         register_fields=self.controls_of_type(register_view,app.ft.TextField)
         self.assertIn('Email',[field.label for field in register_fields])
-        state['channel']='sms'
+        state.update(otp_enabled=True,channel='sms')
         phone_register_view=app.build_auth_view(state,actions)
         self.assertIn(
             'Số điện thoại Việt Nam',
@@ -255,9 +317,17 @@ class UISmokeTests(unittest.TestCase):
         recovery_view=app.build_auth_view(state,actions)
         recovery_text=self.text_values(recovery_view)
         self.assertIn('Khôi phục mật khẩu',recovery_text)
+        self.assertTrue(any('Mã hết hạn sau 5 phút' in value for value in recovery_text))
         recovery_fields=self.controls_of_type(recovery_view,app.ft.TextField)
         self.assertIn('Mã OTP',[field.label for field in recovery_fields])
         self.assertIn('Mật khẩu mới',[field.label for field in recovery_fields])
+        recovery_buttons=[
+            button.text for button in self.controls_of_type(
+                recovery_view,app.ft.TextButton
+            )
+        ]
+        self.assertIn('Gửi lại mã',recovery_buttons)
+        self.assertIn('Đổi email',recovery_buttons)
 
     def test_password_recovery_does_not_disclose_account_existence(self):
         user={'id':7,'email':'user@example.test','display_name':'User',
@@ -272,7 +342,8 @@ class UISmokeTests(unittest.TestCase):
 
         def reset_screen(found_account):
             page=FakePage()
-            with patch.object(app,'account_count',return_value=2), patch.object(
+            with patch.dict(app.os.environ,{'PIGSKIN_ENABLE_OTP':'1'}), patch.object(
+                app,'account_count',return_value=2), patch.object(
                 app,'find_contact_for_password_reset',
                 return_value=user if found_account else None
             ), patch.object(app,'OTPService',ReadyOTP), patch.object(

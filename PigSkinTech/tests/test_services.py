@@ -498,7 +498,7 @@ class SupportTests(unittest.TestCase):
         self.assertEqual(update_params[0], 'answered')
         self.assertEqual(update_params[2:4], (1, 0))
 
-    def test_expert_badge_counts_unread_support_threads(self):
+    def test_expert_badge_counts_open_threads_with_latest_user_message(self):
         connection = ScriptedConnection([
             Result([{"role": "expert", "active": 1}]),
             Result(rowcount=0),
@@ -511,6 +511,8 @@ class SupportTests(unittest.TestCase):
 
         self.assertEqual(count, 2)
         self.assertIn("status='open'", connection.calls[2][0])
+        self.assertIn('ORDER BY m.id DESC', connection.calls[2][0])
+        self.assertIn('=t.user_id', connection.calls[2][0])
 
     def test_user_opening_thread_clears_only_user_badge(self):
         connection = ScriptedConnection([

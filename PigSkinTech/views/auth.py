@@ -9,8 +9,8 @@ _HERO_IMAGE = base64.b64encode(
     (Path(__file__).resolve().parents[1] / 'assets' / 'login_pig.png').read_bytes()
 ).decode('ascii')
 
-GREEN = '#25834F'
-GREEN_DARK = '#145B37'
+GREEN = '#087F8C'
+GREEN_DARK = '#075A63'
 NAVY = '#142B3A'
 MUTED = '#526575'
 LINE = '#C9D8D0'
@@ -48,10 +48,24 @@ def build_auth_view(state, actions):
             state['method'] = 'otp'
         refresh()
 
+    def return_to_contact_form():
+        state.update(step='form', challenge_id=None, code='', message='')
+        refresh()
+
+    def masked_contact():
+        value = str(state.get('contact', '')).strip()
+        if state.get('channel') == 'email' and '@' in value:
+            local, domain = value.rsplit('@', 1)
+            visible = local[:2] if len(local) > 1 else local[:1]
+            return f"{visible}{'*' * max(3, len(local) - len(visible))}@{domain}"
+        digits = ''.join(character for character in value if character.isdigit())
+        return f"***{digits[-3:]}" if len(digits) >= 3 else 'thông tin liên hệ đã nhập'
+
     is_verify = state['step'] == 'verify'
     mode = state['mode']
     channel = state['channel']
     is_email = channel == 'email'
+    otp_enabled = bool(state.get('otp_enabled', False))
     mode_titles = {
         'login': 'Đăng nhập vào hệ thống',
         'register': 'Tạo tài khoản mới',
@@ -59,7 +73,9 @@ def build_auth_view(state, actions):
     }
     mode_subtitles = {
         'login': 'Hệ thống hỗ trợ nhận diện và thẩm định bệnh da trên heo.',
-        'register': 'Xác minh email hoặc số điện thoại để bảo vệ tài khoản.',
+        'register': ('Xác minh email hoặc số điện thoại để bảo vệ tài khoản.'
+                     if otp_enabled else
+                     'Tạo tài khoản người dùng bằng email và mật khẩu.'),
         'forgot': 'Nếu thông tin thuộc tài khoản, hướng dẫn xác minh sẽ được gửi.',
     }
     field_style = {
@@ -115,7 +131,7 @@ def build_auth_view(state, actions):
 
     fields = []
     if not is_verify:
-        if mode == 'login':
+        if mode == 'login' and otp_enabled:
             fields.append(ft.Row([
                 ft.TextButton(
                     'Mật khẩu',
@@ -131,9 +147,9 @@ def build_auth_view(state, actions):
                     style=ft.ButtonStyle(color=GREEN, overlay_color='#EAF4ED'),
                 ),
             ], spacing=4))
-        if mode in {'register', 'forgot'} or (
+        if otp_enabled and (mode in {'register', 'forgot'} or (
             mode == 'login' and state['method'] == 'otp'
-        ):
+        )):
             fields.append(ft.Row([
                 ft.TextButton(
                     'Email', disabled=state.get('loading', False) or is_email,
@@ -177,7 +193,7 @@ def build_auth_view(state, actions):
             ])
         elif mode == 'login' and state['method'] == 'password':
             fields.append(password_field('password', 'Mật khẩu'))
-        if mode == 'login':
+        if mode == 'login' and otp_enabled:
             fields.append(ft.Row([
                 ft.Container(expand=True),
                 ft.TextButton(
@@ -196,7 +212,7 @@ def build_auth_view(state, actions):
                         ft.Text('Nhập mã xác minh 6 chữ số', size=13,
                                 color=NAVY, weight=ft.FontWeight.BOLD),
                         ft.Text(
-                            'Mã chỉ dùng một lần và hết hạn sau 5 phút.',
+                            f"Đã yêu cầu gửi tới {masked_contact()}. Mã hết hạn sau 5 phút.",
                             size=11, color=MUTED,
                         ),
                     ], spacing=3, expand=True),
@@ -252,6 +268,9 @@ def build_auth_view(state, actions):
     if mode == 'login' and state['method'] == 'password':
         button_text = 'Đang đăng nhập...' if state.get('loading') else 'Đăng nhập'
         callback = actions['submit']
+    elif mode == 'register' and not otp_enabled and not is_verify:
+        button_text = 'Đang tạo tài khoản...' if state.get('loading') else 'Tạo tài khoản'
+        callback = actions['register_unverified']
     elif is_verify:
         button_text = 'Đang xác minh...' if state.get('loading') else {
             'login': 'Xác minh và đăng nhập',
@@ -267,10 +286,16 @@ def build_auth_view(state, actions):
         }[mode]
         callback = actions['request']
 
+    button_icon = (
+        ft.Icons.LOGIN if mode == 'login'
+        else ft.Icons.PERSON_ADD_OUTLINED
+        if mode == 'register' and not otp_enabled
+        else ft.Icons.VERIFIED_USER_OUTLINED
+    )
     button_label = ft.Row([
         ft.ProgressRing(width=17, height=17, stroke_width=2, color='#FFFFFF')
         if state.get('loading') else ft.Icon(
-            ft.Icons.LOGIN if mode == 'login' else ft.Icons.VERIFIED_USER_OUTLINED,
+            button_icon,
             size=18, color='#FFFFFF',
         ),
         ft.Text(button_text, size=14, weight=ft.FontWeight.BOLD, color='#FFFFFF'),
@@ -286,7 +311,7 @@ def build_auth_view(state, actions):
             shape=ft.RoundedRectangleBorder(radius=12),
         ),
     ))
-    if mode == 'register' and not is_verify and is_email:
+    if mode == 'register' and not is_verify and is_email and otp_enabled:
         fields.extend([
             ft.Text(
                 'Không xác minh email; khôi phục tài khoản sau này sẽ cần OTP.',
@@ -302,11 +327,20 @@ def build_auth_view(state, actions):
             ),
         ])
     if is_verify:
-        fields.append(ft.TextButton(
-            'Quay lại và gửi mã khác', on_click=actions['resend'],
-            disabled=state.get('loading', False),
-            style=ft.ButtonStyle(color=GREEN, overlay_color='#EAF4ED'),
-        ))
+        fields.append(ft.Row([
+            ft.TextButton(
+                'Gửi lại mã', on_click=actions['resend'],
+                disabled=state.get('loading', False),
+                style=ft.ButtonStyle(color=GREEN, overlay_color='#EAF4ED'),
+            ),
+            ft.Container(expand=True),
+            ft.TextButton(
+                'Đổi email' if is_email else 'Đổi số điện thoại',
+                on_click=lambda _: return_to_contact_form(),
+                disabled=state.get('loading', False),
+                style=ft.ButtonStyle(color=NAVY, overlay_color='#EEF5F0'),
+            ),
+        ]))
     elif mode == 'login':
         fields.append(ft.TextButton(
             'Tạo tài khoản mới', on_click=lambda _: switch_mode('register'),
@@ -337,6 +371,14 @@ def build_auth_view(state, actions):
         ft.Text(mode_titles[mode], size=27, color=NAVY,
                 weight=ft.FontWeight.BOLD),
         ft.Text(mode_subtitles[mode], size=14, color=MUTED),
+        *([ft.Container(
+            bgcolor='#E8F4F5', border_radius=10, padding=10,
+            content=ft.Row([
+                ft.Icon(ft.Icons.LOCK_OUTLINE, color=GREEN, size=17),
+                ft.Text('Đăng nhập và tạo tài khoản hiện sử dụng email/mật khẩu.',
+                        size=11, color=GREEN_DARK, expand=True),
+            ], spacing=8),
+        )] if not otp_enabled and not is_verify else []),
         ft.Container(height=6),
         *fields,
         ft.Text(

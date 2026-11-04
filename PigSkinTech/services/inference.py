@@ -16,13 +16,15 @@ import threading
 import time
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+from services.paths import EXECUTABLE_DIR, RESOURCE_ROOT, model_root
 
 
-ROOT = Path(__file__).resolve().parents[1]
-WEIGHTS = ROOT / 'models' / 'best.pth'
-CLASSES = ROOT / 'models' / 'classes.json'
-MODEL_MANIFEST = ROOT / 'models' / 'model_manifest.json'
-RUNTIME_CONFIG = ROOT / 'models' / 'runtime.json'
+ROOT = RESOURCE_ROOT
+MODEL_ROOT = model_root()
+WEIGHTS = MODEL_ROOT / 'best.pth'
+CLASSES = MODEL_ROOT / 'classes.json'
+MODEL_MANIFEST = MODEL_ROOT / 'model_manifest.json'
+RUNTIME_CONFIG = MODEL_ROOT / 'runtime.json'
 MAX_BYTES = 10 * 1024 * 1024
 MAX_PIXELS = 24_000_000
 WORKER_START_TIMEOUT = 45.0
@@ -88,7 +90,13 @@ def model_spec():
 
 
 def _asset_error():
-    missing = [str(path.relative_to(ROOT)) for path in
+    def display_path(path):
+        try:
+            return str(path.relative_to(ROOT))
+        except ValueError:
+            return str(path)
+
+    missing = [display_path(path) for path in
                (WEIGHTS, CLASSES, MODEL_MANIFEST) if not path.is_file()]
     if missing:
         return 'Cần bổ sung: ' + ', '.join(missing)
@@ -117,16 +125,44 @@ def model_ready():
 def _external_python():
     override = os.environ.get('PIGSKIN_AI_PYTHON', '').strip()
     if override:
-        candidate = Path(override)
-    elif RUNTIME_CONFIG.is_file():
+        candidate = Path(os.path.expandvars(override)).expanduser()
+        return candidate.resolve() if candidate.is_file() else None
+
+    configured = []
+    if RUNTIME_CONFIG.is_file():
         try:
-            candidate = Path(json.loads(RUNTIME_CONFIG.read_text(
-                encoding='utf-8')).get('python_executable', ''))
+            runtime = json.loads(RUNTIME_CONFIG.read_text(encoding='utf-8'))
+            primary = runtime.get('python_executable', '')
+            if isinstance(primary, str) and primary.strip():
+                configured.append(primary)
+            portable = runtime.get('python_candidates', [])
+            if isinstance(portable, list):
+                configured.extend(item for item in portable
+                                  if isinstance(item, str) and item.strip())
         except (OSError, json.JSONDecodeError, TypeError):
-            return None
-    else:
-        return None
-    return candidate if candidate.is_file() else None
+            configured = []
+
+    configured.extend([
+        'ai_runtime/python.exe',
+        'ai_runtime/Scripts/python.exe',
+    ])
+    seen = set()
+    for raw in configured:
+        expanded = Path(os.path.expandvars(raw)).expanduser()
+        candidates = [expanded] if expanded.is_absolute() else [
+            EXECUTABLE_DIR / expanded,
+            RUNTIME_CONFIG.parent / expanded,
+            ROOT / expanded,
+        ]
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            key = str(resolved).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            if resolved.is_file():
+                return resolved
+    return None
 
 
 _runtime_probe_cache = {}

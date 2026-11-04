@@ -80,21 +80,36 @@ class EmailOTPProvider:
     def __init__(self, environ=None):
         self.environ = os.environ if environ is None else environ
 
-    @property
-    def configured(self):
+    def configuration_error(self):
         required = ('PIGSKIN_SMTP_HOST', 'PIGSKIN_SMTP_USER',
                     'PIGSKIN_SMTP_PASSWORD', 'PIGSKIN_SMTP_FROM')
-        return all(self.environ.get(key) for key in required)
+        if any(not str(self.environ.get(key, '')).strip() for key in required):
+            return 'missing_required_setting'
+        try:
+            port = int(str(self.environ.get('PIGSKIN_SMTP_PORT', '587')).strip())
+        except ValueError:
+            return 'invalid_port'
+        if not 1 <= port <= 65535:
+            return 'invalid_port'
+        try:
+            normalize_email(str(self.environ['PIGSKIN_SMTP_FROM']))
+        except ValueError:
+            return 'invalid_sender'
+        return None
+
+    @property
+    def configured(self):
+        return self.configuration_error() is None
 
     def send(self, destination, code):
         if not self.configured:
             raise OTPNotConfiguredError('Chưa cấu hình dịch vụ gửi mã.')
         try:
-            host = self.environ['PIGSKIN_SMTP_HOST']
-            port = int(self.environ.get('PIGSKIN_SMTP_PORT', '587'))
-            username = self.environ['PIGSKIN_SMTP_USER']
+            host = self.environ['PIGSKIN_SMTP_HOST'].strip()
+            port = int(self.environ.get('PIGSKIN_SMTP_PORT', '587').strip())
+            username = self.environ['PIGSKIN_SMTP_USER'].strip()
             password = self.environ['PIGSKIN_SMTP_PASSWORD']
-            sender = self.environ['PIGSKIN_SMTP_FROM']
+            sender = normalize_email(self.environ['PIGSKIN_SMTP_FROM'])
             use_ssl = self.environ.get('PIGSKIN_SMTP_SSL', '').lower() in {
                 '1', 'true', 'yes'
             }
@@ -220,6 +235,12 @@ class SQLServerOTPRepository:
                 challenge['challenge_id'],
             ))
 
+    def discard(self, challenge_id):
+        """Remove a challenge when its delivery provider rejected the message."""
+        with conn() as connection:
+            connection.execute('''DELETE FROM dbo.auth_otp_challenges
+                WHERE challenge_id=? AND consumed_at IS NULL''', (challenge_id,))
+
     def consume(self, challenge_id, destination, purpose, code, pepper):
         failure = None
         result = None
@@ -312,7 +333,18 @@ class OTPService:
             'code_hash': _code_digest(self.pepper, salt, code),
         }
         self.repository.create(challenge)
-        self.provider.send(normalized, code)
+        try:
+            self.provider.send(normalized, code)
+        except Exception:
+            # Do not make a rejected delivery consume the resend allowance.
+            # Custom/test repositories may not implement cleanup.
+            discard = getattr(self.repository, 'discard', None)
+            if discard is not None:
+                try:
+                    discard(challenge_id)
+                except Exception:
+                    pass
+            raise
         self.repository.activate(challenge)
         return challenge_id
 

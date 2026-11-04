@@ -248,6 +248,21 @@ class OTPTests(unittest.TestCase):
         }).configured)
         self.assertFalse(otp.EmailOTPProvider(environ={}).configured)
 
+    def test_email_provider_rejects_invalid_port_and_sender_configuration(self):
+        base = {
+            'PIGSKIN_SMTP_HOST': 'smtp.example.test',
+            'PIGSKIN_SMTP_USER': 'sender@example.test',
+            'PIGSKIN_SMTP_PASSWORD': 'secret',
+            'PIGSKIN_SMTP_FROM': 'sender@example.test',
+        }
+        self.assertTrue(otp.EmailOTPProvider(environ=base).configured)
+        self.assertFalse(otp.EmailOTPProvider(environ={
+            **base, 'PIGSKIN_SMTP_PORT': 'not-a-port',
+        }).configured)
+        self.assertFalse(otp.EmailOTPProvider(environ={
+            **base, 'PIGSKIN_SMTP_FROM': 'invalid-address',
+        }).configured)
+
     def test_delivery_failure_does_not_invalidate_the_previous_code(self):
         class FailingProvider(MockProvider):
             def send(self, destination, code):
@@ -258,16 +273,21 @@ class OTPTests(unittest.TestCase):
             'request_count': 1,
             'latest_request': now - timedelta(seconds=otp.RESEND_INTERVAL.seconds + 1),
         }])
+        cleanup = ScriptedConnection()
         service = otp.OTPService(
             'email', FailingProvider(), pepper=self.pepper,
             code_generator=lambda: '123456',
         )
-        with patch.object(otp, 'conn', ConnectionFactory([create])):
+        with patch.object(otp, 'conn', ConnectionFactory([create, cleanup])):
             with self.assertRaises(otp.OTPDeliveryError):
                 service.request_code('user@example.test', 'login')
         self.assertFalse(any(
             'UPDATE dbo.auth_otp_challenges' in query
             for query, _ in create.calls
+        ))
+        self.assertTrue(any(
+            'DELETE FROM dbo.auth_otp_challenges' in query
+            for query, _ in cleanup.calls
         ))
 
 

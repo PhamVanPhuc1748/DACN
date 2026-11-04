@@ -1,0 +1,34 @@
+{
+  "measured_on": "2026-11-03",
+  "image": "test/Healthy/18_jpeg.rf.fe8311961a4a6124877c787d9b8b73f5.jpg",
+  "checkpoint_run": "20261103_125653",
+  "before_one_process_per_prediction": {
+    "end_to_end_ms": [11835.7080, 5859.8472, 5881.6720],
+    "cold_ms": 11835.7080,
+    "subsequent_average_ms": 5870.7596,
+    "label": "Healthy",
+    "confidence": 0.99813312292099
+  },
+  "after_persistent_worker": {
+    "end_to_end_ms": [4978.8203, 39.9117, 41.1731, 42.3311, 40.8307],
+    "cold_ms": 4978.8203,
+    "warm_average_ms": 41.0617,
+    "worker_start_total_ms": 4914.0777,
+    "runtime_import_ms": 4612.4961,
+    "checkpoint_model_load_ms": 141.4685,
+    "warm_preprocessing_average_ms": 1.4254,
+    "warm_inference_average_ms": 17.9674,
+    "warm_worker_request_average_ms": 22.0660,
+    "label": "Healthy",
+    "confidence": 0.99813312292099
+  },
+  "speedup": {
+    "cold": 2.3773,
+    "subsequent": 142.9741
+  },
+  "prediction_equivalence": {
+    "same_label": true,
+    "same_confidence": true,
+    "one_shot_and_persistent_all_scores_tolerance": 1e-7
+  }
+}

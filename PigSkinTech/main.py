@@ -4,6 +4,7 @@ import base64
 from datetime import datetime
 import json
 import logging
+import os
 import time
 import flet as ft
 from pathlib import Path
@@ -118,7 +119,7 @@ def main(page:ft.Page):
     support_badge={'control':None}
     page_title=label('Tổng quan',25,WHITE,True)
     subtitle=label('TRUNG TÂM NGHIÊN CỨU • PHÁT HIỆN BỆNH DA HEO',10,CYAN,True)
-    workspace_body=ft.Container(padding=20,expand=True)
+    workspace_body=ft.Column(expand=True,scroll=ft.ScrollMode.AUTO,spacing=17)
     nav=[]
     nav_page_indexes=[]
     active_page={'index':0}
@@ -126,7 +127,11 @@ def main(page:ft.Page):
     sidebar_collapsed={'value':False}
 
     def notify(message,color=CYAN):
-        page.snack_bar=ft.SnackBar(content=label(message,13,WHITE),bgcolor=PANEL)
+        icon=ft.Icons.ERROR_OUTLINE if color==RED else (
+            ft.Icons.CHECK_CIRCLE_OUTLINE if color==TEAL else ft.Icons.INFO_OUTLINE)
+        page.snack_bar=ft.SnackBar(content=ft.Row([
+            ft.Icon(icon,color=color,size=19),label(message,13,WHITE,expand=True)
+        ],spacing=9),bgcolor=PANEL,duration=3200)
         page.snack_bar.open=True;page.update()
 
     def admin_dashboard():
@@ -184,9 +189,9 @@ def main(page:ft.Page):
             padding=15)
         return [
             ft.Row([ft.Column([label('ADMIN • VẬN HÀNH HỆ THỐNG',10,CYAN,True),
-                label('Dashboard quản trị',24,WHITE,True),
-                label('Số liệu tổng hợp tài khoản, lượt đăng nhập và luồng hồ sơ.',11)],
-                spacing=4),ft.Container(expand=True),
+                label('Dashboard quản trị',23,WHITE,True),
+                label('Số liệu tổng hợp tài khoản, lượt đăng nhập và luồng hồ sơ.',11)],spacing=4),
+                ft.Container(expand=True),
                 ft.TextButton('QUẢN LÝ TÀI KHOẢN',icon=ft.Icons.MANAGE_ACCOUNTS,
                     on_click=lambda _:navigate(6)),
                 ft.TextButton('HỖ TRỢ',icon=ft.Icons.SUPPORT_AGENT,on_click=lambda _:navigate(7))]),
@@ -222,7 +227,7 @@ def main(page:ft.Page):
                 ])))
         return [
             ft.Row([ft.Column([label('EXPERT WORKSPACE',10,CYAN,True),
-                label('Hàng đợi chuyên gia',24,WHITE,True),
+                label('Hàng đợi chuyên gia',23,WHITE,True),
                 label('Soạn nhận định hoặc duyệt chéo kết quả của chuyên gia khác.',11)],spacing=4),
                 ft.Container(expand=True),
                 ft.TextButton('MỞ HỒ SƠ',icon=ft.Icons.VIEW_LIST,on_click=lambda _:navigate(2))]),
@@ -303,7 +308,7 @@ def main(page:ft.Page):
     preview_frame=ft.Container(content=noimage,bgcolor=INNER,height=366,alignment=ft.alignment.center,
                                border=ft.border.all(1,BORDER),border_radius=12)
     file_line=label('Chưa chọn ảnh',12)
-    notice=label('AI chưa sẵn sàng. Bạn có thể kiểm tra ảnh và lưu lịch sử.',12,AMBER)
+    notice=label('Chọn ảnh để kiểm tra và tạo hồ sơ.',12,AMBER)
     result_holder=ft.Column(spacing=13,scroll=ft.ScrollMode.AUTO)
     case_identifier=label('CHƯA TẠO HỒ SƠ',13,WHITE,True)
     case_state=label('CHỜ TIẾP NHẬN',11,AMBER,True)
@@ -424,6 +429,8 @@ def main(page:ft.Page):
         button=e.control
         button.disabled=True
         button.text='ĐANG XỬ LÝ...'
+        notice.value='Đang kiểm tra ảnh và chạy mô hình AI...'
+        notice.color=BLUE
         page.update()
         try:
             path=selected['path']
@@ -547,7 +554,7 @@ def main(page:ft.Page):
         is_expert=user['role']=='expert'
         term=ft.TextField(hint_text='Tìm mã ca, mã heo, cơ sở hoặc tên ảnh...',
                           prefix_icon=ft.Icons.SEARCH,expand=True,dense=True)
-        rows_area=ft.Column(spacing=0)
+        rows_area=ft.Column(spacing=0,scroll=ft.ScrollMode.AUTO)
         count=label('',13,CYAN,True)
         page_number={'value':0}
         page_size=25
@@ -804,16 +811,20 @@ def main(page:ft.Page):
             load()
         previous_button.on_click=lambda _:change_page(-1)
         next_button.on_click=lambda _:change_page(1)
-        term.on_change=reset_page
+        term.on_submit=reset_page
         review_filter.on_change=reset_page
         load()
-        return [block([caption_head('Kết quả của tôi' if user['role']=='user' else
-                    'Hồ sơ và duyệt chéo','Kết quả chỉ phát hành sau khi được chuyên gia thứ hai duyệt.',
+        title='Kết quả của tôi' if user['role']=='user' else 'Hồ sơ và duyệt chéo'
+        return [block([caption_head(title,
+                    'Tìm kiếm hồ sơ và theo dõi quy trình chuyên gia duyệt chéo.',
                     ft.Icons.HISTORY),
-                ft.Row([term,review_filter,ft.OutlinedButton('Làm mới',icon=ft.Icons.REFRESH,on_click=load)]),
+                ft.Row([term,review_filter,
+                    ft.ElevatedButton('TÌM KIẾM',icon=ft.Icons.SEARCH,on_click=reset_page,
+                        bgcolor=CYAN,color=BG),
+                    ft.IconButton(icon=ft.Icons.REFRESH,tooltip='Làm mới danh sách',on_click=load)]),
                 ft.Row([label('HỒ SƠ / QUAN SÁT / NHẬN ĐỊNH',10,CYAN,True),ft.Container(expand=True),
-                    label('SỬA',10,BLUE,True),label('TRẠNG THÁI',10,CYAN,True),label('XÓA',10,RED,True)],spacing=12),count,
-                ft.Container(content=rows_area,bgcolor=INNER,border_radius=10,padding=8),
+                    label('THAO TÁC',10,CYAN,True)],spacing=12),count,
+                ft.Container(content=rows_area,bgcolor=INNER,border_radius=10,padding=8,height=420),
                 ft.Row([ft.Container(expand=True),previous_button,page_label,next_button])],padding=20)]
 
     def support_view():
@@ -948,7 +959,7 @@ def main(page:ft.Page):
         heading=ft.Row([
             ft.Column([label('HỖ TRỢ • HỎI ĐÁP',10,CYAN,True),
                 label('Trung tâm hỗ trợ',23,WHITE,True),
-                label('Yêu cầu được lưu trong LocalDB; hội thoại tự đóng sau 30 phút không có phản hồi mới từ chuyên gia.',11)],
+                label('Yêu cầu được lưu cục bộ; hội thoại tự đóng sau 30 phút không có phản hồi mới từ đội ngũ hỗ trợ.',11)],
                 spacing=4,expand=True),
             *([ft.ElevatedButton('CÂU HỎI MỚI',icon=ft.Icons.ADD,
                     on_click=create_question,bgcolor=CYAN,color=BG)] if is_user else [])
@@ -1077,15 +1088,14 @@ def main(page:ft.Page):
         return [
             ft.Row([ft.Column([label('DATASET INTELLIGENCE',10,CYAN,True),
                 label('Kiểm tra dữ liệu ảnh',23,WHITE,True),
-                label('Quét cấu trúc lớp/split, ảnh hỏng, trùng lặp và mất cân bằng.',11)],
-                spacing=4),ft.Container(expand=True),
-                label('KIỂM TRA CỤC BỘ • CHỈ ĐỌC',10,TEAL,True)]),
+                label('Quét cấu trúc lớp/split, ảnh hỏng, trùng lặp và mất cân bằng.',11)],spacing=4),
+                ft.Container(expand=True),label('KIỂM TRA CỤC BỘ • CHỈ ĐỌC',10,TEAL,True)]),
             block([caption_head('Chọn nguồn dữ liệu',
                     'Hỗ trợ class/image hoặc train, validation, test/class/image.',
                     ft.Icons.FOLDER_OPEN),
                 ft.Row([path_field,ft.OutlinedButton('CHỌN THƯ MỤC',
                     icon=ft.Icons.FOLDER_OPEN,on_click=choose_dataset_folder),scan_button],
-                    spacing=8,wrap=True),
+                    spacing=8),
                 results],padding=14),
             block([caption_head('Thống kê từ thư mục đã chọn',
                     'Chỉ hiển thị số liệu từ lần kiểm tra dataset trong phiên này.',
@@ -1205,10 +1215,9 @@ def main(page:ft.Page):
                     font_family='Consolas'))
         return [
             ft.Row([ft.Column([label('TRAINING METRICS',10,CYAN,True),
-                    label('Đánh giá thực nghiệm',23,WHITE,True),
-                    label('Nạp JSON từ script đánh giá để hiển thị số liệu của từng run.',11)],
-                    spacing=4),ft.Container(expand=True),
-                ft.Container(bgcolor=STATUS_BG,padding=9,border_radius=6,
+                label('Đánh giá thực nghiệm',23,WHITE,True),
+                label('Nạp JSON từ script đánh giá để hiển thị số liệu của từng run.',11)],spacing=4),
+                ft.Container(expand=True),ft.Container(bgcolor=STATUS_BG,padding=9,border_radius=6,
                     content=label('CHƯA NẠP BÁO CÁO' if not report else 'BÁO CÁO ĐÃ NẠP',
                         10,AMBER if not report else TEAL,True))]),
             metrics,ft.Row([performance,reproducibility],spacing=10,
@@ -1258,12 +1267,11 @@ def main(page:ft.Page):
                         ft.Switch(value=account['active'],disabled=is_current,
                             on_change=change_active)],spacing=5)
                 ],spacing=12)))
-        return [ft.Row([ft.Column([
-                    label('ADMINISTRATION',10,CYAN,True),
+        return [ft.Row([ft.Column([label('ADMINISTRATION',10,CYAN,True),
                     label('Quản lý tài khoản',23,WHITE,True),
-                    label('Tạo tài khoản mới ở màn hình đăng ký; phân quyền hoặc khóa tài khoản tại đây.',11)
-                ],spacing=4),ft.Container(expand=True),
-                ft.TextButton('LÀM MỚI',icon=ft.Icons.REFRESH,on_click=lambda _:navigate(6))]),
+                    label('Tạo tài khoản mới ở màn hình đăng ký; phân quyền hoặc khóa tài khoản tại đây.',11)],spacing=4),
+                ft.Container(expand=True),ft.TextButton('LÀM MỚI',icon=ft.Icons.REFRESH,
+                    on_click=lambda _:navigate(6))]),
             block([ft.Row([label('TÀI KHOẢN',10,CYAN,True),ft.Container(expand=True),
                     label(f'{len(accounts)} tài khoản',11,MUTED)]),
                 *(rows or [label('Chưa có tài khoản.',12)])],padding=10)]
@@ -1389,8 +1397,8 @@ def main(page:ft.Page):
                     on_click=lambda _,retry_index=index:navigate(retry_index),
                     bgcolor=CYAN,color=BG)
             ],padding=20)]
-        workspace_body.content=ft.Column(section_controls,expand=True,
-            scroll=ft.ScrollMode.AUTO,spacing=17)
+        workspace_body.controls.clear()
+        workspace_body.controls.extend(section_controls)
         for page_index,b in zip(nav_page_indexes,nav):
             selected_page=page_index==index
             b.bgcolor=NAV_SELECTED if selected_page else SIDEBAR
@@ -1494,13 +1502,16 @@ def main(page:ft.Page):
         page.floating_action_button=ft.FloatingActionButton(
             icon=ft.Icons.SUPPORT_AGENT,text='Hỗ trợ',
             on_click=lambda _:navigate(7),bgcolor=CYAN,foreground_color=BG)
-        workspace=ft.Column([header,workspace_body],expand=True,spacing=0)
+        workspace=ft.Column([header,ft.Container(content=workspace_body,padding=20,expand=True)],
+            expand=True,spacing=0)
         page.controls.clear()
         page.add(ft.Row([sidebar,ft.Container(content=workspace,expand=True)],spacing=0,expand=True))
         navigate(index)
 
     auth_state={
         'mode':'login','method':'password','channel':'email','step':'form',
+        'otp_enabled':os.environ.get('PIGSKIN_ENABLE_OTP','').strip().lower()
+            in {'1','true','yes'},
         'challenge_id':None,'contact':'','display_name':'','password':'',
         'confirm_password':'','new_password':'','code':'','show_password':False,
         'loading':False,'message':'','message_error':True,
@@ -1521,7 +1532,7 @@ def main(page:ft.Page):
         image.visible=False
         image.src_base64=None
         file_line.value='Chưa chọn ảnh'
-        notice.value='AI chưa sẵn sàng. Bạn có thể kiểm tra ảnh và lưu lịch sử.'
+        notice.value='Chọn ảnh để kiểm tra và tạo hồ sơ.'
         notice.color=AMBER
         show_auth()
     async def submit_auth(e):
@@ -1663,13 +1674,16 @@ def main(page:ft.Page):
             auth_state['code']=''
             auth_state['message']=(
                 reset_response if mode=='forgot' else
-                'Dịch vụ gửi mã đã chấp nhận yêu cầu. Hãy kiểm tra hộp thư hoặc tin nhắn.'
+                'Dịch vụ gửi mã đã chấp nhận yêu cầu. Mã có hiệu lực 5 phút; '
+                'nếu chưa thấy, hãy kiểm tra thư rác hoặc tín hiệu điện thoại.'
             )
             auth_state['message_error']=False
         except OTPError as exc:
             if mode=='forgot':
                 if isinstance(exc,OTPNotConfiguredError):
-                    auth_state['message']='Chưa cấu hình dịch vụ gửi mã. '+reset_response
+                    auth_state['message']=(
+                        'Chưa cấu hình dịch vụ gửi mã trên máy này. '+reset_response
+                    )
                 elif isinstance(exc,OTPMigrationRequiredError):
                     auth_state['message']=(
                         'OTP chưa sẵn sàng: cần áp dụng migration sau khi được phê duyệt. '

@@ -3,9 +3,10 @@
 from pathlib import Path
 
 from services.database import DATABASE, _connect
+from services.paths import DATA_ROOT
 
 ROOT = Path(__file__).resolve().parents[1]
-IMAGE_DIR = ROOT / 'case_images'
+IMAGE_DIR = DATA_ROOT / 'case_images'
 
 REQUIRED_COLUMNS = {
     'users': {'id', 'email', 'display_name', 'password_salt', 'password_hash',

@@ -75,12 +75,13 @@ def build_model_view(palette, label, block, caption_head):
           if class_names else [label(class_error or 'Chưa có classes.json từ nhóm AI.', 11, AMBER)])],
         padding=14)
     overall = 'MODEL ĐÃ XÁC MINH • HỖ TRỢ CHUYÊN GIA' if status['available'] else 'CẦN CÀI ĐỦ THÀNH PHẦN'
-    return [
-        ft.Row([ft.Column([label('AI MODEL CONFIGURATION', 10, CYAN, True),
+    heading = ft.Row([ft.Column([label('AI MODEL CONFIGURATION', 10, CYAN, True),
             label('Model readiness', 23, WHITE, True),
             label('Trạng thái file và runtime • chưa thay thế validation model', 11)], spacing=4),
             ft.Container(expand=True), ft.Container(bgcolor=STATUS_BG, padding=9, border_radius=6,
-                content=label(overall, 10, TEAL if status['available'] else AMBER, True))]),
+                content=label(overall, 10, TEAL if status['available'] else AMBER, True))])
+    return [
+        heading,
         ft.Row([dependencies, specification], spacing=10,
                vertical_alignment=ft.CrossAxisAlignment.START),
         class_panel]

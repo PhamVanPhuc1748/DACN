@@ -3,10 +3,11 @@
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from services.paths import DATA_ROOT
 
 
 def configure_logging():
-    log_dir = Path(__file__).resolve().parents[1] / 'logs'
+    log_dir = DATA_ROOT / 'logs'
     log_dir.mkdir(exist_ok=True)
     logger = logging.getLogger('pigskin')
     logger.setLevel(logging.INFO)

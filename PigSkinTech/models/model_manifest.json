@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "run_id": "20261103_125653",
+  "architecture": "mobilenet_v2",
+  "seed": 123,
+  "class_count": 10,
+  "checkpoint_sha256": "d4f17fa44daff09f30cb885684d40da2f522e702f2b39fd700dab444b8f139d0",
+  "classes_sha256": "4a069a6fb036ffb8e23bf0aea0f39e8dafcdd680515d4e3f059abbbc59cf169e",
+  "manifest_sha256": "dba25e5585884d3bcb7039e1e6bd921ab73e123cf53334792e973742efe9ea99",
+  "selection_criterion": "highest validation macro-F1 among the six approved v4 comparison runs",
+  "preprocessing": {
+    "resize": [224, 224],
+    "color_mode": "RGB",
+    "normalization": {
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225]
+    }
+  },
+  "validation": {
+    "accuracy": 0.7375,
+    "macro_precision": 0.7326454760842656,
+    "macro_recall": 0.7312662470005924,
+    "macro_f1": 0.7235161600963538,
+    "best_epoch": 12
+  },
+  "test_reference_not_used_for_selection": {
+    "accuracy": 0.6417910447761194,
+    "macro_precision": 0.6375514582036321,
+    "macro_recall": 0.636081767694671,
+    "macro_f1": 0.6355232761361352
+  },
+  "training_runtime": {
+    "python": "3.11 (required by handoff instructions; environment not included)",
+    "torch": "2.5.1+cu121",
+    "torchvision": "0.20.1+cu121"
+  },
+  "source": "BanGiao_PigSkinResearchStudio/tool_train/ml_workspace/runs/20261103_125653"
+}

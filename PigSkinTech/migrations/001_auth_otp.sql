@@ -1,8 +1,46 @@
+-- Run only after an explicit backup and owner approval. This script does not
+-- create or select a database; the caller must connect to the intended DB.
+SET NOCOUNT ON;
 SET XACT_ABORT ON;
+SET QUOTED_IDENTIFIER ON;
+SET ANSI_NULLS ON;
+SET ANSI_PADDING ON;
+SET ANSI_WARNINGS ON;
+SET ARITHABORT ON;
+SET CONCAT_NULL_YIELDS_NULL ON;
+SET NUMERIC_ROUNDABORT OFF;
+
+BEGIN TRY
 BEGIN TRANSACTION;
 
 IF OBJECT_ID('dbo.users', 'U') IS NULL
     THROW 51000, 'dbo.users must exist before applying the auth OTP migration.', 1;
+IF COL_LENGTH('dbo.users', 'email') IS NULL
+    THROW 51001, 'dbo.users.email must exist before applying the auth OTP migration.', 1;
+
+-- Refuse unexpected partial schemas instead of silently reshaping them.
+IF COL_LENGTH('dbo.users', 'phone') IS NOT NULL
+   AND NOT EXISTS (
+       SELECT 1 FROM sys.columns
+       WHERE object_id = OBJECT_ID('dbo.users') AND name = 'phone'
+         AND system_type_id = TYPE_ID('nvarchar') AND max_length = 40
+         AND is_nullable = 1
+   )
+    THROW 51002, 'Existing dbo.users.phone is not nullable NVARCHAR(20).', 1;
+IF COL_LENGTH('dbo.users', 'email_verified') IS NOT NULL
+   AND NOT EXISTS (
+       SELECT 1 FROM sys.columns
+       WHERE object_id = OBJECT_ID('dbo.users') AND name = 'email_verified'
+         AND system_type_id = TYPE_ID('bit') AND is_nullable = 0
+   )
+    THROW 51003, 'Existing dbo.users.email_verified is not a required BIT.', 1;
+IF COL_LENGTH('dbo.users', 'phone_verified') IS NOT NULL
+   AND NOT EXISTS (
+       SELECT 1 FROM sys.columns
+       WHERE object_id = OBJECT_ID('dbo.users') AND name = 'phone_verified'
+         AND system_type_id = TYPE_ID('bit') AND is_nullable = 0
+   )
+    THROW 51004, 'Existing dbo.users.phone_verified is not a required BIT.', 1;
 
 IF COL_LENGTH('dbo.users', 'phone') IS NULL
     ALTER TABLE dbo.users ADD phone NVARCHAR(20) NULL;
@@ -52,12 +90,24 @@ IF NOT EXISTS (
 )
     EXEC sys.sp_executesql N'CREATE UNIQUE INDEX UX_users_email
         ON dbo.users(email) WHERE email IS NOT NULL';
+ELSE IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE object_id = OBJECT_ID('dbo.users') AND name = 'UX_users_email'
+      AND is_unique = 1 AND has_filter = 1
+)
+    THROW 51005, 'Existing UX_users_email is not the expected filtered unique index.', 1;
 IF NOT EXISTS (
     SELECT 1 FROM sys.indexes
     WHERE object_id = OBJECT_ID('dbo.users') AND name = 'UX_users_phone'
 )
     EXEC sys.sp_executesql N'CREATE UNIQUE INDEX UX_users_phone
         ON dbo.users(phone) WHERE phone IS NOT NULL';
+ELSE IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE object_id = OBJECT_ID('dbo.users') AND name = 'UX_users_phone'
+      AND is_unique = 1 AND has_filter = 1
+)
+    THROW 51006, 'Existing UX_users_phone is not the expected filtered unique index.', 1;
 IF NOT EXISTS (
     SELECT 1 FROM sys.check_constraints
     WHERE parent_object_id = OBJECT_ID('dbo.users')
@@ -85,6 +135,15 @@ BEGIN
         CHECK (expires_at > created_at)
     );
 END;
+ELSE IF EXISTS (
+    SELECT required.name
+    FROM (VALUES
+        ('challenge_id'), ('destination'), ('channel'), ('purpose'), ('salt'),
+        ('code_hash'), ('created_at'), ('expires_at'), ('attempts'), ('consumed_at')
+    ) AS required(name)
+    WHERE COL_LENGTH('dbo.auth_otp_challenges', required.name) IS NULL
+)
+    THROW 51007, 'Existing dbo.auth_otp_challenges has an unexpected partial schema.', 1;
 
 IF NOT EXISTS (
     SELECT 1 FROM sys.indexes
@@ -95,3 +154,9 @@ IF NOT EXISTS (
         ON dbo.auth_otp_challenges(destination, purpose, created_at);
 
 COMMIT TRANSACTION;
+END TRY
+BEGIN CATCH
+    IF XACT_STATE() <> 0
+        ROLLBACK TRANSACTION;
+    THROW;
+END CATCH;

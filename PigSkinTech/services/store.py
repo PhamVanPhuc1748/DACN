@@ -6,8 +6,9 @@ from datetime import datetime
 from uuid import uuid4
 from services.database import conn
 from services.inference import inspect_image
+from services.paths import DATA_ROOT
 
-IMAGE_DIR = Path(__file__).resolve().parents[1] / 'case_images'
+IMAGE_DIR = DATA_ROOT / 'case_images'
 _initialized = False
 _initialize_lock = threading.Lock()
 

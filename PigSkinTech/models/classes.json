@@ -1,0 +1,83 @@
+{
+  "Healthy": {
+    "code": "Healthy",
+    "name_vi": "Da khỏe mạnh (Bình thường)",
+    "danger_level": "An toàn",
+    "symptoms": "Da hồng hào, lông bóng mượt, không có vết loét, mụn mủ, đóng vảy hay mảng xuất huyết.",
+    "prevention": "Duy trì vệ sinh chuồng trại khô thoáng, tiêm phòng đầy đủ vắc-xin định kỳ và bổ sung khoáng chất, vitamin.",
+    "treatment": "Không cần điều trị thuốc. Tiếp tục theo dõi định kỳ và đảm bảo khẩu phần dinh dưỡng."
+  },
+  "Infected_Bacterial_Erysipelas": {
+    "code": "Infected_Bacterial_Erysipelas",
+    "name_vi": "Bệnh đóng dấu lợn (Erysipelas)",
+    "danger_level": "Cao",
+    "symptoms": "Sốt cao 41-42°C, xuất hiện các mảng đỏ hình thoi/vuông nổi cộm trên da lưng, ngực, cổ; ấn vào mất màu rồi đỏ lại.",
+    "prevention": "Tiêm vắc-xin phòng bệnh đóng dấu lợn định kỳ 2 lần/năm; tiêu độc khử trùng chuồng nuôi.",
+    "treatment": "Tiêm Penicillin G (20.000-30.000 IU/kg TT) hoặc Amoxicillin LA kết hợp hạ sốt Analgin + Vitamin C trong 3-5 ngày."
+  },
+  "Infected_Bacterial_Greasy_Pig_Disease": {
+    "code": "Infected_Bacterial_Greasy_Pig_Disease",
+    "name_vi": "Viêm da tiết dịch (Greasy Pig Disease)",
+    "danger_level": "Cao",
+    "symptoms": "Da tiết dịch nhờn màu nâu đen có mùi hôi, đóng vảy dày nứt nẻ quanh mặt, cổ và lan toàn thân do Staphylococcus hyicus.",
+    "prevention": "Bấm nanh heo con đúng kỹ thuật, sát trùng rốn và vết trầy xước, giữ chuồng đẻ sạch và khô.",
+    "treatment": "Tắm rửa vùng da bằng dung dịch Iodine 1% hoặc Chlorhexidine, tiêm Amoxicillin/Lincomycin và bù điện giải."
+  },
+  "Infected_Environmental_Dermatitis": {
+    "code": "Infected_Environmental_Dermatitis",
+    "name_vi": "Viêm da do môi trường (Dermatitis)",
+    "danger_level": "Trung bình",
+    "symptoms": "Da đỏ, sần sùi, trầy xước hoặc kích ứng cục bộ vùng bụng, đùi do nền chuồng ẩm ướt, khí NH3 cao hoặc hóa chất.",
+    "prevention": "Cải thiện thông gió, giảm mật độ nuôi, vệ sinh chất thải hàng ngày và kiểm tra độ nhẵn sàn chuồng.",
+    "treatment": "Chuyển sang ô chuồng khô sạch, xịt dung dịch sát khuẩn dịu nhẹ (Povidone-Iodine) và bổ sung Kẽm + Biotin."
+  },
+  "Infected_Environmental_Sunburn": {
+    "code": "Infected_Environmental_Sunburn",
+    "name_vi": "Cháy nắng da heo (Sunburn)",
+    "danger_level": "Thấp",
+    "symptoms": "Da vùng lưng, tai đỏ rát, phồng rộp nhẹ hoặc bong tróc vảy trắng sau khi tiếp xúc ánh nắng gắt kéo dài.",
+    "prevention": "Che lưới chống nắng, bố trí mái che và hệ thống phun sương làm mát chuồng nuôi.",
+    "treatment": "Đưa heo vào khu vực râm mát, bôi kem làm dịu chứa kẽm oxit/panthenol và cung cấp đủ nước mát pha điện giải."
+  },
+  "Infected_Fungal_Pityriasis_Rosea": {
+    "code": "Infected_Fungal_Pityriasis_Rosea",
+    "name_vi": "Bệnh vảy phấn hồng (Pityriasis Rosea)",
+    "danger_level": "Thấp",
+    "symptoms": "Tổn thương hình vòng tròn hoặc bầu dục màu đỏ hồng có viền vảy trắng mịn ở vùng bụng và mặt trong đùi heo con.",
+    "prevention": "Giữ chuồng ấm, khô ráo, giảm stress khi cai sữa và chọn lọc giống hạn chế di truyền nhạy cảm.",
+    "treatment": "Bệnh thường tự khỏi sau 4-6 tuần; vệ sinh da bằng dung dịch sát trùng nhẹ và bôi mỡ kẽm oxit nếu trầy xước."
+  },
+  "Infected_Fungal_Ringworm": {
+    "code": "Infected_Fungal_Ringworm",
+    "name_vi": "Bệnh nấm da / Hắc lào (Ringworm)",
+    "danger_level": "Trung bình",
+    "symptoms": "Đốm tròn rụng lông, bề mặt phủ lớp vảy xám trắng hoặc nâu khô, lan dần ra xung quanh ở cổ, vai, lưng.",
+    "prevention": "Tránh ẩm mốc chuồng trại, diệt chuột và vệ sinh dụng cụ chăn nuôi định kỳ bằng thuốc diệt nấm.",
+    "treatment": "Bôi cồn Iodine 2-5% hoặc kem Ketoconazole/Miconazole 2 lần/ngày trong 7-10 ngày; sát trùng chuồng nuôi."
+  },
+  "Infected_Parasitic_Mange": {
+    "code": "Infected_Parasitic_Mange",
+    "name_vi": "Bệnh ghẻ Sarcoptes (Mange)",
+    "danger_level": "Trung bình",
+    "symptoms": "Heo ngứa dữ dội, cọ sát vào tường chuồng, da dày sừng nhăn nheo đóng vảy xám ở vành tai, cổ, mông.",
+    "prevention": "Tẩy nội ngoại ký sinh trùng định kỳ cho đàn nái trước khi đẻ và heo thịt mới nhập đàn.",
+    "treatment": "Tiêm Ivermectin hoặc Doramectin (1 ml/33 kg TT), lặp lại sau 10-14 ngày kết hợp phun Amitraz toàn chuồng."
+  },
+  "Infected_Viral_Foot_and_Mouth_Disease": {
+    "code": "Infected_Viral_Foot_and_Mouth_Disease",
+    "name_vi": "Lở mồm long móng (FMD)",
+    "danger_level": "Khẩn cấp",
+    "symptoms": "Sốt cao, nổi mụn nước ở gương mũi, lưỡi, lợi, vành móng chân và kẽ móng; heo đi khập khiễng, bỏ ăn, chảy nước dãi.",
+    "prevention": "Tiêm vắc-xin LMLM đúng lịch, kiểm soát nghiêm ngặt người và phương tiện ra vào trại.",
+    "treatment": "CÁCH LY KHẨN CẤP toàn bộ ô chuồng, rắc vôi bột, báo thú y cơ sở. Xịt Xanh Methylen/Iodine vết loét và tiêm kháng sinh chống kế phát."
+  },
+  "Infected_Viral_Swinepox": {
+    "code": "Infected_Viral_Swinepox",
+    "name_vi": "Bệnh đậu heo (Swinepox)",
+    "danger_level": "Cao",
+    "symptoms": "Nổi nốt sẩn đỏ chuyển thành mụn nước, mụn mủ rồi đóng vảy nâu đen hình tròn trên bụng, bẹn, tai và mặt.",
+    "prevention": "Diệt côn trùng hút máu (chấy, rận, muỗi, ruồi) làm trung gian truyền bệnh; cách ly heo mắc bệnh.",
+    "treatment": "Bôi Xanh Methylen 1% hoặc Iodine lên nốt đậu, tiêm kháng sinh phổ rộng (Amoxicillin/Oxytetracycline) phòng nhiễm khuẩn kế phát."
+  }
+}
+

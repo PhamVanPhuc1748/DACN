@@ -1,21 +1,34 @@
-# Python virtual environments
-.venv/
+# Môi trường ảo Python
 venv/
-ENV/
-
-# Python bytecode & cache
+.env
 __pycache__/
-*.py[cod]
-*$py.class
+*.pyc
 
-# Runtime SQLite database & local app settings
-*.db
-*.db-shm
-*.db-wal
-pig_skin_app_settings.json
+# Thư mục dữ liệu ảnh gốc và models (quá nặng để push lên Git)
+/data/
+ml_workspace/weights/*.pt
+ml_workspace/weights/*.h5
+ml_workspace/weights/*.onnx
+ml_workspace/runs/
 
-# IDE & OS files
+# Frontend dependencies & build
+node_modules/
+dist/
+
+# IDEs
 .vscode/
 .idea/
+.1devtool/
+
+# Hệ điều hành
 .DS_Store
 Thumbs.db
+
+# PigSkin desktop runtime files and model weights
+PigSkinTech/.venv/
+PigSkinTech/__pycache__/
+PigSkinTech/**/__pycache__/
+PigSkinTech/*.pyc
+PigSkinTech/**/*.pyc
+PigSkinTech/pigskin_history.db-shm
+PigSkinTech/pigskin_history.db-wal

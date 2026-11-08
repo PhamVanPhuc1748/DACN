@@ -19,6 +19,7 @@ from services.auth_service import (
     show_snack,
     theme_tokens,
 )
+from theme import make_smooth_animation
 
 
 def _resolve_login_bg_image() -> Path:
@@ -63,6 +64,23 @@ def build_auth_view(page: ft.Page) -> ft.Control:
 
     bg_img_path = _resolve_login_bg_image()
 
+    error_text = ft.Text("", size=12, color="#DC2626", visible=False)
+
+    def complete_login(user_record: dict):
+        session_user = save_session_user(page, user_record)
+        target_route = role_home_route(session_user["role"])
+        page.go(target_route)
+
+    def handle_local_login(e=None):
+        try:
+            error_text.visible = False
+            user_record = authenticate_local(email_input.value, password_input.value)
+            complete_login(user_record)
+        except ValueError as err:
+            error_text.value = str(err)
+            error_text.visible = True
+            page.update()
+
     # (3) Email Input (No floating label, no prefix_icon)
     email_input = ft.TextField(
         value="nongdan.pigskin@gmail.com",
@@ -76,6 +94,7 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         color="#111827",
         hint_style=ft.TextStyle(color="#9CA3AF", size=14),
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
+        on_submit=handle_local_login,
     )
 
     # (4) Password Input (No floating label, no prefix_icon)
@@ -93,14 +112,8 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         color="#111827",
         hint_style=ft.TextStyle(color="#9CA3AF", size=14),
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
+        on_submit=handle_local_login,
     )
-
-    error_text = ft.Text("", size=12, color="#DC2626", visible=False)
-
-    def complete_login(user_record: dict):
-        session_user = save_session_user(page, user_record)
-        target_route = role_home_route(session_user["role"])
-        page.go(target_route)
 
     # Real Google OAuth callback handler
     def on_oauth_login(e):
@@ -123,16 +136,6 @@ def build_auth_view(page: ft.Page) -> ft.Control:
                 page.update()
 
     page.on_login = on_oauth_login
-
-    def handle_local_login(e=None):
-        try:
-            error_text.visible = False
-            user_record = authenticate_local(email_input.value, password_input.value)
-            complete_login(user_record)
-        except ValueError as err:
-            error_text.value = str(err)
-            error_text.visible = True
-            page.update()
 
     def open_mock_google_chooser():
         accounts = get_mock_google_accounts()
@@ -251,10 +254,15 @@ def build_auth_view(page: ft.Page) -> ft.Control:
                 pass
         open_mock_google_chooser()
 
+    instant_login_state = {"enabled": True}
+
     def fill_demo_account(email_val: str, role_label: str):
         email_input.value = email_val
         password_input.value = "123456"
         error_text.visible = False
+        if instant_login_state["enabled"]:
+            handle_local_login()
+            return
         show_snack(page, f"Đã điền tài khoản {role_label}: {email_val} (Mật khẩu: 123456)", "#16A34A")
         page.update()
 
@@ -276,6 +284,35 @@ def build_auth_view(page: ft.Page) -> ft.Control:
                 style=ft.TextStyle(decoration=ft.TextDecoration.UNDERLINE),
             ),
         )
+
+    instant_toggle_label = ft.Text(
+        "⚡ 1-Click Đăng nhập thẳng: BẬT",
+        size=11,
+        weight=ft.FontWeight.BOLD,
+        color="#15803D",
+    )
+
+    instant_toggle_btn = ft.Container(
+        padding=ft.padding.symmetric(horizontal=10, vertical=4),
+        border_radius=14,
+        bgcolor="#DCFCE7",
+        border=ft.border.all(1, "#86EFAC"),
+        animate=make_smooth_animation(180),
+        ink=True,
+        tooltip="Bật để nhấn vào vai trò mẫu là đăng nhập thẳng; tắt để chỉ điền sẵn Email/Mật khẩu",
+        content=instant_toggle_label,
+    )
+
+    def toggle_instant_login(e):
+        instant_login_state["enabled"] = not instant_login_state["enabled"]
+        on = instant_login_state["enabled"]
+        instant_toggle_label.value = "⚡ 1-Click Đăng nhập thẳng: BẬT" if on else "⚡ 1-Click Đăng nhập thẳng: TẮT"
+        instant_toggle_label.color = "#15803D" if on else "#6B7280"
+        instant_toggle_btn.bgcolor = "#DCFCE7" if on else "#F3F4F6"
+        instant_toggle_btn.border = ft.border.all(1, "#86EFAC" if on else "#E5E7EB")
+        page.update()
+
+    instant_toggle_btn.on_click = toggle_instant_login
 
     # 100% Clean Full-Window Pig Background
     full_bg_image = (
@@ -348,6 +385,16 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         tight=True,
     )
 
+    def on_primary_login_hover(e):
+        hovered = str(getattr(e, "data", "")).lower() == "true"
+        e.control.bgcolor = "#15803D" if hovered else "#16A34A"
+        e.control.shadow = ft.BoxShadow(
+            blur_radius=20 if hovered else 14,
+            color=ft.Colors.with_opacity(0.32 if hovered else 0.24, "#15803D" if hovered else "#16A34A"),
+            offset=ft.Offset(0, 6 if hovered else 4),
+        )
+        e.control.update()
+
     # (5) Full Pill-Shaped Primary Login Button ("Đăng nhập  →") placed 20px below Password
     primary_login_btn = ft.Container(
         width=float("inf"),
@@ -355,8 +402,10 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         border_radius=30,
         bgcolor="#16A34A",
         alignment=ft.alignment.center,
+        animate=make_smooth_animation(180),
         ink=True,
         on_click=handle_local_login,
+        on_hover=on_primary_login_hover,
         shadow=ft.BoxShadow(
             blur_radius=14,
             color=ft.Colors.with_opacity(0.24, "#16A34A"),
@@ -378,6 +427,12 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         content=ft.Text("Hoặc", size=13, color="#6B7280"),
     )
 
+    def on_google_btn_hover(e):
+        hovered = str(getattr(e, "data", "")).lower() == "true"
+        e.control.bgcolor = "#F8FAFC" if hovered else "#FFFFFF"
+        e.control.border = ft.border.all(1, "#CBD5E1" if hovered else "#E5E7EB")
+        e.control.update()
+
     # (7) Outlined White Google Button below "Hoặc"
     google_outlined_btn = ft.Container(
         width=float("inf"),
@@ -386,8 +441,10 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         border=ft.border.all(1, "#E5E7EB"),
         border_radius=8,
         alignment=ft.alignment.center,
+        animate=make_smooth_animation(180),
         ink=True,
         on_click=handle_google_button,
+        on_hover=on_google_btn_hover,
         content=ft.Row(
             [
                 _google_logo_badge(),
@@ -437,6 +494,7 @@ def build_auth_view(page: ft.Page) -> ft.Control:
                 spacing=0,
                 wrap=True,
             ),
+            instant_toggle_btn,
         ],
         spacing=8,
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,

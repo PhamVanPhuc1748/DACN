@@ -8,7 +8,7 @@ from services.auth_service import (
     show_snack,
 )
 from services.store import initialize
-from theme import BG_MAIN, PRIMARY, PRIMARY_DARK
+from theme import BG_MAIN, PRIMARY, PRIMARY_DARK, get_theme_palette
 from views.admin_view import build_admin_view
 from views.auth_view import build_auth_view
 from views.expert_view import build_expert_view
@@ -28,8 +28,8 @@ def main(page: ft.Page):
         "Inter": "https://fonts.gstatic.com/s/inter/v18/UcCO3FwrK3iLTeHuS_nVMrMxCp50SjIw2boKoduKmMEVuLyfAZ9hiA.ttf",
     }
     page.theme_mode = ft.ThemeMode.LIGHT
-    page.theme = ft.Theme(color_scheme_seed=PRIMARY_DARK, font_family="Segoe UI")
-    page.dark_theme = ft.Theme(color_scheme_seed=PRIMARY, font_family="Segoe UI")
+    page.theme = ft.Theme(color_scheme_seed=PRIMARY_DARK, font_family="Plus Jakarta Sans")
+    page.dark_theme = ft.Theme(color_scheme_seed=PRIMARY, font_family="Plus Jakarta Sans")
 
     if hasattr(page, "window"):
         page.window.width = 1440
@@ -73,6 +73,7 @@ def main(page: ft.Page):
             _, builder = ROUTE_BUILDERS[target]
 
         page.route = target
+        page.bgcolor = get_theme_palette(page)["BG_MAIN"]
         page.controls.clear()
         page.add(builder(page, user))
         page.update()

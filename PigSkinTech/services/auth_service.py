@@ -34,7 +34,9 @@ from theme import (
     css_input,
     css_kpi_card,
     css_shadow,
+    get_theme_palette,
     make_smooth_animation,
+    set_theme_page_context,
 )
 
 
@@ -60,18 +62,18 @@ ROLE_ROUTES = {
 
 THEMES = {
     "light": {
-        "BG": BG_MAIN,
-        "SURFACE": BG_CARD,
-        "SUB_SURFACE": BG_MAIN,
-        "SIDEBAR_BG": BG_SIDEBAR,
+        "BG": "#F8FAFC",
+        "SURFACE": "#FFFFFF",
+        "SUB_SURFACE": "#F1F5F9",
+        "SIDEBAR_BG": "#0F172A",
         "SIDEBAR_HOVER": "#1E293B",
-        "SIDEBAR_TEXT": TEXT_MUTED,
+        "SIDEBAR_TEXT": "#94A3B8",
         "SIDEBAR_ACTIVE_TEXT": "#FFFFFF",
         "SIDEBAR_BORDER": "#1E293B",
-        "BORDER": BORDER_LIGHT,
-        "TEXT": TEXT_PRIMARY,
-        "SECONDARY": TEXT_SECONDARY,
-        "MUTED": TEXT_MUTED,
+        "BORDER": "#E2E8F0",
+        "TEXT": "#0F172A",
+        "SECONDARY": "#475569",
+        "MUTED": "#64748B",
         "EMERALD": PRIMARY_DARK,
         "EMERALD_LIGHT": PRIMARY,
         "EMERALD_SOFT": "#ECFDF5",
@@ -80,7 +82,7 @@ THEMES = {
         "AMBER": "#D97706",
         "AMBER_SOFT": "#FFFBEB",
         "RED": "#DC2626",
-        "RED_SOFT": "#FEE2E2",
+        "RED_SOFT": "#FEF2F2",
         "PURPLE": "#7C3AED",
         "PURPLE_SOFT": "#F3E8FF",
     },
@@ -95,6 +97,7 @@ THEMES = {
         "SIDEBAR_BORDER": "#1E293B",
         "BORDER": "#334155",
         "TEXT": "#F8FAFC",
+        "SECONDARY": "#CBD5E1",
         "MUTED": "#94A3B8",
         "EMERALD": "#10B981",
         "EMERALD_LIGHT": "#34D399",
@@ -113,6 +116,8 @@ THEMES = {
 
 def ensure_flet_compat(page: ft.Page | None = None):
     """Ensure Flet 0.28.x and Flet 1.0.x APIs work identically."""
+    if page is not None:
+        set_theme_page_context(page)
     if hasattr(ft, "Alignment") and hasattr(ft, "alignment"):
         for name in (
             "center",
@@ -185,7 +190,8 @@ def session_clear(page: ft.Page):
 
 def is_dark_mode(page: ft.Page | None = None) -> bool:
     if page is None:
-        return False
+        return get_theme_palette(None)["IS_DARK"]
+    set_theme_page_context(page)
     mode = session_get(page, "theme_mode")
     if mode:
         return mode == "dark"
@@ -193,6 +199,8 @@ def is_dark_mode(page: ft.Page | None = None) -> bool:
 
 
 def theme_tokens(page: ft.Page | None = None) -> dict:
+    if page is not None:
+        set_theme_page_context(page)
     return THEMES["dark" if is_dark_mode(page) else "light"]
 
 
@@ -200,6 +208,7 @@ def toggle_theme_mode(page: ft.Page):
     new_mode = "light" if is_dark_mode(page) else "dark"
     session_set(page, "theme_mode", new_mode)
     page.theme_mode = ft.ThemeMode.DARK if new_mode == "dark" else ft.ThemeMode.LIGHT
+    set_theme_page_context(page)
     t = theme_tokens(page)
     page.bgcolor = t["BG"]
     current_route = getattr(page, "route", "/login") or "/login"
@@ -232,6 +241,7 @@ def tech_card(
         bgcolor=bgcolor or t["SURFACE"],
         border_color=border_color or t["BORDER"],
         gradient=gradient,
+        page=page,
     )
 
 
@@ -246,19 +256,21 @@ def header_stat_pill(
 ) -> ft.Container:
     """Modern SaaS KPI Stat Card placed at the top of the page."""
     t = theme_tokens(page)
+    dark = is_dark_mode(page)
+    box_bg = ft.Colors.with_opacity(0.22, accent) if dark else soft_bg
     return ft.Container(
         bgcolor=t["SURFACE"],
         border=ft.border.all(1, t["BORDER"]),
         border_radius=16,
         padding=ft.padding.symmetric(horizontal=18, vertical=14),
-        shadow=card_shadow(),
+        shadow=css_shadow(0.18 if dark else 0.04, 24, 6),
         animate=make_smooth_animation(200),
         content=ft.Row(
             [
                 ft.Container(
                     width=48,
                     height=48,
-                    bgcolor=soft_bg if not is_dark_mode(page) else ft.Colors.with_opacity(0.2, accent),
+                    bgcolor=box_bg,
                     border_radius=12,
                     alignment=ft.alignment.center,
                     content=ft.Icon(icon, color=accent, size=24),
@@ -267,12 +279,12 @@ def header_stat_pill(
                     [
                         ft.Row(
                             [
-                                ft.Text(label, size=12, color=TEXT_SECONDARY if not is_dark_mode(page) else t["MUTED"], weight=ft.FontWeight.W_600),
+                                ft.Text(label, size=13, color=t["SECONDARY"], weight=ft.FontWeight.W_600),
                                 ft.Container(
-                                    bgcolor=soft_bg if not is_dark_mode(page) else ft.Colors.with_opacity(0.2, accent),
-                                    padding=ft.padding.symmetric(horizontal=8, vertical=2),
+                                    bgcolor=box_bg,
+                                    padding=ft.padding.symmetric(horizontal=9, vertical=3),
                                     border_radius=12,
-                                    content=ft.Text(badge_text, size=10, color=accent, weight=ft.FontWeight.BOLD),
+                                    content=ft.Text(badge_text, size=12.5, color=accent, weight=ft.FontWeight.W_600),
                                 ),
                             ],
                             spacing=8,
@@ -299,7 +311,7 @@ def tech_banner(
     pills: list[ft.Control] | None = None,
     page: ft.Page | None = None,
 ) -> ft.Container:
-    """Minimalist Clean SaaS Page Header on light background with right-aligned KPI stat cards."""
+    """Minimalist Clean SaaS Page Header with right-aligned KPI stat cards."""
     t = theme_tokens(page)
     right_items: list[ft.Control] = []
     if pills:
@@ -309,12 +321,12 @@ def tech_banner(
             ft.Container(
                 bgcolor=t["SURFACE"],
                 border=ft.border.all(1, t["BORDER"]),
-                padding=ft.padding.symmetric(horizontal=12, vertical=6),
+                padding=ft.padding.symmetric(horizontal=14, vertical=7),
                 border_radius=20,
                 content=ft.Row(
                     [
                         ft.Container(width=8, height=8, bgcolor=PRIMARY, border_radius=4),
-                        ft.Text(badge_text, size=11, color=t["TEXT"], weight=ft.FontWeight.W_600),
+                        ft.Text(badge_text, size=13, color=t["TEXT"], weight=ft.FontWeight.W_600),
                     ],
                     spacing=6,
                     tight=True,
@@ -322,15 +334,15 @@ def tech_banner(
             )
         )
 
-    title_col_items = [ft.Text(title, size=24, weight=ft.FontWeight.W_800, color=t["TEXT"])]
+    title_col_items = [ft.Text(title, size=26, weight=ft.FontWeight.W_800, color=t["TEXT"])]
     if subtitle:
-        title_col_items.append(ft.Text(subtitle, size=13, color=TEXT_SECONDARY if not is_dark_mode(page) else t["MUTED"]))
+        title_col_items.append(ft.Text(subtitle, size=14, color=t["SECONDARY"]))
 
     return ft.Container(
-        padding=ft.padding.only(bottom=2),
+        padding=ft.padding.only(bottom=4),
         content=ft.Row(
             [
-                ft.Column(title_col_items, spacing=3, expand=True),
+                ft.Column(title_col_items, spacing=4, expand=True),
                 ft.Row(right_items, spacing=12, wrap=True),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -349,6 +361,8 @@ def kpi_stat_card(
     page: ft.Page | None = None,
 ) -> ft.Container:
     t = theme_tokens(page)
+    dark = is_dark_mode(page)
+    box_bg = ft.Colors.with_opacity(0.22, accent) if dark else soft_bg
     return tech_card(
         page=page,
         padding=20,
@@ -359,7 +373,7 @@ def kpi_stat_card(
                 ft.Container(
                     width=48,
                     height=48,
-                    bgcolor=soft_bg if not is_dark_mode(page) else ft.Colors.with_opacity(0.2, accent),
+                    bgcolor=box_bg,
                     border_radius=12,
                     alignment=ft.alignment.center,
                     content=ft.Icon(icon, color=accent, size=24),
@@ -368,12 +382,12 @@ def kpi_stat_card(
                     [
                         ft.Row(
                             [
-                                ft.Text(title, size=12, color=TEXT_SECONDARY if not is_dark_mode(page) else t["MUTED"], weight=ft.FontWeight.W_600, expand=True),
+                                ft.Text(title, size=13.5, color=t["SECONDARY"], weight=ft.FontWeight.W_600, expand=True),
                                 ft.Container(
-                                    bgcolor=soft_bg if not is_dark_mode(page) else ft.Colors.with_opacity(0.2, accent),
-                                    padding=ft.padding.symmetric(horizontal=8, vertical=3),
+                                    bgcolor=box_bg,
+                                    padding=ft.padding.symmetric(horizontal=9, vertical=3),
                                     border_radius=12,
-                                    content=ft.Text(subtitle, size=10, color=accent, weight=ft.FontWeight.BOLD),
+                                    content=ft.Text(subtitle, size=12.5, color=accent, weight=ft.FontWeight.W_600),
                                 ),
                             ],
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -576,6 +590,7 @@ def make_dropdown(
     width: int | None = None,
     expand: bool = False,
     content_padding=None,
+    page: ft.Page | None = None,
 ):
     return css_dropdown(
         label=label,
@@ -585,6 +600,7 @@ def make_dropdown(
         width=width,
         expand=expand,
         content_padding=content_padding,
+        page=page,
     )
 
 
@@ -725,12 +741,17 @@ def build_role_shell(
 ) -> ft.Control:
     """
     Build Clean SaaS Global Shell without top AppBar:
-    Consolidates User Profile, Role Badge, Dark Mode & Logout into the 250px Left Sidebar.
+    Consolidates User Profile, Role Badge, Dark Mode & Logout into the 270px Left Sidebar.
     """
     ensure_flet_compat(page)
+    set_theme_page_context(page)
     t = theme_tokens(page)
     page.bgcolor = t["BG"]
     page.appbar = None
+
+    route_key = f"active_tab_{getattr(page, 'route', '') or title}"
+    saved_idx = session_get(page, route_key)
+    start_index = saved_idx if isinstance(saved_idx, int) and 0 <= saved_idx < len(tab_builders) else initial_index
 
     body_host = ft.Container(
         expand=True,
@@ -739,7 +760,7 @@ def build_role_shell(
         content=ft.Column(expand=True, scroll=ft.ScrollMode.AUTO, spacing=20),
     )
 
-    active_state = {"index": initial_index}
+    active_state = {"index": start_index}
     menu_items_controls: list[ft.Container] = []
 
     def style_menu_item(item_container: ft.Container, idx: int, is_hovered: bool = False):
@@ -768,9 +789,12 @@ def build_role_shell(
 
     def switch_tab(idx: int):
         active_state["index"] = idx
+        session_set(page, route_key, idx)
+        set_theme_page_context(page)
         for i, ctrl in enumerate(menu_items_controls):
             style_menu_item(ctrl, i, is_hovered=False)
         controls = tab_builders[idx]()
+        body_host.bgcolor = theme_tokens(page)["BG"]
         body_host.content = ft.Column(
             controls=controls if isinstance(controls, list) else [controls],
             expand=True,
@@ -792,7 +816,7 @@ def build_role_shell(
         user=user,
     )
 
-    switch_tab(initial_index)
+    switch_tab(start_index)
 
     return ft.Row(
         [
@@ -815,8 +839,8 @@ def build_sidebar(
     user: dict | None = None,
 ) -> ft.Container:
     """
-    Build fixed 250px Custom Sidebar using ft.Column.
-    Includes Brand Header, Navigation Items (26px aligned icon column), User Profile Card, Theme Toggle & Logout.
+    Build fixed 270px Custom Sidebar using ft.Column.
+    Includes Brand Header, Navigation Items (26px aligned icon column, 14.5px text), User Profile Card, Theme Toggle & Logout.
     """
     t = theme_tokens(page)
     dark = is_dark_mode(page)
@@ -830,7 +854,7 @@ def build_sidebar(
 
     for idx, (lbl, icon_norm, icon_sel) in enumerate(destinations):
         indicator_bar = ft.Container(width=4, height=24, border_radius=2, bgcolor="transparent")
-        icon_widget = ft.Icon(icon_norm, size=19, color=t["SIDEBAR_TEXT"])
+        icon_widget = ft.Icon(icon_norm, size=20, color=t["SIDEBAR_TEXT"])
         icon_col = ft.Container(
             width=26,
             height=26,
@@ -839,7 +863,7 @@ def build_sidebar(
         )
         label_widget = ft.Text(
             lbl,
-            size=13,
+            size=14.5,
             color=t["SIDEBAR_TEXT"],
             weight=ft.FontWeight.W_500,
             no_wrap=True,
@@ -853,8 +877,9 @@ def build_sidebar(
             spacing=12,
         )
         item_box = ft.Container(
-            padding=ft.padding.symmetric(horizontal=10, vertical=10),
+            padding=ft.padding.symmetric(horizontal=10, vertical=11),
             border_radius=10,
+            animate=make_smooth_animation(180),
             ink=True,
             on_click=lambda e, i=idx: on_select_tab(i),
             on_hover=lambda e, i=idx: on_item_hover(e, i),
@@ -876,22 +901,41 @@ def build_sidebar(
 
     avatar = ft.CircleAvatar(
         bgcolor=role_color,
-        radius=16,
-        content=ft.Text(initials, color="#FFFFFF", size=11, weight=ft.FontWeight.BOLD),
+        radius=18,
+        content=ft.Text(initials, color="#FFFFFF", size=12.5, weight=ft.FontWeight.BOLD),
+    )
+
+    role_badge_pill = ft.Container(
+        padding=ft.padding.symmetric(horizontal=9, vertical=3),
+        border_radius=10,
+        bgcolor=ft.Colors.with_opacity(0.22, role_color),
+        border=ft.border.all(1, ft.Colors.with_opacity(0.45, role_color)),
+        content=ft.Text(
+            role_label,
+            size=12.5,
+            color="#34D399" if role == "user" else ("#38BDF8" if role == "expert" else "#C084FC"),
+            weight=ft.FontWeight.W_600,
+        ),
     )
 
     def handle_logout(e):
         logout_user(page)
         page.go("/login")
 
+    def on_logout_hover(e):
+        hovered = str(getattr(e, "data", "")).lower() == "true"
+        e.control.bgcolor = ft.Colors.with_opacity(0.24 if hovered else 0.12, "#EF4444")
+        e.control.border = ft.border.all(1, ft.Colors.with_opacity(0.55 if hovered else 0.3, "#EF4444"))
+        e.control.update()
+
     profile_and_footer = ft.Container(
-        padding=12,
-        border_radius=12,
+        padding=14,
+        border_radius=14,
         bgcolor="#1E293B",
         border=ft.border.all(1, "#334155"),
         content=ft.Column(
             [
-                # User Profile + Role Badge
+                # User Profile + Full Name + Role Badge
                 ft.Row(
                     [
                         avatar,
@@ -899,41 +943,40 @@ def build_sidebar(
                             [
                                 ft.Text(
                                     user.get("full_name") or "Người dùng",
-                                    size=12,
+                                    size=14,
                                     weight=ft.FontWeight.BOLD,
                                     color="#FFFFFF",
-                                    no_wrap=True,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
                                 ),
-                                ft.Text(
-                                    role_label,
-                                    size=10,
-                                    color="#34D399",
-                                    weight=ft.FontWeight.W_600,
+                                ft.Row(
+                                    [
+                                        role_badge_pill,
+                                        ft.IconButton(
+                                            icon=ft.Icons.LIGHT_MODE_ROUNDED if dark else ft.Icons.DARK_MODE_ROUNDED,
+                                            icon_size=18,
+                                            icon_color="#FBBF24" if dark else "#CBD5E1",
+                                            tooltip="Đổi giao diện Sáng / Tối",
+                                            on_click=lambda e: toggle_theme_mode(page),
+                                        ),
+                                    ],
+                                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                                 ),
                             ],
-                            spacing=1,
+                            spacing=3,
                             expand=True,
                         ),
-                        ft.IconButton(
-                            icon=ft.Icons.LIGHT_MODE_ROUNDED if dark else ft.Icons.DARK_MODE_ROUNDED,
-                            icon_size=16,
-                            icon_color="#FBBF24" if dark else "#94A3B8",
-                            tooltip="Đổi giao diện Sáng / Tối",
-                            on_click=lambda e: toggle_theme_mode(page),
-                        ),
                     ],
-                    spacing=8,
+                    spacing=10,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 ft.Divider(height=8, color="#334155"),
                 # Human-friendly AI Status
                 ft.Row(
                     [
-                        ft.Text("🟢" if ready else "🟡", size=10),
+                        ft.Text("🟢" if ready else "🟡", size=12.5),
                         ft.Text(
                             "Trí tuệ nhân tạo PigSkin AI" if ready else "PigSkin AI đang khởi động",
-                            size=11,
+                            size=12.5,
                             color="#CBD5E1",
                             expand=True,
                         ),
@@ -943,16 +986,18 @@ def build_sidebar(
                 # Clean Logout Button
                 ft.Container(
                     margin=ft.margin.only(top=4),
-                    padding=ft.padding.symmetric(horizontal=10, vertical=7),
+                    padding=ft.padding.symmetric(horizontal=10, vertical=8),
                     border_radius=8,
                     bgcolor=ft.Colors.with_opacity(0.12, "#EF4444"),
                     border=ft.border.all(1, ft.Colors.with_opacity(0.3, "#EF4444")),
+                    animate=make_smooth_animation(180),
                     ink=True,
                     on_click=handle_logout,
+                    on_hover=on_logout_hover,
                     content=ft.Row(
                         [
-                            ft.Icon(ft.Icons.LOGOUT_ROUNDED, size=14, color="#FCA5A5"),
-                            ft.Text("Đăng xuất tài khoản", size=11, weight=ft.FontWeight.W_600, color="#FCA5A5"),
+                            ft.Icon(ft.Icons.LOGOUT_ROUNDED, size=16, color="#FCA5A5"),
+                            ft.Text("Đăng xuất tài khoản", size=13, weight=ft.FontWeight.W_600, color="#FCA5A5"),
                         ],
                         alignment=ft.MainAxisAlignment.CENTER,
                         spacing=6,
@@ -965,10 +1010,10 @@ def build_sidebar(
     )
 
     return ft.Container(
-        width=250,
+        width=270,
         bgcolor=t["SIDEBAR_BG"],
         border=ft.border.only(right=ft.BorderSide(1, t["SIDEBAR_BORDER"])),
-        padding=ft.padding.symmetric(horizontal=12, vertical=18),
+        padding=ft.padding.symmetric(horizontal=14, vertical=18),
         content=ft.Column(
             [
                 ft.Container(
@@ -976,17 +1021,17 @@ def build_sidebar(
                     content=ft.Row(
                         [
                             ft.Container(
-                                width=36,
-                                height=36,
+                                width=38,
+                                height=38,
                                 border_radius=10,
                                 bgcolor=ft.Colors.with_opacity(0.18, "#10B981"),
                                 alignment=ft.alignment.center,
-                                content=ft.Text("🐷", size=18),
+                                content=ft.Text("🐷", size=19),
                             ),
                             ft.Column(
                                 [
-                                    ft.Text("PigSkinTech AI", size=14, weight=ft.FontWeight.BOLD, color="#FFFFFF"),
-                                    ft.Text("Phòng khám Thú y Số", size=10, color="#34D399"),
+                                    ft.Text("PigSkinTech AI", size=15, weight=ft.FontWeight.BOLD, color="#FFFFFF"),
+                                    ft.Text("Phòng khám Thú y Số", size=12.5, color="#34D399"),
                                 ],
                                 spacing=1,
                             ),
@@ -997,7 +1042,7 @@ def build_sidebar(
                 ft.Divider(height=16, color="#1E293B"),
                 ft.Container(
                     padding=ft.padding.only(left=10, bottom=4),
-                    content=ft.Text("DANH MỤC CHỨC NĂNG", size=10, weight=ft.FontWeight.BOLD, color="#64748B"),
+                    content=ft.Text("DANH MỤC CHỨC NĂNG", size=12, weight=ft.FontWeight.BOLD, color="#94A3B8"),
                 ),
                 ft.Column(menu_items_controls, spacing=6),
                 ft.Container(expand=True),

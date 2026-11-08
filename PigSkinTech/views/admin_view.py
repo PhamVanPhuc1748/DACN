@@ -15,7 +15,6 @@ from services.auth_service import (
     theme_tokens,
 )
 from services.project_data import (
-    CLASSES_JSON_PATH,
     active_run,
     delete_class_info,
     display_class,
@@ -31,15 +30,15 @@ from services.store import (
     toggle_user_lock,
     update_user_role,
 )
-from theme import css_input
+from theme import PRIMARY, css_input, make_smooth_animation
 
 
 def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
     ensure_flet_compat(page)
-    t = theme_tokens(page)
 
     # Tab 1: System Dashboard
     def build_dashboard_tab():
+        t = theme_tokens(page)
         stats = get_system_stats()
         total_ins = max(1, stats["total_inspections"])
         dist = stats["distribution"]
@@ -52,7 +51,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                     "Tài khoản Google OAuth & Local",
                     ft.Icons.PEOPLE_ALT_ROUNDED,
                     accent="#0284C7",
-                    soft_bg="#E0F2FE",
+                    soft_bg=t["CYAN_SOFT"],
                     page=page,
                 ),
                 kpi_stat_card(
@@ -61,7 +60,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                     f"{stats['pending_count']} ca đang chờ thẩm định",
                     ft.Icons.ANALYTICS_ROUNDED,
                     accent="#059669",
-                    soft_bg="#ECFDF5",
+                    soft_bg=t["EMERALD_SOFT"],
                     page=page,
                 ),
                 kpi_stat_card(
@@ -70,16 +69,16 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                     f"Đồng thuận {stats['agreed_count']}/{stats['reviewed_count']} ca đã duyệt",
                     ft.Icons.VERIFIED_ROUNDED,
                     accent="#7C3AED",
-                    soft_bg="#F3E8FF",
+                    soft_bg=t["PURPLE_SOFT"],
                     page=page,
                 ),
                 kpi_stat_card(
                     "Ảnh Dataset chuẩn hóa",
                     str(stats["curated_count"]),
-                    "Sẵn sàng phục vụ re-train model",
+                    "Sẵn sàng huấn luyện nâng cao",
                     ft.Icons.DATASET_LINKED_ROUNDED,
                     accent="#D97706",
-                    soft_bg="#FEF3C7",
+                    soft_bg=t["AMBER_SOFT"],
                     page=page,
                 ),
             ],
@@ -94,33 +93,33 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                     [
                         ft.Row(
                             [
-                                ft.Text(f"{display_class(cls_code)} ({cls_code})", size=13, weight=ft.FontWeight.W_600, color=t["TEXT"], expand=True),
-                                ft.Text(f"{count} ca ({ratio*100:.1f}%)", size=12, weight=ft.FontWeight.BOLD, color="#059669"),
+                                ft.Text(f"{display_class(cls_code)} ({cls_code})", size=14, weight=ft.FontWeight.W_600, color=t["TEXT"], expand=True),
+                                ft.Text(f"{count} ca ({ratio*100:.1f}%)", size=13.5, weight=ft.FontWeight.BOLD, color=t["EMERALD"]),
                             ]
                         ),
-                        ft.ProgressBar(value=ratio, bar_height=8, color="#059669", bgcolor=t["BORDER"]),
+                        ft.ProgressBar(value=ratio, bar_height=8, color=t["EMERALD"], bgcolor=t["BORDER"]),
                     ],
-                    spacing=4,
+                    spacing=5,
                 )
             )
 
         dist_card = tech_card(
             page=page,
             expand=1,
-            padding=22,
+            padding=24,
             content=ft.Column(
                 [
                     ft.Row(
                         [
-                            ft.Icon(ft.Icons.BAR_CHART_ROUNDED, color="#059669", size=22),
-                            ft.Text("Phân bố các loại bệnh phát hiện trên toàn hệ thống", size=16, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
+                            ft.Icon(ft.Icons.BAR_CHART_ROUNDED, color=t["EMERALD"], size=22),
+                            ft.Text("Phân bố các loại bệnh phát hiện trên toàn hệ thống", size=18, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
                         ],
                         spacing=8,
                     ),
                     ft.Divider(height=10, color=t["BORDER"]),
-                    *(dist_rows or [ft.Text("Chưa có dữ liệu chẩn đoán.", size=13, color=t["MUTED"])]),
+                    *(dist_rows or [ft.Text("Chưa có dữ liệu chẩn đoán.", size=14, color=t["MUTED"])]),
                 ],
-                spacing=10,
+                spacing=12,
             ),
         )
 
@@ -138,60 +137,61 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                             [
                                 ft.Text(
                                     f"{cls_meta.get('name_vi', cls_code)} ({cls_code})",
-                                    size=12,
+                                    size=14,
                                     weight=ft.FontWeight.W_600,
                                     color=t["TEXT"],
                                     expand=True,
                                 ),
-                                ft.Text(f"F1: {f1_val*100:.1f}%", size=11, weight=ft.FontWeight.BOLD, color="#0284C7"),
+                                ft.Text(f"F1: {f1_val*100:.1f}%", size=13, weight=ft.FontWeight.BOLD, color=t["CYAN"]),
                             ]
                         ),
-                        ft.ProgressBar(value=min(1.0, max(0.0, f1_val)), bar_height=7, color="#0284C7", bgcolor=t["BORDER"]),
+                        ft.ProgressBar(value=min(1.0, max(0.0, f1_val)), bar_height=8, color=t["CYAN"], bgcolor=t["BORDER"]),
                     ],
-                    spacing=3,
+                    spacing=4,
                 )
             )
 
         benchmark_card = tech_card(
             page=page,
             expand=1,
-            padding=22,
+            padding=24,
             content=ft.Column(
                 [
                     ft.Row(
                         [
-                            ft.Icon(ft.Icons.MEMORY_ROUNDED, color="#0284C7", size=22),
+                            ft.Icon(ft.Icons.MEMORY_ROUNDED, color=t["CYAN"], size=22),
                             ft.Text(
                                 f"Hiệu năng Trí tuệ nhân tạo PigSkin AI ({len(classes_cfg)} nhóm bệnh lý)",
-                                size=16,
+                                size=18,
                                 weight=ft.FontWeight.BOLD,
                                 color=t["TEXT"],
                                 expand=True,
                             ),
                             ft.Container(
-                                bgcolor="#EFF6FF",
-                                padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                                bgcolor=t["CYAN_SOFT"],
+                                padding=ft.padding.symmetric(horizontal=12, vertical=5),
                                 border_radius=10,
                                 content=ft.Text(
-                                    f"Độ chính xác: {float(metrics.get('accuracy', 0.914))*100:.1f}% • F1 trung bình: {float(metrics.get('macro_f1', 0.902))*100:.1f}%",
-                                    size=11,
-                                    weight=ft.FontWeight.BOLD,
-                                    color="#0284C7",
+                                    f"Độ chính xác: {float(metrics.get('accuracy', 0.914))*100:.1f}% • F1: {float(metrics.get('macro_f1', 0.902))*100:.1f}%",
+                                    size=12.5,
+                                    weight=ft.FontWeight.W_600,
+                                    color=t["CYAN"],
                                 ),
                             ),
                         ],
                         spacing=8,
                     ),
+                    ft.Divider(height=10, color=t["BORDER"]),
                     *f1_rows,
                 ],
-                spacing=10,
+                spacing=12,
             ),
         )
 
         admin_pills = [
-            header_stat_pill("Người dùng", str(stats["total_users"]), ft.Icons.PEOPLE_ALT_ROUNDED, "#0284C7", "#EFF6FF", "Hoạt động tốt", page=page),
-            header_stat_pill("Lượt khám", str(stats["total_inspections"]), ft.Icons.ANALYTICS_ROUNDED, "#059669", "#ECFDF5", "+12% hôm nay", page=page),
-            header_stat_pill("Đồng thuận AI", f"{stats['ai_accuracy_vs_expert']:.1f}%", ft.Icons.VERIFIED_ROUNDED, "#D97706", "#FFFBEB", "Ổn định", page=page),
+            header_stat_pill("Người dùng", str(stats["total_users"]), ft.Icons.PEOPLE_ALT_ROUNDED, "#0284C7", t["CYAN_SOFT"], "Hoạt động tốt", page=page),
+            header_stat_pill("Lượt khám", str(stats["total_inspections"]), ft.Icons.ANALYTICS_ROUNDED, "#059669", t["EMERALD_SOFT"], "+12% hôm nay", page=page),
+            header_stat_pill("Đồng thuận AI", f"{stats['ai_accuracy_vs_expert']:.1f}%", ft.Icons.VERIFIED_ROUNDED, "#D97706", t["AMBER_SOFT"], "Ổn định", page=page),
         ]
 
         return [
@@ -213,6 +213,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             hint_text="Nhập từ khóa tìm kiếm...",
             prefix_icon=ft.Icons.SEARCH_ROUNDED,
             expand=True,
+            page=page,
         )
 
         def handle_role_change(uid: int, new_role: str):
@@ -233,9 +234,9 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             )
 
         def open_add_user_dialog(e):
-            new_name = css_input(label="Họ và tên người dùng", hint_text="VD: Nguyễn Văn B", prefix_icon=ft.Icons.BADGE_OUTLINED)
-            new_email = css_input(label="Địa chỉ Email", hint_text="VD: b.nguyen@gmail.com", prefix_icon=ft.Icons.EMAIL_OUTLINED)
-            new_pw = css_input(label="Mật khẩu khởi tạo", value="123456", prefix_icon=ft.Icons.LOCK_OUTLINE_ROUNDED)
+            new_name = css_input(label="Họ và tên người dùng", hint_text="VD: Nguyễn Văn B", prefix_icon=ft.Icons.BADGE_OUTLINED, page=page)
+            new_email = css_input(label="Địa chỉ Email", hint_text="VD: b.nguyen@gmail.com", prefix_icon=ft.Icons.EMAIL_OUTLINED, page=page)
+            new_pw = css_input(label="Mật khẩu khởi tạo", value="123456", prefix_icon=ft.Icons.LOCK_OUTLINE_ROUNDED, page=page)
             new_role_dd = make_dropdown(
                 "Phân quyền (RBAC)",
                 "user",
@@ -245,6 +246,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                     ("admin", "Admin (Quản trị)"),
                 ],
                 expand=True,
+                page=page,
             )
             new_provider_dd = make_dropdown(
                 "Phương thức xác thực",
@@ -254,8 +256,9 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                     ("local", "Local Account"),
                 ],
                 expand=True,
+                page=page,
             )
-            err_lbl = ft.Text("", size=12, color="#DC2626", visible=False)
+            err_lbl = ft.Text("", size=13, color="#DC2626", visible=False)
             dlg = ft.AlertDialog(modal=True)
 
             def save_new_user(ev):
@@ -277,13 +280,13 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
 
             dlg.title = ft.Row(
                 [
-                    ft.Icon(ft.Icons.PERSON_ADD_ALT_1_ROUNDED, color="#059669"),
-                    ft.Text("Thêm tài khoản mới vào hệ thống", size=16, weight=ft.FontWeight.BOLD),
+                    ft.Icon(ft.Icons.PERSON_ADD_ALT_1_ROUNDED, color="#059669", size=22),
+                    ft.Text("Thêm tài khoản mới vào hệ thống", size=18, weight=ft.FontWeight.BOLD),
                 ],
                 spacing=8,
             )
             dlg.content = ft.Container(
-                width=440,
+                width=460,
                 content=ft.Column(
                     [
                         new_name,
@@ -302,10 +305,28 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             ]
             open_dialog(page, dlg)
 
+        users_header_host = ft.Container()
+
         def refresh_users(e=None):
+            t = theme_tokens(page)
             role_f = role_filter.value or "all"
             q_str = search_field.value or ""
             accounts = list_users(role_f, q_str)
+            all_accounts = list_users("all", "")
+            active_total = sum(1 for a in all_accounts if int(a.get("is_active") or 0) == 1)
+            google_total = sum(1 for a in all_accounts if a.get("auth_provider") == "google")
+
+            users_pills = [
+                header_stat_pill("Tổng tài khoản", str(len(all_accounts)), ft.Icons.PEOPLE_ALT_ROUNDED, "#0284C7", t["CYAN_SOFT"], "Toàn hệ thống", page=page),
+                header_stat_pill("Đang hoạt động", str(active_total), ft.Icons.VERIFIED_USER_ROUNDED, "#059669", t["EMERALD_SOFT"], "Cấp quyền RBAC", page=page),
+                header_stat_pill("Google OAuth", str(google_total), ft.Icons.CLOUD_DONE_ROUNDED, "#D97706", t["AMBER_SOFT"], "Xác thực nhanh", page=page),
+            ]
+            users_header_host.content = tech_banner(
+                "Quản lý Người dùng & Phân quyền",
+                "Quản lý danh sách tài khoản Google OAuth và Local, tìm kiếm, khóa/mở khóa và cấp quyền truy cập",
+                pills=users_pills,
+                page=page,
+            )
             rows = []
             for acc in accounts:
                 uid = int(acc["id"])
@@ -314,7 +335,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 r_code = acc.get("role", "user")
 
                 provider_chip = ft.Container(
-                    bgcolor="#E0F2FE" if is_google else t["SUB_SURFACE"],
+                    bgcolor=t["CYAN_SOFT"] if is_google else t["SUB_SURFACE"],
                     border=ft.border.all(1, "#38BDF8" if is_google else t["BORDER"]),
                     padding=ft.padding.symmetric(horizontal=10, vertical=5),
                     border_radius=12,
@@ -322,14 +343,14 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                         [
                             ft.Icon(
                                 ft.Icons.CLOUD_DONE_ROUNDED if is_google else ft.Icons.COMPUTER_ROUNDED,
-                                size=14,
-                                color="#0284C7" if is_google else t["MUTED"],
+                                size=15,
+                                color=t["CYAN"] if is_google else t["MUTED"],
                             ),
                             ft.Text(
                                 "Google OAuth" if is_google else "Local Account",
-                                size=11,
-                                color="#0284C7" if is_google else t["TEXT"],
-                                weight=ft.FontWeight.BOLD,
+                                size=12.5,
+                                color=t["CYAN"] if is_google else t["TEXT"],
+                                weight=ft.FontWeight.W_600,
                             ),
                         ],
                         spacing=5,
@@ -338,19 +359,18 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 )
 
                 status_chip = ft.Container(
-                    bgcolor="#ECFDF5" if is_active else "#FEE2E2",
+                    bgcolor=t["EMERALD_SOFT"] if is_active else t["RED_SOFT"],
                     border=ft.border.all(1, "#10B981" if is_active else "#F87171"),
                     padding=ft.padding.symmetric(horizontal=10, vertical=5),
                     border_radius=12,
                     content=ft.Text(
                         "Hoạt động" if is_active else "Đã khóa",
-                        size=11,
-                        color="#059669" if is_active else "#DC2626",
-                        weight=ft.FontWeight.BOLD,
+                        size=12.5,
+                        color=t["EMERALD"] if is_active else t["RED"],
+                        weight=ft.FontWeight.W_600,
                     ),
                 )
 
-                # Width=220 + compact content_padding so "User (Chăn nuôi)", "Expert (Chuyên gia)", "Admin (Quản trị)" never clip
                 role_dd = make_dropdown(
                     label="",
                     value=r_code,
@@ -362,6 +382,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                     on_change=lambda ev, u_id=uid: handle_role_change(u_id, ev.control.value),
                     width=220,
                     content_padding=ft.padding.symmetric(horizontal=10, vertical=6),
+                    page=page,
                 )
 
                 lock_btn = ft.OutlinedButton(
@@ -373,9 +394,9 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 rows.append(
                     ft.DataRow(
                         cells=[
-                            ft.DataCell(ft.Text(f"#{uid}", size=12, weight=ft.FontWeight.BOLD, color=t["TEXT"])),
-                            ft.DataCell(ft.Text(acc.get("full_name", ""), size=13, weight=ft.FontWeight.W_600, color=t["TEXT"])),
-                            ft.DataCell(ft.Text(acc.get("email", ""), size=12, color=t["MUTED"])),
+                            ft.DataCell(ft.Text(f"#{uid}", size=13.5, weight=ft.FontWeight.BOLD, color=t["TEXT"])),
+                            ft.DataCell(ft.Text(acc.get("full_name", ""), size=14, weight=ft.FontWeight.W_600, color=t["TEXT"])),
+                            ft.DataCell(ft.Text(acc.get("email", ""), size=13.5, color=t["SECONDARY"])),
                             ft.DataCell(provider_chip),
                             ft.DataCell(ft.Container(width=220, padding=ft.padding.symmetric(vertical=4), content=role_dd)),
                             ft.DataCell(status_chip),
@@ -389,18 +410,18 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 expand=True,
                 column_spacing=26,
                 horizontal_margin=16,
-                data_row_min_height=56,
-                data_row_max_height=64,
-                heading_row_height=48,
+                data_row_min_height=58,
+                data_row_max_height=66,
+                heading_row_height=50,
                 heading_row_color=t["SUB_SURFACE"],
                 columns=[
-                    ft.DataColumn(ft.Text("ID", weight=ft.FontWeight.BOLD, color=t["TEXT"])),
-                    ft.DataColumn(ft.Text("Họ và tên", weight=ft.FontWeight.BOLD, color=t["TEXT"])),
-                    ft.DataColumn(ft.Text("Email đăng nhập", weight=ft.FontWeight.BOLD, color=t["TEXT"])),
-                    ft.DataColumn(ft.Text("Phương thức", weight=ft.FontWeight.BOLD, color=t["TEXT"])),
-                    ft.DataColumn(ft.Text("Phân quyền (RBAC)", weight=ft.FontWeight.BOLD, color=t["TEXT"])),
-                    ft.DataColumn(ft.Text("Trạng thái", weight=ft.FontWeight.BOLD, color=t["TEXT"])),
-                    ft.DataColumn(ft.Text("Thao tác", weight=ft.FontWeight.BOLD, color=t["TEXT"])),
+                    ft.DataColumn(ft.Text("ID", size=13.5, weight=ft.FontWeight.BOLD, color=t["TEXT"])),
+                    ft.DataColumn(ft.Text("Họ và tên", size=13.5, weight=ft.FontWeight.BOLD, color=t["TEXT"])),
+                    ft.DataColumn(ft.Text("Email đăng nhập", size=13.5, weight=ft.FontWeight.BOLD, color=t["TEXT"])),
+                    ft.DataColumn(ft.Text("Phương thức", size=13.5, weight=ft.FontWeight.BOLD, color=t["TEXT"])),
+                    ft.DataColumn(ft.Text("Phân quyền (RBAC)", size=13.5, weight=ft.FontWeight.BOLD, color=t["TEXT"])),
+                    ft.DataColumn(ft.Text("Trạng thái", size=13.5, weight=ft.FontWeight.BOLD, color=t["TEXT"])),
+                    ft.DataColumn(ft.Text("Thao tác", size=13.5, weight=ft.FontWeight.BOLD, color=t["TEXT"])),
                 ],
                 rows=rows,
             )
@@ -417,14 +438,15 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 ("admin", "Admin (Quản trị)"),
             ],
             on_change=refresh_users,
-            width=230,
+            width=240,
+            page=page,
         )
         search_field.on_change = refresh_users
         refresh_users()
 
         toolbar_card = tech_card(
             page=page,
-            padding=16,
+            padding=18,
             content=ft.Row(
                 [
                     search_field,
@@ -441,23 +463,18 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
         )
 
         return [
-            tech_banner(
-                "Quản lý Người dùng & Phân quyền (RBAC Directory)",
-                "Quản lý danh sách tài khoản Google OAuth và Local, tìm kiếm, khóa/mở khóa và cấp quyền truy cập",
-                ft.Icons.MANAGE_ACCOUNTS_ROUNDED,
-                badge_text="RBAC SECURITY",
-                colors=["#0F172A", "#047857", "#1E293B"],
-            ),
+            users_header_host,
             toolbar_card,
             tech_card(
                 page=page,
-                padding=16,
+                padding=18,
                 content=ft.Row([table_host], expand=True),
             ),
         ]
 
     # Tab 3: AI & Classes Config
     def build_config_tab():
+        t = theme_tokens(page)
         runs = list_model_runs()
         cur_run = active_run()
         cur_ckpt = str(cur_run["checkpoint"]) if cur_run else ""
@@ -470,6 +487,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             value=cur_ckpt,
             prefix_icon=ft.Icons.FOLDER_SPECIAL_OUTLINED,
             expand=True,
+            page=page,
         )
 
         def on_select_run(e):
@@ -482,6 +500,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             run_options,
             on_change=on_select_run,
             expand=True,
+            page=page,
         )
 
         def handle_activate_model(e):
@@ -495,18 +514,21 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
         cfg_data = load_classes_config()
         first_key = next(iter(cfg_data.keys()), "Healthy")
         first_item = cfg_data.get(first_key, {})
+        selected_class = {"code": first_key}
 
         code_field = css_input(
             label="Mã lớp bệnh (Class Key)",
             value=first_item.get("code", first_key),
             prefix_icon=ft.Icons.CODE_ROUNDED,
             expand=True,
+            page=page,
         )
         name_vi_field = css_input(
             label="Tên bệnh hiển thị (Tiếng Việt)",
             value=first_item.get("name_vi", ""),
             prefix_icon=ft.Icons.LABEL_OUTLINE_ROUNDED,
             expand=True,
+            page=page,
         )
         danger_dropdown = make_dropdown(
             "Mức độ nguy hiểm",
@@ -518,7 +540,8 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 ("Cao", "Cao"),
                 ("Khẩn cấp", "Khẩn cấp"),
             ],
-            width=210,
+            width=220,
+            page=page,
         )
         symptoms_field = css_input(
             label="Triệu chứng nhận diện",
@@ -526,6 +549,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             multiline=True,
             min_lines=2,
             max_lines=3,
+            page=page,
         )
         prevention_field = css_input(
             label="Biện pháp phòng ngừa",
@@ -533,6 +557,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             multiline=True,
             min_lines=2,
             max_lines=3,
+            page=page,
         )
         treatment_field = css_input(
             label="Phác đồ điều trị mặc định",
@@ -540,11 +565,30 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             multiline=True,
             min_lines=2,
             max_lines=3,
+            page=page,
         )
 
-        classes_list_col = ft.Column(spacing=8)
+        classes_list_col = ft.Column(spacing=10)
+        config_header_host = ft.Container()
+
+        def refresh_config_header():
+            cur_t = theme_tokens(page)
+            latest = load_classes_config()
+            urgent_cnt = sum(1 for v in latest.values() if v.get("danger_level") in ("Cao", "Khẩn cấp"))
+            config_pills = [
+                header_stat_pill("Phiên bản AI", str(len(runs) or 1), ft.Icons.MEMORY_ROUNDED, "#0284C7", cur_t["CYAN_SOFT"], "Đang kích hoạt", page=page),
+                header_stat_pill("Nhóm bệnh lý", str(len(latest)), ft.Icons.MEDICAL_SERVICES_ROUNDED, "#059669", cur_t["EMERALD_SOFT"], "Danh mục chuẩn", page=page),
+                header_stat_pill("Mức nguy hiểm cao", str(urgent_cnt), ft.Icons.WARNING_AMBER_ROUNDED, "#DC2626", cur_t["RED_SOFT"], "Cần giám sát", page=page),
+            ]
+            config_header_host.content = tech_banner(
+                "Quản lý Mô hình AI & Danh mục Bệnh lý",
+                "Chuyển đổi phiên bản trọng số Trí tuệ nhân tạo PigSkin AI và cập nhật trực tiếp phác đồ điều trị chuẩn",
+                pills=config_pills,
+                page=page,
+            )
 
         def load_class_into_form(code: str):
+            selected_class["code"] = code
             latest = load_classes_config()
             item = latest.get(code, {})
             code_field.value = code
@@ -553,31 +597,42 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             symptoms_field.value = item.get("symptoms", "")
             prevention_field.value = item.get("prevention", "")
             treatment_field.value = item.get("treatment", "")
-            page.update()
+            refresh_classes_list()
 
         def refresh_classes_list():
+            cur_t = theme_tokens(page)
+            refresh_config_header()
             latest = load_classes_config()
             classes_list_col.controls.clear()
             for code, item in latest.items():
+                is_selected = selected_class.get("code") == code
                 classes_list_col.controls.append(
                     ft.Container(
-                        padding=14,
-                        bgcolor=t["SUB_SURFACE"],
-                        border_radius=10,
-                        border=ft.border.all(1, t["BORDER"]),
+                        padding=16,
+                        bgcolor=cur_t["EMERALD_SOFT"] if is_selected else cur_t["SUB_SURFACE"],
+                        border_radius=12,
+                        border=ft.border.all(2, PRIMARY) if is_selected else ft.border.all(1, cur_t["BORDER"]),
+                        animate=make_smooth_animation(180),
+                        ink=True,
+                        on_click=lambda e, c=code: load_class_into_form(c),
                         content=ft.Row(
                             [
                                 ft.Column(
                                     [
-                                        ft.Text(f"{item.get('name_vi')} ({code}) • Mức độ: {item.get('danger_level')}", size=13, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
-                                        ft.Text(f"Phác đồ mặc định: {item.get('treatment')}", size=12, color="#059669"),
+                                        ft.Text(
+                                            f"{item.get('name_vi')} ({code}) • Mức độ: {item.get('danger_level')}",
+                                            size=15,
+                                            weight=ft.FontWeight.BOLD,
+                                            color=cur_t["TEXT"],
+                                        ),
+                                        ft.Text(f"Phác đồ mặc định: {item.get('treatment')}", size=13.5, color=cur_t["EMERALD"]),
                                     ],
-                                    spacing=2,
+                                    spacing=4,
                                     expand=True,
                                 ),
                                 ft.OutlinedButton(
-                                    "Sửa",
-                                    icon=ft.Icons.EDIT_OUTLINED,
+                                    "Đang chọn" if is_selected else "Sửa",
+                                    icon=ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED if is_selected else ft.Icons.EDIT_OUTLINED,
                                     on_click=lambda e, c=code: load_class_into_form(c),
                                 ),
                                 ft.IconButton(
@@ -603,36 +658,38 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                     prevention=prevention_field.value or "",
                     treatment=treatment_field.value or "",
                 )
+                selected_class["code"] = saved["code"]
                 refresh_classes_list()
-                show_snack(page, f"Đã lưu lớp bệnh '{saved['name_vi']}' vào {CLASSES_JSON_PATH.name}!", "#059669")
+                show_snack(page, f"Đã lưu cập nhật danh mục bệnh lý '{saved['name_vi']}'!", "#059669")
             except ValueError as err:
                 show_snack(page, str(err), "#DC2626")
 
         def handle_delete_class(code: str):
             if delete_class_info(code):
                 refresh_classes_list()
-                show_snack(page, f"Đã xóa lớp '{code}' khỏi {CLASSES_JSON_PATH.name}.", "#DC2626")
+                show_snack(page, f"Đã xóa lớp bệnh '{code}' khỏi danh mục.", "#DC2626")
 
         def handle_clear_form(e):
+            selected_class["code"] = ""
             code_field.value = ""
             name_vi_field.value = ""
             danger_dropdown.value = "Trung bình"
             symptoms_field.value = ""
             prevention_field.value = ""
             treatment_field.value = ""
-            page.update()
+            refresh_classes_list()
 
         refresh_classes_list()
 
         model_card = tech_card(
             page=page,
-            padding=22,
+            padding=24,
             content=ft.Column(
                 [
                     ft.Row(
                         [
-                            ft.Icon(ft.Icons.MEMORY_ROUNDED, color="#059669", size=22),
-                            ft.Text("1. Quản lý Trọng số Mô hình AI Đang Kích hoạt", size=16, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
+                            ft.Icon(ft.Icons.MEMORY_ROUNDED, color=t["EMERALD"], size=22),
+                            ft.Text("1. Quản lý Trọng số Mô hình AI Đang Kích hoạt", size=18, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
                         ],
                         spacing=8,
                     ),
@@ -655,15 +712,15 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
 
         crud_card = tech_card(
             page=page,
-            padding=22,
+            padding=24,
             content=ft.Column(
                 [
                     ft.Row(
                         [
-                            ft.Icon(ft.Icons.TUNE_ROUNDED, color="#0284C7", size=22),
+                            ft.Icon(ft.Icons.TUNE_ROUNDED, color=t["CYAN"], size=22),
                             ft.Text(
-                                f"2. Quản lý Danh mục Bệnh & Phác đồ Mặc định ({CLASSES_JSON_PATH.name})",
-                                size=16,
+                                "2. Quản lý Danh mục Bệnh lý & Phác đồ Điều trị Mặc định",
+                                size=18,
                                 weight=ft.FontWeight.BOLD,
                                 color=t["TEXT"],
                                 expand=True,
@@ -679,28 +736,22 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                     ft.Row(
                         [
                             ft.FilledButton(
-                                "Lưu vào file cấu hình classes.json",
+                                "Lưu cập nhật Danh mục Bệnh lý",
                                 icon=ft.Icons.SAVE_ROUNDED,
                                 on_click=handle_save_class,
                             )
                         ]
                     ),
                     ft.Divider(height=14, color=t["BORDER"]),
-                    ft.Text("Danh sách các lớp bệnh hiện có trong models/classes.json:", size=13, weight=ft.FontWeight.BOLD, color=t["MUTED"]),
+                    ft.Text("Danh sách các nhóm bệnh lý hiện có (nhấn vào dòng bất kỳ để nạp lên biểu mẫu):", size=14, weight=ft.FontWeight.BOLD, color=t["SECONDARY"]),
                     classes_list_col,
                 ],
-                spacing=10,
+                spacing=12,
             ),
         )
 
         return [
-            tech_banner(
-                "Quản lý Mô hình AI & Danh mục Bệnh (AI & Classes Config)",
-                "Chuyển đổi phiên bản trọng số best_model.pt và chỉnh sửa trực tiếp phác đồ trong models/classes.json",
-                ft.Icons.TUNE_ROUNDED,
-                badge_text="MODEL REGISTRY",
-                colors=["#064E3B", "#0369A1", "#0F172A"],
-            ),
+            config_header_host,
             model_card,
             crud_card,
         ]

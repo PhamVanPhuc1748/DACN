@@ -280,7 +280,20 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             tech_card(
                 page=page,
                 padding=18,
-                content=ft.Row([search_input, filter_chips_row], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                content=ft.Column(
+                    [
+                        search_input,
+                        ft.Column(
+                            [
+                                ft.Text("Lọc theo trạng thái", size=13, weight=ft.FontWeight.W_600, color=t["SECONDARY"]),
+                                filter_chips_row,
+                            ],
+                            spacing=8,
+                            tight=True,
+                        ),
+                    ],
+                    spacing=14,
+                ),
             ),
             queue_col,
         ]
@@ -532,7 +545,17 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                 pills=relabel_pills,
                 page=page,
             ),
-            tech_card(page=page, padding=16, content=ft.Row([ft.Text("Chuyển nhanh hồ sơ:", size=14.5, weight=ft.FontWeight.BOLD, color=t["TEXT"]), case_selector])),
+            tech_card(
+                page=page,
+                padding=16,
+                content=ft.Column(
+                    [
+                        ft.Text("Hồ sơ đang thẩm định", size=14, weight=ft.FontWeight.W_600, color=t["SECONDARY"]),
+                        case_selector,
+                    ],
+                    spacing=8,
+                ),
+            ),
             ft.Row([left_panel, right_panel], spacing=18, vertical_alignment=ft.CrossAxisAlignment.START),
         ]
 
@@ -724,7 +747,9 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
         refresh_curation()
         return [
             curation_header_host,
+            ft.Text("Tình hình dữ liệu đã chuẩn hóa", size=16, weight=ft.FontWeight.BOLD, color=theme_tokens(page)["TEXT"]),
             dist_host,
+            ft.Text("Hồ sơ chờ đóng góp vào dataset", size=16, weight=ft.FontWeight.BOLD, color=theme_tokens(page)["TEXT"]),
             list_col,
         ]
 
@@ -874,10 +899,17 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                 padding=20,
                 content=ft.Column(
                     [
+                        ft.Text("1. Chọn ảnh cần kiểm thử", size=14, weight=ft.FontWeight.W_600, color=t["SECONDARY"]),
                         ft.Row(
                             [
                                 ft.OutlinedButton("Chọn nhiều ảnh (Batch)", icon=ft.Icons.COLLECTIONS_ROUNDED, on_click=handle_pick_batch),
                                 ft.OutlinedButton("Nạp bộ 5 ảnh mẫu lâm sàng", icon=ft.Icons.AUTO_AWESOME_MOTION_ROUNDED, on_click=handle_load_sample_batch),
+                            ],
+                            spacing=10,
+                            wrap=True,
+                        ),
+                        ft.Row(
+                            [
                                 ft.FilledButton("Chạy Phân tích Hàng loạt", icon=ft.Icons.BOLT_ROUNDED, on_click=handle_run_batch),
                                 status_text,
                             ],
@@ -886,7 +918,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                         ),
                         progress,
                     ],
-                    spacing=10,
+                    spacing=12,
                 ),
             ),
             summary_row,

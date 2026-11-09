@@ -818,14 +818,22 @@ def build_role_shell(
 
     switch_tab(start_index)
 
-    return ft.Row(
-        [
-            custom_sidebar,
-            body_host,
+    from services.chat_widget import build_chat_overlay
+
+    return ft.Stack(
+        controls=[
+            ft.Row(
+                [
+                    custom_sidebar,
+                    body_host,
+                ],
+                expand=True,
+                spacing=0,
+                vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+            build_chat_overlay(page),
         ],
         expand=True,
-        spacing=0,
-        vertical_alignment=ft.CrossAxisAlignment.STRETCH,
     )
 
 

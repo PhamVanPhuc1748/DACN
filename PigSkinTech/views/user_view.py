@@ -852,24 +852,28 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     ft.Row(
                         [
                             ft.Icon(ft.Icons.CAMERA_ENHANCE_ROUNDED, color=PRIMARY, size=22),
-                            ft.Text("Thu thập Hình ảnh & Triệu chứng", size=18, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"], expand=True),
+                            ft.Text("Thông tin ca cần kiểm tra", size=18, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"], expand=True),
                             reset_case_btn,
                         ],
                         spacing=8,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
+                    ft.Text("1. Ảnh vùng da", size=14, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
                     dropzone_host,
                     sample_gallery_host,
+                    ft.Divider(height=10, color=p["BORDER_LIGHT"]),
+                    ft.Text("2. Thông tin vật nuôi", size=14, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
                     ft.Row([animal_field, farm_field], spacing=12),
                     ft.Column(
                         [
-                            ft.Text("Chọn nhanh biểu hiện lâm sàng:", size=13.5, weight=ft.FontWeight.W_600, color=p["TEXT_SECONDARY"]),
+                            ft.Text("3. Triệu chứng quan sát được", size=14, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
+                            ft.Text("Chọn nhanh biểu hiện hoặc ghi mô tả:", size=13.5, weight=ft.FontWeight.W_600, color=p["TEXT_SECONDARY"]),
                             symptom_chips_row,
+                            symptoms_field,
                         ],
-                        spacing=6,
+                        spacing=8,
                         tight=True,
                     ),
-                    symptoms_field,
                     loading_bar,
                     cta_analyze_btn,
                 ],
@@ -1050,13 +1054,20 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             css_card(
                 padding=20,
                 page=page,
-                content=ft.Row(
+                content=ft.Column(
                     [
-                        date_input,
-                        disease_dropdown,
-                        ft.OutlinedButton("Làm mới", icon=ft.Icons.REFRESH_ROUNDED, on_click=refresh_history),
+                        ft.Text("Lọc hồ sơ khám", size=14, weight=ft.FontWeight.W_600, color=get_theme_palette(page)["TEXT_SECONDARY"]),
+                        ft.Row(
+                            [
+                                date_input,
+                                disease_dropdown,
+                                ft.OutlinedButton("Làm mới", icon=ft.Icons.REFRESH_ROUNDED, on_click=refresh_history),
+                            ],
+                            spacing=12,
+                            wrap=True,
+                        ),
                     ],
-                    spacing=12,
+                    spacing=8,
                 ),
             ),
             list_host,
@@ -1217,7 +1228,20 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             css_card(
                 padding=20,
                 page=page,
-                content=ft.Row([search_box, triage_chips_row], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                content=ft.Column(
+                    [
+                        search_box,
+                        ft.Column(
+                            [
+                                ft.Text("Lọc nhanh theo mức độ", size=13, weight=ft.FontWeight.W_600, color=get_theme_palette(page)["TEXT_SECONDARY"]),
+                                triage_chips_row,
+                            ],
+                            spacing=8,
+                            tight=True,
+                        ),
+                    ],
+                    spacing=14,
+                ),
             ),
             cards_col,
         ]

@@ -1,10 +1,14 @@
 import io
+import asyncio
+import json
 import logging
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Literal, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.database import get_feedback, get_record, get_records, save_feedback, save_record
 from app.diseases_data import DISEASES_DATA
+from app.config import settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("PigSkinAPI")
@@ -52,6 +57,15 @@ class ModelSwitchRequest(BaseModel):
     filename: str
 
 
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage] = Field(min_length=1, max_length=12)
+
+
 @app.get("/")
 def read_root():
     return {"status": "online", "service": "PigSkin API", "version": "1.2.0", "database": "SQLite", "docs": "/docs"}
@@ -73,6 +87,67 @@ def get_disease_detail(code: str):
     if not disease:
         raise HTTPException(status_code=404, detail="Không tìm thấy bệnh theo mã đã yêu cầu.")
     return disease
+
+
+def _request_ai_reply(messages: list[ChatMessage]) -> str:
+    if not settings.ai_is_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Trợ lý AI chưa được cấu hình đầy đủ. Hãy điền AI_BASE_URL, AI_MODEL và khóa API phù hợp trong backend/.env, rồi khởi động lại backend.",
+        )
+
+    provider_messages = [
+        {"role": "system", "content": settings.ai_system_prompt},
+        *[{"role": message.role, "content": message.content} for message in messages],
+    ]
+    payload = json.dumps(
+        {
+            "model": settings.ai_model,
+            "messages": provider_messages,
+            "max_tokens": settings.ai_max_tokens,
+            "temperature": 0.3,
+        }
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if settings.ai_api_key:
+        headers["Authorization"] = f"Bearer {settings.ai_api_key}"
+    request = Request(
+        f"{settings.ai_base_url}/chat/completions",
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=settings.ai_timeout_seconds) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        logger.warning("Configured AI provider returned HTTP %s", error.code)
+        raise HTTPException(status_code=502, detail="AI provider từ chối yêu cầu. Hãy kiểm tra cấu hình model và API key.") from error
+    except (URLError, TimeoutError, OSError) as error:
+        logger.warning("Could not reach configured AI provider: %s", type(error).__name__)
+        raise HTTPException(status_code=502, detail="Không kết nối được AI provider. Hãy kiểm tra địa chỉ API và kết nối mạng.") from error
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        logger.warning("Configured AI provider returned invalid JSON")
+        raise HTTPException(status_code=502, detail="AI provider trả về dữ liệu không hợp lệ.") from error
+
+    try:
+        content = result["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+        reply = str(content).strip()
+    except (KeyError, IndexError, TypeError) as error:
+        raise HTTPException(status_code=502, detail="AI provider không trả về câu trả lời hợp lệ.") from error
+    if not reply:
+        raise HTTPException(status_code=502, detail="AI provider trả về câu trả lời trống.")
+    return reply
+
+
+@app.post("/chat")
+async def chat_with_ai(request: ChatRequest):
+    """Generate a text reply through the configured OpenAI-compatible provider."""
+    reply = await asyncio.to_thread(_request_ai_reply, request.messages)
+    return {"reply": reply, "model": settings.ai_model}
 
 
 def serialize_record(record: dict):

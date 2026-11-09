@@ -1,12 +1,17 @@
 """Authentication service, Tech Emerald & Cyber Slate Design System, and Custom Sidebar Shell."""
 import base64
+import csv
+import hashlib
+import html
 import inspect
 import os
 from datetime import datetime
 from pathlib import Path
 import urllib.parse
+import webbrowser
 
 import flet as ft
+from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 
 try:
     from flet.auth.providers import GoogleOAuthProvider
@@ -17,8 +22,8 @@ if GoogleOAuthProvider and not hasattr(ft, "GoogleOAuthProvider"):
     ft.GoogleOAuthProvider = GoogleOAuthProvider
 
 from services.inference import model_ready
-from services.project_data import active_run, load_classes_config
-from services.store import MOCK_GOOGLE_ACCOUNTS, _hash_password, conn, initialize
+from services.project_data import active_run, display_class, get_class_info, load_classes_config
+from services.store import MOCK_GOOGLE_ACCOUNTS, _hash_password, conn, initialize, recent
 from theme import (
     BG_CARD,
     BG_MAIN,
@@ -231,6 +236,7 @@ def tech_card(
     gradient: ft.LinearGradient | None = None,
     bgcolor: str | None = None,
     border_color: str | None = None,
+    hover_lift: bool = False,
 ) -> ft.Container:
     t = theme_tokens(page)
     return css_card(
@@ -242,6 +248,7 @@ def tech_card(
         border_color=border_color or t["BORDER"],
         gradient=gradient,
         page=page,
+        hover_lift=hover_lift,
     )
 
 
@@ -368,6 +375,7 @@ def kpi_stat_card(
         padding=20,
         expand=1,
         border_radius=16,
+        hover_lift=True,
         content=ft.Row(
             [
                 ft.Container(
@@ -730,6 +738,561 @@ async def pick_image_files(picker: ft.FilePicker, allow_multiple: bool, on_picke
         )
 
 
+def generate_lesion_heatmap(image_path: str) -> str:
+    """
+    Generate an AI Lesion Contrast & Thermal Heatmap overlay from the original pig skin image
+    using PIL, save to PigSkinTech/case_images/heatmap_cache/, and return its path.
+    """
+    src_path = Path(image_path or "")
+    if not src_path.is_file():
+        return str(image_path or "")
+
+    cache_dir = Path(__file__).resolve().parent.parent / "case_images" / "heatmap_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out_path = cache_dir / f"heatmap_{src_path.stem}.jpg"
+
+    try:
+        with Image.open(src_path) as raw:
+            rgb = raw.convert("RGB")
+            w, h = rgb.size
+            contrast_img = ImageEnhance.Contrast(rgb).enhance(2.05)
+            contrast_img = ImageEnhance.Sharpness(contrast_img).enhance(1.85)
+
+            r_ch, g_ch, b_ch = rgb.split()
+            # Erythema / inflammation index emphasizing reddish & warm skin lesions
+            erythema = Image.eval(
+                Image.merge(
+                    "RGB",
+                    (
+                        r_ch,
+                        g_ch,
+                        b_ch,
+                    ),
+                ).convert("L"),
+                lambda x: x,
+            )
+            r_bytes = r_ch.tobytes()
+            g_bytes = g_ch.tobytes()
+            b_bytes = b_ch.tobytes()
+            heat_vals = bytearray(len(r_bytes))
+            for i in range(len(r_bytes)):
+                score = int(r_bytes[i] * 1.45 - 0.55 * g_bytes[i] - 0.45 * b_bytes[i]) + 60
+                heat_vals[i] = 255 if score > 255 else (0 if score < 0 else score)
+            erythema = Image.frombytes("L", (w, h), bytes(heat_vals))
+            erythema = ImageOps.autocontrast(erythema, cutoff=2)
+
+            thermal = ImageOps.colorize(
+                erythema,
+                black="#0F172A",
+                mid="#F59E0B",
+                white="#EF4444",
+            )
+            blended = Image.blend(contrast_img, thermal, alpha=0.46)
+
+            draw = ImageDraw.Draw(blended)
+            pad_x, pad_y = int(w * 0.14), int(h * 0.14)
+            box = (pad_x, pad_y, w - pad_x, h - pad_y)
+            corner = max(18, min(w, h) // 10)
+            col = (52, 211, 153)
+            # Corner brackets for AI lesion focus
+            for x0, y0, dx, dy in (
+                (box[0], box[1], 1, 1),
+                (box[2], box[1], -1, 1),
+                (box[0], box[3], 1, -1),
+                (box[2], box[3], -1, -1),
+            ):
+                draw.line([(x0, y0), (x0 + dx * corner, y0)], fill=col, width=3)
+                draw.line([(x0, y0), (x0, y0 + dy * corner)], fill=col, width=3)
+
+            blended.save(out_path, format="JPEG", quality=92)
+        return str(out_path.resolve())
+    except Exception:
+        return str(src_path.resolve())
+
+
+def build_outbreak_alert_banner(records: list[dict], page: ft.Page | None = None) -> ft.Control | None:
+    """
+    Check the 10 most recent inspections: if >= 2 belong to 'Cao' or 'Khẩn cấp' danger level,
+    return an Epidemic Outbreak Warning Banner.
+    """
+    recent_10 = (records or [])[:10]
+    urgent_cases = []
+    for r in recent_10:
+        cls_code = r.get("expert_label") or r.get("predicted_class") or ""
+        info = get_class_info(cls_code)
+        danger = info.get("danger_level", "Trung bình")
+        if danger in ("Cao", "Khẩn cấp"):
+            urgent_cases.append((r, display_class(cls_code), danger))
+
+    if len(urgent_cases) < 2:
+        return None
+
+    pal = get_theme_palette(page)
+    dark = pal["IS_DARK"]
+    diseases_set = list(dict.fromkeys(d_name for _, d_name, _ in urgent_cases))
+    farms_set = list(dict.fromkeys((r.get("farm_name") or "Khu chuồng") for r, _, _ in urgent_cases))
+
+    return ft.Container(
+        padding=ft.padding.symmetric(horizontal=20, vertical=14),
+        border_radius=14,
+        bgcolor=pal["SOFT_RED"],
+        border=ft.border.all(1.5, "#F87171" if dark else "#FCA5A5"),
+        animate=make_smooth_animation(220),
+        content=ft.Row(
+            [
+                ft.Container(
+                    width=44,
+                    height=44,
+                    border_radius=12,
+                    bgcolor=ft.Colors.with_opacity(0.18, "#EF4444"),
+                    alignment=ft.alignment.center,
+                    content=ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color="#F87171" if dark else "#DC2626", size=26),
+                ),
+                ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Text(
+                                    f"🚨 Cảnh báo Dịch tễ Sớm: Phát hiện {len(urgent_cases)}/10 ca khám gần nhất thuộc nhóm Nguy hiểm cao",
+                                    size=15,
+                                    weight=ft.FontWeight.BOLD,
+                                    color="#FCA5A5" if dark else "#991B1B",
+                                    expand=True,
+                                ),
+                                ft.Container(
+                                    bgcolor="#DC2626",
+                                    padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                                    border_radius=12,
+                                    content=ft.Text(
+                                        "CẦN CÁCH LY & SÁT TRÙNG",
+                                        size=12.5,
+                                        weight=ft.FontWeight.BOLD,
+                                        color="#FFFFFF",
+                                    ),
+                                ),
+                            ],
+                            spacing=8,
+                        ),
+                        ft.Text(
+                            f"Bệnh lý ghi nhận: {', '.join(diseases_set[:3])} • Khu vực: {', '.join(farms_set[:3])}. "
+                            "Khuyến nghị: Tách đàn cách ly ngay các cá thể nghi nhiễm, phun sát trùng chuồng trại và kiểm tra thân nhiệt toàn đàn.",
+                            size=13.5,
+                            color="#FECACA" if dark else "#7F1D1D",
+                        ),
+                    ],
+                    spacing=4,
+                    expand=True,
+                ),
+            ],
+            spacing=14,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+    )
+
+
+def _img_to_data_uri(img_path: str | None) -> str:
+    if not img_path:
+        return ""
+    p = Path(img_path)
+    if not p.is_file():
+        return ""
+    b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+    mime = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
+    return f"data:{mime};base64,{b64}"
+
+
+def _build_inline_svg_barcode(case_id: str) -> str:
+    """Generate a compact deterministic inline SVG QR + Barcode graphic for the veterinary report header."""
+    seed_bytes = hashlib.md5(case_id.encode("utf-8")).digest()
+    bars = []
+    x = 4
+    for idx, b in enumerate(seed_bytes[:14]):
+        w = 2 if (b % 3 == 0) else (3 if (b % 2 == 0) else 1.5)
+        bars.append(f'<rect x="{x:.1f}" y="4" width="{w}" height="24" rx="0.5" fill="#0F172A"/>')
+        x += w + (1.5 if idx % 2 == 0 else 2.0)
+    return (
+        f'<svg width="{int(x + 4)}" height="32" viewBox="0 0 {int(x + 4)} 32" '
+        f'xmlns="http://www.w3.org/2000/svg" style="display:block;background:#F8FAFC;border:1px solid #CBD5E1;border-radius:6px;">'
+        + "".join(bars)
+        + "</svg>"
+    )
+
+
+def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = True) -> str:
+    """
+    Export a styled 1-Page A4 Veterinary Clinical Diagnostic Report HTML file into PigSkinTech/exports/
+    and open it in the browser for instant viewing or Ctrl+P PDF printing (without file:/// URLs).
+    """
+    exports_dir = Path(__file__).resolve().parent.parent / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+
+    case_id = str(case_data.get("case_id") or f"PS-{int(case_data.get('record_id') or 1):06d}")
+    ts_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_file = exports_dir / f"PhieuKham_{case_id}_{ts_slug}.html"
+
+    img_path = case_data.get("image_path") or ""
+    orig_uri = _img_to_data_uri(img_path)
+    heat_path = generate_lesion_heatmap(img_path) if img_path else ""
+    heat_uri = _img_to_data_uri(heat_path)
+
+    raw_disease = case_data.get("disease_name") or (
+        display_class(case_data.get("predicted_class")) if case_data.get("predicted_class") else "Chưa xác định"
+    )
+    disease_name = html.escape(str(raw_disease))
+    danger_level = html.escape(str(case_data.get("danger_level") or "Trung bình"))
+    confidence_pct = float(case_data.get("confidence") or 0.0) * 100.0
+    animal_id = html.escape(str(case_data.get("animal_id") or "PIG-101"))
+    farm_name = html.escape(str(case_data.get("farm_name") or "Trang trại chăn nuôi"))
+    user_name = html.escape(str(case_data.get("user_name") or "Người chăn nuôi"))
+    symptoms = html.escape(str(case_data.get("symptoms") or "Không có ghi chú triệu chứng"))
+    isolation = html.escape(str(case_data.get("isolation_guide") or "Cách ly cá thể nghi nhiễm và sát trùng chuồng trại."))
+    treatment = html.escape(str(case_data.get("treatment_guide") or "Tham khảo phác đồ Bác sĩ Thú y."))
+    expert_note = html.escape(str(case_data.get("expert_note") or "Đang chờ hoặc theo phác đồ khuyến nghị chuẩn."))
+    reviewed_by = html.escape(str(case_data.get("reviewed_by") or "Hệ thống Trí tuệ nhân tạo PigSkin AI & BS. Thú y"))
+    created_at = html.escape(str(case_data.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    svg_barcode = _build_inline_svg_barcode(case_id)
+
+    raw_scores = case_data.get("scores") or []
+    if isinstance(raw_scores, dict):
+        scores = [
+            {"label": k, "confidence": float(v or 0.0)}
+            for k, v in sorted(raw_scores.items(), key=lambda item: float(item[1] or 0.0), reverse=True)
+        ]
+    elif isinstance(raw_scores, list):
+        scores = raw_scores
+    else:
+        scores = []
+    scores_html = ""
+    for idx, sc in enumerate(scores[:3], start=1):
+        lbl = html.escape(display_class(sc.get("label") or sc.get("class") or ""))
+        pct = float(sc.get("confidence") or 0.0) * 100.0
+        bar_col = "#059669" if idx == 1 else ("#0284C7" if idx == 2 else "#D97706")
+        scores_html += f"""
+        <div style="margin-bottom:6px;">
+          <div style="display:flex;justify-content:space-between;font-size:12.5px;font-weight:600;margin-bottom:2px;">
+            <span>#{idx}. {lbl}</span>
+            <span style="color:{bar_col};">{pct:.1f}%</span>
+          </div>
+          <div style="height:7px;background:#E2E8F0;border-radius:4px;overflow:hidden;">
+            <div style="width:{min(100.0, max(2.0, pct)):.1f}%;height:100%;background:{bar_col};"></div>
+          </div>
+        </div>
+        """
+    if not scores_html:
+        scores_html = f"""
+        <div style="font-size:13px;font-weight:600;color:#059669;">
+          Kết quả dự đoán chính: {disease_name} ({confidence_pct:.1f}%)
+        </div>
+        """
+
+    if orig_uri:
+        images_html = f"""
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div style="border:1px solid #E2E8F0;border-radius:10px;padding:8px;text-align:center;background:#F8FAFC;">
+            <div style="font-weight:700;font-size:11.5px;color:#475569;margin-bottom:5px;">Ảnh gốc tại chuồng</div>
+            <img src="{orig_uri}" style="width:100%;height:135px;object-fit:cover;border-radius:8px;display:block;" />
+          </div>
+          <div style="border:1px solid #E2E8F0;border-radius:10px;padding:8px;text-align:center;background:#F8FAFC;">
+            <div style="font-weight:700;font-size:11.5px;color:#059669;margin-bottom:5px;">Ảnh soi vùng tổn thương AI</div>
+            <img src="{heat_uri or orig_uri}" style="width:100%;height:135px;object-fit:cover;border-radius:8px;display:block;" />
+          </div>
+        </div>
+        """
+    else:
+        images_html = """
+        <div style="border:1px dashed #CBD5E1;border-radius:10px;height:155px;display:flex;align-items:center;justify-content:center;color:#64748B;font-size:12px;">
+          Không có hình ảnh đính kèm
+        </div>
+        """
+
+    html_doc = f"""<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <title>Phiếu Kết Quả Chẩn Đoán Thú Y - {case_id}</title>
+  <style>
+    @page {{
+        size: A4 portrait;
+        margin: 0mm !important; /* CỰC KỲ QUAN TRỌNG: Ép margin = 0 ở @page để trình duyệt Chrome/Edge tự động ẩn hoàn toàn đường dẫn ổ đĩa file:///C:/... ở chân trang và ngày giờ ở đầu trang */
+    }}
+    html, body {{
+        width: 210mm;
+        height: 296mm;
+        margin: 0 auto !important;
+        padding: 0 !important;
+        overflow: hidden;
+        background: #FFFFFF;
+        color: #0F172A;
+        font-family: 'Plus Jakarta Sans', 'Segoe UI', sans-serif;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }}
+    .a4-sheet {{
+        box-sizing: border-box;
+        width: 210mm;
+        height: 296mm;
+        max-height: 296mm;
+        padding: 12mm 14mm; /* Dùng padding của khung .a4-sheet thay cho margin của @page */
+        page-break-after: avoid;
+        page-break-inside: avoid;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        background: #FFFFFF;
+    }}
+    .header-bar {{
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 2px solid #10B981;
+        padding-bottom: 10px;
+    }}
+    .brand-row {{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }}
+    .logo-box {{
+        width: 38px;
+        height: 38px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, #10B981, #059669);
+        color: #FFFFFF;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 800;
+        font-size: 18px;
+    }}
+    .info-image-row {{
+        display: grid;
+        grid-template-columns: 45% 53%;
+        gap: 2%;
+        align-items: stretch;
+    }}
+    .info-table {{
+        background: #F8FAFC;
+        border: 1px solid #E2E8F0;
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-size: 12.5px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+    }}
+    .info-line {{
+        margin-bottom: 5px;
+        line-height: 1.4;
+    }}
+    .ai-box {{
+        background: #ECFDF5;
+        border: 1px solid #A7F3D0;
+        border-radius: 10px;
+        padding: 10px 14px;
+    }}
+    .protocol-grid {{
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+    }}
+    .protocol-card {{
+        border: 1px solid #E2E8F0;
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: #FFFFFF;
+    }}
+    .footer-sign {{
+        border: 1px solid #CBD5E1;
+        background: #F8FAFC;
+        border-radius: 10px;
+        padding: 10px 14px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 14px;
+    }}
+    .print-toolbar {{
+        position: fixed;
+        top: 12px;
+        right: 16px;
+        z-index: 999;
+    }}
+    .print-btn {{
+        background: #059669;
+        color: #FFFFFF;
+        border: none;
+        padding: 9px 16px;
+        border-radius: 20px;
+        font-weight: 700;
+        font-size: 13px;
+        cursor: pointer;
+        box-shadow: 0 4px 14px rgba(5, 150, 105, 0.3);
+    }}
+    @media print {{
+        .no-print {{ display: none !important; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="no-print print-toolbar">
+    <button class="print-btn" onclick="window.print()">🖨️ In Phiếu A4 / Lưu PDF (Ctrl + P)</button>
+  </div>
+
+  <div class="a4-sheet">
+    <!-- 1. HEADER -->
+    <div class="header-bar">
+      <div class="brand-row">
+        <div class="logo-box">🐖</div>
+        <div>
+          <div style="font-size:11px;font-weight:800;color:#059669;letter-spacing:0.8px;">HỆ THỐNG CHẨN ĐOÁN THÚ Y THÔNG MINH</div>
+          <div style="font-size:16px;font-weight:800;color:#0F172A;margin-top:2px;">PIGSKINTECH AI — PHIẾU KẾT QUẢ CHẨN ĐOÁN THÚ Y</div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;text-align:right;">
+        <div>
+          <div style="font-size:12.5px;font-weight:800;color:#059669;">Mã hồ sơ: {case_id}</div>
+          <div style="font-size:11px;color:#64748B;margin-top:2px;">Thời gian: {created_at}</div>
+        </div>
+        {svg_barcode}
+      </div>
+    </div>
+
+    <!-- 2. THÔNG TIN & HÌNH ẢNH (45% / 55%) -->
+    <div class="info-image-row">
+      <div class="info-table">
+        <div>
+          <div style="font-size:12px;font-weight:800;color:#0F172A;text-transform:uppercase;margin-bottom:6px;border-bottom:1px solid #E2E8F0;padding-bottom:4px;">
+            📋 Thông tin Hồ sơ &amp; Lâm sàng
+          </div>
+          <div class="info-line"><strong>Chủ trại / Người gửi:</strong> {user_name}</div>
+          <div class="info-line"><strong>Khu chuồng / Cơ sở:</strong> {farm_name}</div>
+          <div class="info-line"><strong>Mã cá thể / Đàn:</strong> {animal_id}</div>
+          <div class="info-line"><strong>Mức cảnh báo:</strong> <span style="color:#DC2626;font-weight:700;">{danger_level}</span></div>
+          <div class="info-line" style="margin-bottom:0;"><strong>Triệu chứng lâm sàng:</strong> {symptoms}</div>
+        </div>
+      </div>
+      <div>
+        {images_html}
+      </div>
+    </div>
+
+    <!-- 3. KẾT LUẬN AI & TOP-3 KHẢ NĂNG -->
+    <div class="ai-box">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div>
+          <div style="font-size:11px;color:#065F46;font-weight:800;letter-spacing:0.5px;">KẾT LUẬN CHẨN ĐOÁN TỪ TRÍ TUỆ NHÂN TẠO PIGSKIN AI</div>
+          <div style="font-size:18px;font-weight:800;color:#059669;margin-top:2px;">{disease_name}</div>
+        </div>
+        <div style="background:#059669;color:#FFFFFF;padding:5px 12px;border-radius:16px;font-size:13px;font-weight:800;">
+          Độ tin cậy: {confidence_pct:.1f}%
+        </div>
+      </div>
+      {scores_html}
+    </div>
+
+    <!-- 4. PHÁC ĐỒ 2 CỘT NGANG -->
+    <div class="protocol-grid">
+      <div class="protocol-card">
+        <div style="font-size:13px;font-weight:800;color:#0369A1;margin-bottom:6px;">🛡️ Biện pháp Cách ly &amp; An toàn Sinh học</div>
+        <div style="font-size:12.5px;line-height:1.48;color:#1E293B;">{isolation}</div>
+      </div>
+      <div class="protocol-card">
+        <div style="font-size:13px;font-weight:800;color:#059669;margin-bottom:6px;">💊 Phác đồ Điều trị &amp; Thuốc Thú y Tham khảo</div>
+        <div style="font-size:12.5px;line-height:1.48;color:#1E293B;">{treatment}</div>
+      </div>
+    </div>
+
+    <!-- 5. NHẬN XÉT BÁC SĨ THÚ Y & CHỮ KÝ SỐ Ở ĐÁY TRANG A4 -->
+    <div class="footer-sign">
+      <div style="flex:1;">
+        <div style="font-size:12.5px;font-weight:800;color:#0F172A;margin-bottom:4px;">
+          👨‍⚕️ Nhận xét &amp; Thẩm định của Bác sĩ Thú y ({reviewed_by})
+        </div>
+        <div style="font-size:12px;line-height:1.45;color:#334155;">{expert_note}</div>
+      </div>
+      <div style="min-width:165px;text-align:center;border-left:1px dashed #CBD5E1;padding-left:14px;">
+        <div style="font-size:10.5px;font-weight:700;color:#64748B;">XÁC THỰC CHỮ KÝ SỐ</div>
+        <div style="margin:4px auto;display:inline-block;padding:3px 10px;border:1.5px solid #059669;border-radius:6px;color:#059669;font-size:11px;font-weight:800;">
+          ✓ PIGSKINTECH VERIFIED
+        </div>
+        <div style="font-size:10.5px;color:#475569;font-weight:600;">{created_at[:10]}</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+    out_file.write_text(html_doc, encoding="utf-8")
+    resolved = str(out_file.resolve())
+    if open_browser:
+        try:
+            webbrowser.open(out_file.resolve().as_uri())
+        except Exception:
+            pass
+    show_snack(page, f"Đã xuất Phiếu Khám Thú Y chuẩn 1 trang A4 ({case_id})!", "#059669")
+    return resolved
+
+
+def export_inspections_csv(
+    page: ft.Page,
+    records: list[dict] | None = None,
+    filename_prefix: str = "BaoCao_HoSoBenhAn",
+) -> str:
+    """Export inspection records to a UTF-8-SIG CSV file in PigSkinTech/exports/ for Excel."""
+    exports_dir = Path(__file__).resolve().parent.parent / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+
+    rows = records if records is not None else recent("")
+    ts_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_file = exports_dir / f"{filename_prefix}_{ts_slug}.csv"
+
+    fieldnames = [
+        "Mã Hồ Sơ",
+        "Ngày Khám",
+        "Người Chăn Nuôi",
+        "Email",
+        "Trang Trại / Khu Chuồng",
+        "Mã Đàn / Cá Thể",
+        "Triệu Chứng",
+        "AI Dự Đoán",
+        "Độ Tin Cậy AI (%)",
+        "Trạng Thái Thẩm Định",
+        "Nhãn Chuẩn Chuyên Gia",
+        "Bác Sĩ Thú Y Duyệt",
+        "Phác Đồ / Ghi Chú Chuyên Gia",
+        "Đưa Vào Dataset Chuẩn",
+    ]
+
+    with out_file.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in rows:
+            conf_pct = round(float(r.get("confidence") or 0.0) * 100.0, 1)
+            pred_cls = r.get("predicted_class") or ""
+            exp_cls = r.get("expert_label") or ""
+            writer.writerow(
+                {
+                    "Mã Hồ Sơ": r.get("case_id") or f"PS-{int(r.get('id') or 0):06d}",
+                    "Ngày Khám": r.get("created_at") or "",
+                    "Người Chăn Nuôi": r.get("user_name") or "",
+                    "Email": r.get("user_email") or "",
+                    "Trang Trại / Khu Chuồng": r.get("farm_name") or "",
+                    "Mã Đàn / Cá Thể": r.get("animal_id") or "",
+                    "Triệu Chứng": r.get("symptoms") or "",
+                    "AI Dự Đoán": f"{display_class(pred_cls)} ({pred_cls})" if pred_cls else "",
+                    "Độ Tin Cậy AI (%)": f"{conf_pct:.1f}",
+                    "Trạng Thái Thẩm Định": "Đã thẩm định" if r.get("review_status") == "reviewed" else "Chờ duyệt",
+                    "Nhãn Chuẩn Chuyên Gia": f"{display_class(exp_cls)} ({exp_cls})" if exp_cls else "",
+                    "Bác Sĩ Thú Y Duyệt": r.get("reviewed_by") or "",
+                    "Phác Đồ / Ghi Chú Chuyên Gia": r.get("expert_note") or r.get("recommendation") or "",
+                    "Đưa Vào Dataset Chuẩn": "Có" if int(r.get("in_dataset") or 0) == 1 else "Chưa",
+                }
+            )
+
+    show_snack(page, f"Đã xuất {len(rows)} hồ sơ ra file Excel CSV: exports/{out_file.name}", "#059669")
+    return str(out_file.resolve())
+
+
 def build_role_shell(
     page: ft.Page,
     user: dict,
@@ -742,6 +1305,7 @@ def build_role_shell(
     """
     Build Clean SaaS Global Shell without top AppBar:
     Consolidates User Profile, Role Badge, Dark Mode & Logout into the 270px Left Sidebar.
+    Wraps tab content in an animated opacity container for smooth tab transitions.
     """
     ensure_flet_compat(page)
     set_theme_page_context(page)
@@ -753,11 +1317,18 @@ def build_role_shell(
     saved_idx = session_get(page, route_key)
     start_index = saved_idx if isinstance(saved_idx, int) and 0 <= saved_idx < len(tab_builders) else initial_index
 
+    tab_anim_wrapper = ft.Container(
+        expand=True,
+        opacity=1.0,
+        animate_opacity=make_smooth_animation(220),
+        content=ft.Column(expand=True, scroll=ft.ScrollMode.AUTO, spacing=20),
+    )
+
     body_host = ft.Container(
         expand=True,
         padding=24,
         bgcolor=t["BG"],
-        content=ft.Column(expand=True, scroll=ft.ScrollMode.AUTO, spacing=20),
+        content=tab_anim_wrapper,
     )
 
     active_state = {"index": start_index}
@@ -795,7 +1366,8 @@ def build_role_shell(
             style_menu_item(ctrl, i, is_hovered=False)
         controls = tab_builders[idx]()
         body_host.bgcolor = theme_tokens(page)["BG"]
-        body_host.content = ft.Column(
+        tab_anim_wrapper.opacity = 1.0
+        tab_anim_wrapper.content = ft.Column(
             controls=controls if isinstance(controls, list) else [controls],
             expand=True,
             scroll=ft.ScrollMode.AUTO,

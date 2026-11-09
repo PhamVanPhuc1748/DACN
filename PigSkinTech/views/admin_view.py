@@ -5,6 +5,7 @@ from services.auth_service import (
     build_role_shell,
     close_dialog,
     ensure_flet_compat,
+    export_inspections_csv,
     header_stat_pill,
     kpi_stat_card,
     make_dropdown,
@@ -27,6 +28,7 @@ from services.store import (
     create_user_account,
     get_system_stats,
     list_users,
+    recent,
     toggle_user_lock,
     update_user_role,
 )
@@ -112,7 +114,12 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                     ft.Row(
                         [
                             ft.Icon(ft.Icons.BAR_CHART_ROUNDED, color=t["EMERALD"], size=22),
-                            ft.Text("Phân bố các loại bệnh phát hiện trên toàn hệ thống", size=18, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
+                            ft.Text("Phân bố các loại bệnh phát hiện trên toàn hệ thống", size=18, weight=ft.FontWeight.BOLD, color=t["TEXT"], expand=True),
+                            ft.OutlinedButton(
+                                "📥 Xuất Báo cáo CSV",
+                                icon=ft.Icons.DOWNLOAD_ROUNDED,
+                                on_click=lambda e: export_inspections_csv(page, recent(""), "BaoCao_ChanDoan_Admin"),
+                            ),
                         ],
                         spacing=8,
                     ),
@@ -451,6 +458,11 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 [
                     search_field,
                     role_filter,
+                    ft.OutlinedButton(
+                        "📥 Xuất Báo cáo CSV",
+                        icon=ft.Icons.DOWNLOAD_ROUNDED,
+                        on_click=lambda e: export_inspections_csv(page, recent(""), "BaoCao_HeThong_Admin"),
+                    ),
                     ft.FilledButton(
                         "+ Thêm tài khoản mới",
                         icon=ft.Icons.PERSON_ADD_ALT_1_ROUNDED,

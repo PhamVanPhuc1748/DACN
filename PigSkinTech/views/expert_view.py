@@ -7,6 +7,9 @@ from services.auth_service import (
     build_role_shell,
     create_file_picker,
     ensure_flet_compat,
+    export_inspections_csv,
+    export_vet_report_html,
+    generate_lesion_heatmap,
     header_stat_pill,
     kpi_stat_card,
     make_dropdown,
@@ -49,10 +52,12 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
         "queue_filter": "all",
         "batch_paths": [],
         "batch_results": [],
+        "expert_heatmap_mode": False,
     }
 
     def select_case_and_open_tab2(rec: dict):
         state["selected_case"] = rec
+        state["expert_heatmap_mode"] = False
         if nav_ref.get("switch_tab"):
             nav_ref["switch_tab"](1)
 
@@ -197,6 +202,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                     tech_card(
                         page=page,
                         padding=20,
+                        hover_lift=True,
                         content=ft.Row(
                             [
                                 preview_thumbnail_with_zoom(
@@ -280,7 +286,19 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             tech_card(
                 page=page,
                 padding=18,
-                content=ft.Row([search_input, filter_chips_row], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                content=ft.Row(
+                    [
+                        search_input,
+                        filter_chips_row,
+                        ft.OutlinedButton(
+                            "📥 Xuất Báo cáo CSV",
+                            icon=ft.Icons.DOWNLOAD_ROUNDED,
+                            on_click=lambda e: export_inspections_csv(page, all_items, "BaoCao_ThamDinh_Expert"),
+                        ),
+                    ],
+                    spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
             ),
             queue_col,
         ]
@@ -304,6 +322,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             found = next((x for x in queue_items if int(x["id"]) == chosen_id), None)
             if found:
                 state["selected_case"] = found
+                state["expert_heatmap_mode"] = False
                 if nav_ref.get("switch_tab"):
                     nav_ref["switch_tab"](1)
 
@@ -405,6 +424,90 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             wrap=True,
         )
 
+        image_preview_host = ft.Container(
+            bgcolor=t["SUB_SURFACE"],
+            padding=10,
+            border_radius=12,
+            border=ft.border.all(1, t["BORDER"]),
+            alignment=ft.alignment.center,
+            ink=True,
+        )
+        heatmap_toggle_host = ft.Container()
+
+        def render_expert_image_preview():
+            cur_t = theme_tokens(page)
+            is_hm = bool(state.get("expert_heatmap_mode"))
+            orig_path = rec.get("image_path") or ""
+            shown_path = generate_lesion_heatmap(orig_path) if is_hm else orig_path
+            image_preview_host.bgcolor = cur_t["SUB_SURFACE"]
+            image_preview_host.border = ft.border.all(1.5 if is_hm else 1, "#D97706" if is_hm else cur_t["BORDER"])
+            image_preview_host.on_click = lambda e: open_image_zoom_dialog(
+                page,
+                shown_path,
+                f"Hồ sơ {rec.get('case_id')}{' • AI Heatmap' if is_hm else ''}",
+            )
+            image_preview_host.content = make_image(shown_path, width=420, height=250, border_radius=8)
+            heatmap_toggle_host.content = ft.Container(
+                bgcolor="#D97706" if is_hm else cur_t["EMERALD_SOFT"],
+                border=ft.border.all(1, "#D97706" if is_hm else "#10B981"),
+                padding=ft.padding.symmetric(horizontal=12, vertical=7),
+                border_radius=10,
+                ink=True,
+                on_click=toggle_expert_heatmap,
+                content=ft.Row(
+                    [
+                        ft.Icon(
+                            ft.Icons.THERMOSTAT_AUTO_ROUNDED if is_hm else ft.Icons.BIOTECH_ROUNDED,
+                            size=16,
+                            color="#FFFFFF" if is_hm else cur_t["EMERALD"],
+                        ),
+                        ft.Text(
+                            "🔬 Đang bật Heatmap (Tắt)" if is_hm else "🔬 Soi vùng tổn thương AI",
+                            size=13,
+                            weight=ft.FontWeight.W_600,
+                            color="#FFFFFF" if is_hm else cur_t["EMERALD"],
+                        ),
+                    ],
+                    spacing=6,
+                    tight=True,
+                ),
+            )
+
+        def toggle_expert_heatmap(e):
+            state["expert_heatmap_mode"] = not bool(state.get("expert_heatmap_mode"))
+            render_expert_image_preview()
+            if state["expert_heatmap_mode"]:
+                show_snack(page, "🔬 Đã bật chế độ soi vùng tổn thương AI cho chuyên gia thú y.", "#D97706")
+            page.update()
+
+        def handle_export_expert_report(e):
+            is_agree = decision_group.value == "agree"
+            chosen_label = pred_code if is_agree else (relabel_dropdown.value or pred_code)
+            cls_meta = get_class_info(chosen_label)
+            scores = rec.get("scores_json") or {pred_code: conf}
+            export_vet_report_html(
+                page,
+                {
+                    "case_id": rec.get("case_id") or "PS-EXPERT",
+                    "created_at": rec.get("created_at") or "",
+                    "farm_name": rec.get("farm_name") or "Trang trại chăn nuôi",
+                    "animal_id": rec.get("animal_id") or "Chưa gán thẻ",
+                    "pig_age": rec.get("pig_age") or "—",
+                    "body_site": rec.get("body_site") or "Toàn thân",
+                    "symptoms": rec.get("symptoms") or "Không có ghi chú",
+                    "image_path": rec.get("image_path") or "",
+                    "predicted_class": chosen_label,
+                    "confidence": conf,
+                    "danger_level": cls_meta.get("danger_level", "Trung bình"),
+                    "scores": scores if isinstance(scores, dict) else {pred_code: conf},
+                    "expert_label": chosen_label,
+                    "expert_note": (treatment_note.value or "").strip() or cls_meta.get("treatment", ""),
+                    "reviewed_by": user.get("email", "bs.thuy.pigskin@gmail.com"),
+                },
+            )
+
+        render_expert_image_preview()
+
         left_panel = tech_card(
             page=page,
             expand=1,
@@ -415,23 +518,17 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                         [
                             ft.Icon(ft.Icons.IMAGE_SEARCH_ROUNDED, color=t["CYAN"], size=22),
                             ft.Text("Ảnh gốc & Thông tin Người gửi", size=18, weight=ft.FontWeight.BOLD, color=t["TEXT"], expand=True),
+                            heatmap_toggle_host,
                             ft.OutlinedButton(
                                 "Phóng to ảnh (Zoom)",
                                 icon=ft.Icons.ZOOM_IN_ROUNDED,
                                 on_click=lambda e: open_image_zoom_dialog(page, rec.get("image_path"), f"Hồ sơ {rec.get('case_id')}"),
                             ),
-                        ]
+                        ],
+                        spacing=8,
+                        wrap=True,
                     ),
-                    ft.Container(
-                        bgcolor=t["SUB_SURFACE"],
-                        padding=10,
-                        border_radius=12,
-                        border=ft.border.all(1, t["BORDER"]),
-                        alignment=ft.alignment.center,
-                        ink=True,
-                        on_click=lambda e: open_image_zoom_dialog(page, rec.get("image_path"), f"Hồ sơ {rec.get('case_id')}"),
-                        content=make_image(rec.get("image_path"), width=420, height=250, border_radius=8),
-                    ),
+                    image_preview_host,
                     ft.Text("Chuyển nhanh qua ảnh thật trong hàng đợi (click ảnh để thẩm định):", size=13, weight=ft.FontWeight.W_600, color=t["SECONDARY"]),
                     queue_thumb_row,
                     ft.Text(f"Mã hồ sơ: {rec.get('case_id')} • Thời gian gửi: {rec.get('created_at')}", size=14.5, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
@@ -487,8 +584,15 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                                 "Xác nhận Thẩm định & Gửi Phác đồ cho User",
                                 icon=ft.Icons.VERIFIED_ROUNDED,
                                 on_click=handle_submit_review,
-                            )
-                        ]
+                            ),
+                            ft.OutlinedButton(
+                                "🖨️ Xuất Phiếu Khám",
+                                icon=ft.Icons.PRINT_ROUNDED,
+                                on_click=handle_export_expert_report,
+                            ),
+                        ],
+                        spacing=10,
+                        wrap=True,
                     ),
                 ],
                 spacing=14,

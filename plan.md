@@ -167,3 +167,4 @@ DACN/
 ## Cập nhật vị trí công cụ ML (2026-10-27)
 
 Theo yêu cầu tách GUI khỏi repo, code train, audit, review, split và manifest generator đã được chuyển sang `E:\code\PigSkinResearchStudio`. Các đường dẫn `ml_workspace/src/` trong kế hoạch dưới đây là mô tả lịch sử/ý tưởng, không còn là vị trí code hiện hành trong DACN.
+

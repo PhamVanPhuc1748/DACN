@@ -30,10 +30,9 @@ PigSkinTech/__pycache__/
 PigSkinTech/**/__pycache__/
 PigSkinTech/*.pyc
 PigSkinTech/**/*.pyc
-PigSkinTech/pigskin_history.db*
-PigSkinTech/case_images/
+PigSkinTech/pigskin_history.db-shm
+PigSkinTech/pigskin_history.db-wal
 PigSkinTech/models/*.pth
-PigSkinTech/models/*.pt
 PigSkinTech/models/*.onnx
 backend/*.db
 backend/*.db-journal

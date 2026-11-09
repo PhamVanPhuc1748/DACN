@@ -2,9 +2,7 @@
 
 A desktop research UI for pig-skin health records and image review, built with Flet 0.28.3.
 
-The default theme uses field-research greens, pig-skin rose accents, and straw-toned
-status cues. A dark theme remains available. Page changes use a short fade transition;
-the app does not require another UI framework or an internet connection for its styling.
+The UI supports Light and Dark palettes, role-based navigation (Admin, Expert/Vet, Farm User), and direct model inference.
 
 ## Running (PowerShell, inside PigSkinTech)
 
@@ -16,6 +14,7 @@ python -m venv .venv
 
 ## What works now
 - Toggle between light and dark palettes; the open page and case form values are preserved.
+- Role-based views: Admin, Expert, User.
 - Dashboard, dataset, and training views read the latest completed run's `config.json`, `final_metrics.json`, and manifest; absent files show as unavailable rather than sample values.
 - Image picker, JPG/PNG/WEBP file verification and image preview.
 - Case intake with animal/group ID, farm, lesion location, onset date, and observed signs.
@@ -54,6 +53,3 @@ The displayed training metrics come from that run's `final_metrics.json`; the ap
 substitute hand-entered example values when those files are missing.
 
 The UI does not create fake diagnoses. It is a research aid and is not a veterinary diagnosis tool. Softmax scores are model scores, not calibrated disease probabilities; have a veterinarian review predictions.
-
-## Integration into DACN repo
-Copy this folder to `D:\DACN\PigSkinTech` **after backing up the current Flet work**. Do not overwrite the entire DACN repository. The local `.venv` and inspection database stay out of Git; the two selected checkpoints under `models/runs/` are included as app assets.

@@ -7,6 +7,8 @@ from services.auth_service import (
     build_role_shell,
     create_file_picker,
     ensure_flet_compat,
+    export_vet_report_html,
+    generate_lesion_heatmap,
     header_stat_pill,
     make_dropdown,
     make_image,
@@ -16,8 +18,17 @@ from services.auth_service import (
     show_snack,
     tech_banner,
 )
+from services.chat_widget import build_chat_panel
 from services.inference import inspect_image, predict
-from services.project_data import display_class, get_class_info, list_class_keys, load_classes_config
+from services.project_data import (
+    active_run,
+    display_class,
+    get_class_info,
+    list_class_keys,
+    list_model_runs,
+    load_classes_config,
+    set_active_checkpoint,
+)
 from services.store import (
     get_sample_gallery,
     list_user_inspections,
@@ -74,16 +85,55 @@ def _confidence_color(conf: float, dark: bool = False) -> str:
 
 def build_user_view(page: ft.Page, user: dict) -> ft.Control:
     ensure_flet_compat(page)
-    pal = get_theme_palette(page)
     picker = create_file_picker(page)
+    cur_run = active_run() or {}
+    model_runs = list_model_runs()
+    default_run_name = cur_run.get("name") or (model_runs[0]["name"] if model_runs else "")
     state = {
         "image_path": None,
+        "heatmap_path": None,
+        "heatmap_mode": False,
+        "scanning": False,
+        "scan_status": "🔍 Đang tiền xử lý & tách nền da heo...",
         "image_info": None,
         "result": None,
         "record_id": None,
         "sent_to_expert": False,
         "wiki_triage": "all",
+        "selected_run": default_run_name,
     }
+
+    def on_model_run_change(e):
+        chosen = getattr(e.control, "value", None) or default_run_name
+        state["selected_run"] = chosen
+        for r in model_runs:
+            if r["name"] == chosen:
+                try:
+                    set_active_checkpoint(r["checkpoint"])
+                except Exception:
+                    pass
+                show_snack(
+                    page,
+                    f"Đã chuyển sang mô hình {r.get('model_label', r['model'])} ({r['name']})",
+                    "#059669",
+                )
+                break
+
+    model_run_dropdown = make_dropdown(
+        label="Mô hình AI suy luận (Checkpoint thực tế)",
+        value=default_run_name,
+        options=[
+            (
+                r["name"],
+                f"{r.get('model_label', r['model'])} ({r['name']}) • Val F1: {(r.get('val_f1') or 0)*100:.1f}%",
+            )
+            for r in model_runs
+        ]
+        or [("default", "MobileNetV2 (best_model.pt)")],
+        on_change=on_model_run_change,
+        expand=True,
+        page=page,
+    )
 
     animal_field = css_input(
         label="Mã đàn / cá thể",
@@ -114,7 +164,11 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
     sample_gallery_host = ft.Container()
     symptom_chips_row = ft.Row(spacing=8, wrap=True)
     loading_bar = ft.ProgressBar(visible=False, color=PRIMARY)
-    right_card_host = ft.Container(expand=1)
+    right_card_host = ft.Container(
+        expand=1,
+        opacity=1.0,
+        animate_opacity=make_smooth_animation(250),
+    )
 
     def refresh_page_header():
         p = get_theme_palette(page)
@@ -125,15 +179,17 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         sent_expert = sum(
             1 for r in records if int(r.get("requested_review") or 0) == 1 or r.get("review_status") == "reviewed"
         )
+        reviewed_by_expert = sum(1 for r in records if r.get("review_status") == "reviewed")
         pills = [
             header_stat_pill(
                 "Tổng lượt khám",
-                str(total_scans),
+                f"{total_scans} ca",
                 ft.Icons.QR_CODE_SCANNER_ROUNDED,
                 accent="#10B981" if p["IS_DARK"] else PRIMARY_DARK,
                 soft_bg=p["SOFT_EMERALD"],
-                badge_text="+12% hôm nay",
+                badge_text="Dữ liệu SQL thật" if total_scans > 0 else "Chưa có ca khám",
                 page=page,
+                col={"xs": 12, "sm": 6, "lg": 3},
             ),
             header_stat_pill(
                 "Độ tin cậy AI",
@@ -141,17 +197,29 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 ft.Icons.AUTO_GRAPH_ROUNDED,
                 accent="#38BDF8" if p["IS_DARK"] else "#0284C7",
                 soft_bg=p["SOFT_BLUE"],
-                badge_text="Hoạt động tốt",
+                badge_text="Softmax trung bình" if total_scans > 0 else "0 ca",
                 page=page,
+                col={"xs": 12, "sm": 6, "lg": 3},
             ),
             header_stat_pill(
                 "Gửi Bác sĩ Thú y",
-                str(sent_expert),
+                f"{sent_expert} ca",
                 ft.Icons.MEDICAL_SERVICES_ROUNDED,
                 accent="#F59E0B" if p["IS_DARK"] else "#D97706",
                 soft_bg=p["SOFT_AMBER"],
-                badge_text="Hội chẩn nhanh",
+                badge_text="Hội chẩn chuyên gia",
                 page=page,
+                col={"xs": 12, "sm": 6, "lg": 3},
+            ),
+            header_stat_pill(
+                "Đã có phác đồ BS",
+                f"{reviewed_by_expert} ca",
+                ft.Icons.VERIFIED_ROUNDED,
+                accent="#7C3AED",
+                soft_bg=p["SOFT_BLUE"],
+                badge_text="Chuyên gia đã duyệt",
+                page=page,
+                col={"xs": 12, "sm": 6, "lg": 3},
             ),
         ]
         header_host.content = tech_banner(
@@ -194,10 +262,166 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 )
             )
 
+    def toggle_heatmap_view(e=None):
+        if not state["image_path"]:
+            return
+        state["heatmap_mode"] = not state["heatmap_mode"]
+        if state["heatmap_mode"] and not state["heatmap_path"]:
+            state["heatmap_path"] = generate_lesion_heatmap(state["image_path"])
+        render_dropzone()
+        page.update()
+
     def render_dropzone():
         p = get_theme_palette(page)
         info = state["image_info"]
         if state["image_path"] and info:
+            display_img_path = (
+                state["heatmap_path"]
+                if (state["heatmap_mode"] and state["heatmap_path"])
+                else state["image_path"]
+            )
+            stack_children: list[ft.Control] = [
+                ft.Container(
+                    alignment=ft.alignment.center,
+                    content=make_image(
+                        display_img_path,
+                        width=480,
+                        height=204,
+                        border_radius=12,
+                        fit=getattr(ft.ImageFit, "COVER", None),
+                    ),
+                ),
+                ft.Container(
+                    right=10,
+                    top=10,
+                    content=ft.Row(
+                        [
+                            ft.Container(
+                                bgcolor="#059669" if state["heatmap_mode"] else ft.Colors.with_opacity(0.92, p["BG_CARD"]),
+                                border=ft.border.all(1, "#34D399" if state["heatmap_mode"] else p["BORDER_LIGHT"]),
+                                border_radius=8,
+                                padding=ft.padding.symmetric(horizontal=11, vertical=7),
+                                ink=True,
+                                on_click=toggle_heatmap_view,
+                                tooltip="Bật/tắt chế độ Bản đồ nhiệt & tăng tương phản vùng tổn thương AI",
+                                content=ft.Row(
+                                    [
+                                        ft.Icon(
+                                            ft.Icons.THERMOSTAT_AUTO_ROUNDED if state["heatmap_mode"] else ft.Icons.BIOTECH_ROUNDED,
+                                            size=16,
+                                            color="#FFFFFF" if state["heatmap_mode"] else PRIMARY,
+                                        ),
+                                        ft.Text(
+                                            "Ảnh gốc" if state["heatmap_mode"] else "🔬 Soi vùng tổn thương AI",
+                                            size=12.5,
+                                            color="#FFFFFF" if state["heatmap_mode"] else p["TEXT_PRIMARY"],
+                                            weight=ft.FontWeight.W_600,
+                                        ),
+                                    ],
+                                    spacing=5,
+                                    tight=True,
+                                ),
+                            ),
+                            ft.Container(
+                                bgcolor=ft.Colors.with_opacity(0.92, p["BG_CARD"]),
+                                border=ft.border.all(1, p["BORDER_LIGHT"]),
+                                border_radius=8,
+                                padding=ft.padding.symmetric(horizontal=11, vertical=7),
+                                ink=True,
+                                on_click=handle_choose_file,
+                                content=ft.Row(
+                                    [
+                                        ft.Icon(ft.Icons.CHANGE_CIRCLE_OUTLINED, size=16, color=p["TEXT_PRIMARY"]),
+                                        ft.Text("Đổi ảnh khác", size=12.5, color=p["TEXT_PRIMARY"], weight=ft.FontWeight.W_600),
+                                    ],
+                                    spacing=5,
+                                    tight=True,
+                                ),
+                            ),
+                            ft.Container(
+                                bgcolor=ft.Colors.with_opacity(0.88, "#0F172A"),
+                                border_radius=8,
+                                padding=ft.padding.symmetric(horizontal=11, vertical=7),
+                                ink=True,
+                                on_click=lambda e: open_image_zoom_dialog(page, display_img_path, info["name"]),
+                                content=ft.Row(
+                                    [
+                                        ft.Icon(ft.Icons.ZOOM_IN_ROUNDED, size=16, color="#34D399"),
+                                        ft.Text("Phóng to", size=12.5, color="#FFFFFF", weight=ft.FontWeight.W_600),
+                                    ],
+                                    spacing=5,
+                                    tight=True,
+                                ),
+                            ),
+                        ],
+                        spacing=6,
+                        tight=True,
+                    ),
+                ),
+            ]
+
+            if state["heatmap_mode"] and not state["scanning"]:
+                stack_children.append(
+                    ft.Container(
+                        left=12,
+                        bottom=10,
+                        bgcolor=ft.Colors.with_opacity(0.86, "#0F172A"),
+                        border=ft.border.all(1, "#34D399"),
+                        border_radius=8,
+                        padding=ft.padding.symmetric(horizontal=10, vertical=5),
+                        content=ft.Text(
+                            "🔥 Chế độ Bản đồ Nhiệt & Tăng Tương Phản Tổn Thương AI",
+                            size=12.5,
+                            weight=ft.FontWeight.W_600,
+                            color="#34D399",
+                        ),
+                    )
+                )
+
+            if state["scanning"]:
+                stack_children.append(
+                    ft.Container(
+                        expand=True,
+                        border_radius=12,
+                        bgcolor=ft.Colors.with_opacity(0.72, "#0F172A"),
+                        border=ft.border.all(2, "#10B981"),
+                        alignment=ft.alignment.center,
+                        animate=make_smooth_animation(180),
+                        content=ft.Column(
+                            [
+                                ft.Container(
+                                    width=360,
+                                    height=3,
+                                    bgcolor="#34D399",
+                                    border_radius=2,
+                                    shadow=ft.BoxShadow(blur_radius=14, color="#10B981", offset=ft.Offset(0, 0)),
+                                ),
+                                ft.Row(
+                                    [
+                                        ft.ProgressRing(width=20, height=20, stroke_width=2.5, color="#34D399"),
+                                        ft.Text(
+                                            state["scan_status"],
+                                            size=14.5,
+                                            weight=ft.FontWeight.BOLD,
+                                            color="#FFFFFF",
+                                        ),
+                                    ],
+                                    alignment=ft.MainAxisAlignment.CENTER,
+                                    spacing=10,
+                                ),
+                                ft.Text(
+                                    "AI Laser Scanner đang quét viền tổn thương biểu bì...",
+                                    size=12.5,
+                                    color="#A7F3D0",
+                                ),
+                            ],
+                            alignment=ft.MainAxisAlignment.CENTER,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            spacing=10,
+                        ),
+                    )
+                )
+
             dropzone_host.content = ft.Container(
                 height=220,
                 gradient=ft.LinearGradient(
@@ -205,66 +429,14 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     end=ft.alignment.bottom_right,
                     colors=p["DROPZONE_GRADIENT"],
                 ),
-                border=ft.border.all(1.5, p["DROPZONE_BORDER"]),
+                border=ft.border.all(2 if state["scanning"] else 1.5, "#10B981" if state["scanning"] else p["DROPZONE_BORDER"]),
                 border_radius=16,
                 padding=6,
                 alignment=ft.alignment.center,
                 animate=make_smooth_animation(200),
                 content=ft.Stack(
                     expand=True,
-                    controls=[
-                        ft.Container(
-                            alignment=ft.alignment.center,
-                            content=make_image(
-                                state["image_path"],
-                                width=480,
-                                height=204,
-                                border_radius=12,
-                                fit=getattr(ft.ImageFit, "COVER", None),
-                            ),
-                        ),
-                        ft.Container(
-                            right=10,
-                            top=10,
-                            content=ft.Row(
-                                [
-                                    ft.Container(
-                                        bgcolor=ft.Colors.with_opacity(0.92, p["BG_CARD"]),
-                                        border=ft.border.all(1, p["BORDER_LIGHT"]),
-                                        border_radius=8,
-                                        padding=ft.padding.symmetric(horizontal=11, vertical=7),
-                                        ink=True,
-                                        on_click=handle_choose_file,
-                                        content=ft.Row(
-                                            [
-                                                ft.Icon(ft.Icons.CHANGE_CIRCLE_OUTLINED, size=16, color=p["TEXT_PRIMARY"]),
-                                                ft.Text("Đổi ảnh khác", size=12.5, color=p["TEXT_PRIMARY"], weight=ft.FontWeight.W_600),
-                                            ],
-                                            spacing=5,
-                                            tight=True,
-                                        ),
-                                    ),
-                                    ft.Container(
-                                        bgcolor=ft.Colors.with_opacity(0.88, "#0F172A"),
-                                        border_radius=8,
-                                        padding=ft.padding.symmetric(horizontal=11, vertical=7),
-                                        ink=True,
-                                        on_click=lambda e: open_image_zoom_dialog(page, state["image_path"], info["name"]),
-                                        content=ft.Row(
-                                            [
-                                                ft.Icon(ft.Icons.ZOOM_IN_ROUNDED, size=16, color="#34D399"),
-                                                ft.Text("Phóng to", size=12.5, color="#FFFFFF", weight=ft.FontWeight.W_600),
-                                            ],
-                                            spacing=5,
-                                            tight=True,
-                                        ),
-                                    ),
-                                ],
-                                spacing=6,
-                                tight=True,
-                            ),
-                        ),
-                    ],
+                    controls=stack_children,
                 ),
             )
         else:
@@ -322,7 +494,16 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
     def load_sample_case(sample: dict):
         try:
             info = inspect_image(sample["path"])
-            state.update(image_path=sample["path"], image_info=info, result=None, record_id=None, sent_to_expert=False)
+            state.update(
+                image_path=sample["path"],
+                heatmap_path=None,
+                heatmap_mode=False,
+                scanning=False,
+                image_info=info,
+                result=None,
+                record_id=None,
+                sent_to_expert=False,
+            )
             animal_field.value = sample.get("animal_id", "PIG-101")
             farm_field.value = sample.get("farm_name", "Trại An Phú - Khu A")
             symptoms_field.value = sample.get("symptoms", "")
@@ -401,6 +582,31 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         show_snack(page, f"Đã gửi hồ sơ PS-{state['record_id']:06d} tới Bác sĩ Thú y thẩm định!", "#0284C7")
         page.update()
 
+    def handle_export_report(e):
+        res = state["result"]
+        if not res:
+            show_snack(page, "Vui lòng phân tích chẩn đoán trước khi xuất Phiếu Khám.", "#DC2626")
+            return
+        cls_info = get_class_info(res.get("label"))
+        export_vet_report_html(
+            page,
+            case_data={
+                "record_id": state["record_id"] or 1,
+                "case_id": f"PS-{int(state['record_id'] or 1):06d}",
+                "image_path": state["image_path"],
+                "disease_name": res.get("display_label") or display_class(res.get("label")),
+                "danger_level": res.get("danger_level", "Trung bình"),
+                "confidence": float(res.get("confidence") or 0.0),
+                "scores": res.get("scores") or [],
+                "animal_id": animal_field.value or "PIG-101",
+                "farm_name": farm_field.value or "Trại chăn nuôi",
+                "user_name": user.get("full_name", "Người chăn nuôi"),
+                "symptoms": symptoms_field.value or "",
+                "isolation_guide": cls_info.get("prevention") or "",
+                "treatment_guide": res.get("recommendation") or cls_info.get("treatment") or "",
+            },
+        )
+
     def _build_recent_3_list() -> list[ft.Control]:
         p = get_theme_palette(page)
         records = list_user_inspections(user.get("email", ""))[:3]
@@ -464,9 +670,14 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             )
         return rows
 
-    def render_right_card():
+    top3_progress_refs: list[tuple[ft.ProgressBar, ft.Text, float]] = []
+    main_conf_ref: list[tuple[ft.Text, float]] = []
+
+    def render_right_card(zero_bars_first: bool = False):
         p = get_theme_palette(page)
         res = state["result"]
+        top3_progress_refs.clear()
+        main_conf_ref.clear()
 
         # STANDBY STATE: Clean centered Hero + 3 steps + 3 recent inspections in 1 cohesive Card
         if not res:
@@ -572,18 +783,40 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             )
             return
 
-        # RESULT STATE: Danger badge + Disease title + Top-3 Probability Bars + 2-part Protocol Box + Vet CTA
+        # RESULT STATE: Danger badge + Disease title + Top-3 Probability Bars + 2-part Protocol Box + Vet CTA + Print Report
         danger = res.get("danger_level", "Trung bình")
         badge_label, badge_fg, badge_bg = _danger_badge_spec(danger, p)
         disease_name = res.get("display_label") or display_class(res.get("label"))
+        main_conf = float(res.get("confidence") or 0.0)
         cls_info = get_class_info(res.get("label"))
         isolation_guide = cls_info.get("prevention") or "Cách ly cá thể nghi nhiễm, vệ sinh sát trùng chuồng trại và theo dõi thân nhiệt."
         treatment_guide = res.get("recommendation") or cls_info.get("treatment") or "Tham khảo ý kiến Bác sĩ Thú y trước khi dùng kháng sinh đặc hiệu."
+
+        main_conf_text = ft.Text(
+            f"0.0%" if zero_bars_first else f"{main_conf * 100:.1f}%",
+            size=20,
+            weight=ft.FontWeight.W_800,
+            color="#34D399" if p["IS_DARK"] else PRIMARY_DARK,
+        )
+        main_conf_ref.append((main_conf_text, main_conf))
 
         top3_bars = []
         for idx, s in enumerate((res.get("scores") or [])[:3]):
             s_conf = float(s.get("confidence") or 0.0)
             bar_color = TOP3_BAR_COLORS[idx] if idx < len(TOP3_BAR_COLORS) else p["TEXT_SECONDARY"]
+            pbar = ft.ProgressBar(
+                value=0.0 if zero_bars_first else s_conf,
+                bar_height=8,
+                color=bar_color,
+                bgcolor=p["BORDER_LIGHT"],
+            )
+            pct_txt = ft.Text(
+                "0.0%" if zero_bars_first else f"{s_conf * 100:.1f}%",
+                size=14,
+                weight=ft.FontWeight.BOLD,
+                color=bar_color,
+            )
+            top3_progress_refs.append((pbar, pct_txt, s_conf))
             top3_bars.append(
                 ft.Column(
                     [
@@ -596,22 +829,18 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                                     color=p["TEXT_PRIMARY"],
                                     expand=True,
                                 ),
-                                ft.Text(
-                                    f"{s_conf * 100:.1f}%",
-                                    size=14,
-                                    weight=ft.FontWeight.BOLD,
-                                    color=bar_color,
-                                ),
+                                pct_txt,
                             ]
                         ),
-                        ft.ProgressBar(value=s_conf, bar_height=8, color=bar_color, bgcolor=p["BORDER_LIGHT"]),
+                        pbar,
                     ],
                     spacing=5,
                 )
             )
 
-        expert_cta = (
+        expert_btn = (
             ft.Container(
+                expand=2,
                 bgcolor=p["SOFT_BLUE"],
                 border=ft.border.all(1, "#38BDF8"),
                 padding=14,
@@ -620,7 +849,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     [
                         ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, color="#38BDF8" if p["IS_DARK"] else "#0284C7", size=20),
                         ft.Text(
-                            f"Đã gửi hồ sơ PS-{state['record_id']:06d} tới Bác sĩ Thú y thẩm định.",
+                            f"Đã gửi hồ sơ PS-{state['record_id']:06d} tới Bác sĩ Thú y",
                             size=14,
                             color="#38BDF8" if p["IS_DARK"] else "#0284C7",
                             weight=ft.FontWeight.BOLD,
@@ -632,7 +861,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             )
             if state["sent_to_expert"]
             else ft.Container(
-                width=float("inf"),
+                expand=2,
                 height=52,
                 border_radius=12,
                 bgcolor="#0284C7",
@@ -641,12 +870,82 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 on_click=handle_send_to_expert,
                 content=ft.Text(
                     "👨‍⚕️ Gửi Bác sĩ Thú y thẩm định ca này",
-                    size=15,
+                    size=14.5,
                     weight=ft.FontWeight.BOLD,
                     color="#FFFFFF",
                 ),
             )
         )
+
+        print_report_btn = ft.Container(
+            expand=1,
+            height=52,
+            border_radius=12,
+            bgcolor=p["BG_SUB"],
+            border=ft.border.all(1.5, PRIMARY),
+            alignment=ft.alignment.center,
+            ink=True,
+            on_click=handle_export_report,
+            tooltip="Xuất Phiếu Kết Quả Chẩn Đoán Thú Y ra file HTML/PDF để lưu trữ hoặc in ấn",
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.PRINT_ROUNDED, size=18, color="#34D399" if p["IS_DARK"] else PRIMARY_DARK),
+                    ft.Text(
+                        "🖨️ Xuất Phiếu Khám",
+                        size=14,
+                        weight=ft.FontWeight.BOLD,
+                        color="#34D399" if p["IS_DARK"] else PRIMARY_DARK,
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=6,
+                tight=True,
+            ),
+        )
+
+        def handle_ask_chatbot(e=None):
+            if not isinstance(getattr(page, "data", None), dict):
+                page.data = {}
+            page.data["active_scan_result"] = res
+            opener = page.data.get("open_vet_chat")
+            prompt = (
+                f"Mô hình {res.get('architecture', 'AI')} vừa chẩn đoán '{disease_name}' "
+                f"(độ tin cậy Softmax {main_conf*100:.1f}%). "
+                "Hãy tư vấn chi tiết triệu chứng, liều lượng thuốc điều trị và cách ly cho ca này?"
+            )
+            if callable(opener):
+                opener(prompt)
+
+        ask_ai_btn = ft.Container(
+            expand=1,
+            height=52,
+            border_radius=12,
+            bgcolor=PRIMARY_DARK,
+            alignment=ft.alignment.center,
+            ink=True,
+            on_click=handle_ask_chatbot,
+            tooltip="Hỏi trực tiếp Trợ lý AI Thú y (Chatbot) về triệu chứng, liều lượng thuốc và cách ly của ca vừa quét",
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.SMART_TOY_ROUNDED, size=18, color="#FFFFFF"),
+                    ft.Text(
+                        "💬 Hỏi AI Thú y",
+                        size=14,
+                        weight=ft.FontWeight.BOLD,
+                        color="#FFFFFF",
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=6,
+                tight=True,
+            ),
+        )
+
+        actions_row = ft.Row([expert_btn, ask_ai_btn, print_report_btn], spacing=10)
+
+        arch_txt = res.get("architecture") or res.get("model_label") or "MobileNetV2"
+        run_txt = res.get("run_name") or ""
+        ms_txt = res.get("inference_ms", "-")
 
         right_card_host.content = css_card(
             padding=24,
@@ -669,8 +968,32 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     ),
                     ft.Column(
                         [
-                            ft.Text("Kết luận chẩn đoán từ Trí tuệ nhân tạo PigSkin AI:", size=13.5, color=p["TEXT_SECONDARY"]),
-                            ft.Text(disease_name, size=22, weight=ft.FontWeight.BOLD, color=badge_fg),
+                            ft.Text(
+                                f"Kết luận từ Tensor Softmax ({arch_txt} • {run_txt} • {ms_txt} ms):",
+                                size=13,
+                                weight=ft.FontWeight.W_600,
+                                color=p["TEXT_SECONDARY"],
+                            ),
+                            ft.Row(
+                                [
+                                    ft.Text(disease_name, size=22, weight=ft.FontWeight.BOLD, color=badge_fg, expand=True),
+                                    ft.Container(
+                                        padding=ft.padding.symmetric(horizontal=12, vertical=5),
+                                        border_radius=12,
+                                        bgcolor=p["SOFT_EMERALD"],
+                                        border=ft.border.all(1, PRIMARY),
+                                        content=ft.Row(
+                                            [
+                                                ft.Text("Độ tin cậy:", size=12.5, weight=ft.FontWeight.W_600, color=p["TEXT_SECONDARY"]),
+                                                main_conf_text,
+                                            ],
+                                            spacing=6,
+                                            tight=True,
+                                        ),
+                                    ),
+                                ],
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
                         ],
                         spacing=2,
                     ),
@@ -702,7 +1025,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                             spacing=6,
                         ),
                     ),
-                    expert_cta,
+                    actions_row,
                     ft.Divider(height=12, color=p["BORDER_LIGHT"]),
                     ft.Text("3 lần khám gần nhất", size=15, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
                     *_build_recent_3_list(),
@@ -714,6 +1037,9 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
     def handle_reset_case(e=None):
         state.update(
             image_path=None,
+            heatmap_path=None,
+            heatmap_mode=False,
+            scanning=False,
             image_info=None,
             result=None,
             record_id=None,
@@ -734,7 +1060,16 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         p_path = paths[0]
         try:
             info = inspect_image(p_path)
-            state.update(image_path=p_path, image_info=info, result=None, record_id=None, sent_to_expert=False)
+            state.update(
+                image_path=p_path,
+                heatmap_path=None,
+                heatmap_mode=False,
+                scanning=False,
+                image_info=info,
+                result=None,
+                record_id=None,
+                sent_to_expert=False,
+            )
             render_dropzone()
             render_sample_gallery()
             render_right_card()
@@ -749,10 +1084,30 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         if not state["image_path"]:
             show_snack(page, "Vui lòng tải ảnh da heo hoặc chọn 1 mẫu thử bên dưới.", "#DC2626")
             return
+
         loading_bar.visible = True
-        page.update()
+        state["scanning"] = True
+        scan_steps = [
+            "🔍 Đang tiền xử lý & tách nền da heo...",
+            "🧠 Đang trích xuất đặc trưng qua mạng Deep Learning...",
+            "📊 Đang tổng hợp phác đồ thú y...",
+        ]
+
         try:
-            res = await asyncio.to_thread(predict, state["image_path"])
+            # Start AI inference in background thread while running the 0.9s AI Laser Scanner sequence
+            pred_task = asyncio.create_task(
+                asyncio.to_thread(predict, state["image_path"], state.get("selected_run"))
+            )
+            for msg in scan_steps:
+                state["scan_status"] = msg
+                render_dropzone()
+                page.update()
+                await asyncio.sleep(0.3)
+
+            res = await pred_task
+            if not isinstance(getattr(page, "data", None), dict):
+                page.data = {}
+            page.data["active_scan_result"] = res
             info = state["image_info"] or inspect_image(state["image_path"])
             auto_review = 1 if float(res.get("confidence") or 0.0) < 0.75 else 0
             rid = save(
@@ -769,10 +1124,30 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 },
                 source_image=state["image_path"],
             )
-            state.update(result=res, record_id=rid, sent_to_expert=bool(auto_review))
+            state.update(result=res, record_id=rid, sent_to_expert=bool(auto_review), scanning=False)
             refresh_page_header()
-            render_right_card()
+            render_dropzone()
+
+            # Fade-in right card & animate confidence counter + Top-3 progress bars from 0% -> target in 0.5s
+            right_card_host.opacity = 0.2
+            render_right_card(zero_bars_first=True)
+            page.update()
+            await asyncio.sleep(0.04)
+            right_card_host.opacity = 1.0
+            steps = 16
+            for step_i in range(1, steps + 1):
+                ratio = step_i / steps
+                for m_txt, m_target in main_conf_ref:
+                    m_txt.value = f"{(m_target * ratio) * 100:.1f}%"
+                for pbar, pct_txt, target_val in top3_progress_refs:
+                    cur_val = target_val * ratio
+                    pbar.value = cur_val
+                    pct_txt.value = f"{cur_val * 100:.1f}%"
+                page.update()
+                await asyncio.sleep(0.03)
         except Exception as err:
+            state["scanning"] = False
+            render_dropzone()
             show_snack(page, f"Không thể phân tích ảnh: {err}", "#DC2626")
         finally:
             loading_bar.visible = False
@@ -852,28 +1227,25 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     ft.Row(
                         [
                             ft.Icon(ft.Icons.CAMERA_ENHANCE_ROUNDED, color=PRIMARY, size=22),
-                            ft.Text("Thông tin ca cần kiểm tra", size=18, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"], expand=True),
+                            ft.Text("Thu thập Hình ảnh & Triệu chứng", size=18, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"], expand=True),
                             reset_case_btn,
                         ],
                         spacing=8,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
-                    ft.Text("1. Ảnh vùng da", size=14, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
                     dropzone_host,
                     sample_gallery_host,
-                    ft.Divider(height=10, color=p["BORDER_LIGHT"]),
-                    ft.Text("2. Thông tin vật nuôi", size=14, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
+                    ft.Row([model_run_dropdown]),
                     ft.Row([animal_field, farm_field], spacing=12),
                     ft.Column(
                         [
-                            ft.Text("3. Triệu chứng quan sát được", size=14, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
-                            ft.Text("Chọn nhanh biểu hiện hoặc ghi mô tả:", size=13.5, weight=ft.FontWeight.W_600, color=p["TEXT_SECONDARY"]),
+                            ft.Text("Chọn nhanh biểu hiện lâm sàng:", size=13.5, weight=ft.FontWeight.W_600, color=p["TEXT_SECONDARY"]),
                             symptom_chips_row,
-                            symptoms_field,
                         ],
-                        spacing=8,
+                        spacing=6,
                         tight=True,
                     ),
+                    ft.Row([symptoms_field]),
                     loading_bar,
                     cta_analyze_btn,
                 ],
@@ -883,19 +1255,18 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
 
         return [
             header_host,
-            ft.Row(
+            ft.ResponsiveRow(
                 [
-                    left_card,
-                    right_card_host,
+                    ft.Container(col={"xs": 12, "lg": 6}, content=left_card),
+                    ft.Container(col={"xs": 12, "lg": 6}, content=right_card_host),
                 ],
+                run_spacing=20,
                 spacing=20,
-                vertical_alignment=ft.CrossAxisAlignment.START,
             ),
         ]
 
     # Tab 2: History
     def build_history_tab():
-        p = get_theme_palette(page)
         date_input = css_input(
             label="Tìm theo ngày khám (YYYY-MM-DD)",
             hint_text="VD: 2026-11",
@@ -979,6 +1350,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     css_card(
                         padding=24,
                         page=page,
+                        hover_lift=True,
                         content=ft.Row(
                             [
                                 preview_thumbnail_with_zoom(
@@ -1054,23 +1426,16 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             css_card(
                 padding=20,
                 page=page,
-                content=ft.Column(
+                content=ft.Row(
                     [
-                        ft.Text("Lọc hồ sơ khám", size=14, weight=ft.FontWeight.W_600, color=get_theme_palette(page)["TEXT_SECONDARY"]),
-                        ft.Row(
-                            [
-                                date_input,
-                                disease_dropdown,
-                                ft.OutlinedButton("Làm mới", icon=ft.Icons.REFRESH_ROUNDED, on_click=refresh_history),
-                            ],
-                            spacing=12,
-                            wrap=True,
-                        ),
+                        date_input,
+                        disease_dropdown,
+                        ft.OutlinedButton("Làm mới", icon=ft.Icons.REFRESH_ROUNDED, on_click=refresh_history),
                     ],
-                    spacing=8,
+                    spacing=12,
                 ),
             ),
-            list_host,
+            ft.Container(padding=ft.padding.only(bottom=90), content=list_host),
         ]
 
     # Tab 3: Wiki (3-Column Structured Sub-cards per Disease Card)
@@ -1183,6 +1548,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     css_card(
                         padding=24,
                         page=page,
+                        hover_lift=True,
                         content=ft.Column(
                             [
                                 ft.Row(
@@ -1228,28 +1594,38 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             css_card(
                 padding=20,
                 page=page,
-                content=ft.Column(
-                    [
-                        search_box,
-                        ft.Column(
-                            [
-                                ft.Text("Lọc nhanh theo mức độ", size=13, weight=ft.FontWeight.W_600, color=get_theme_palette(page)["TEXT_SECONDARY"]),
-                                triage_chips_row,
-                            ],
-                            spacing=8,
-                            tight=True,
-                        ),
-                    ],
-                    spacing=14,
-                ),
+                content=ft.Row([search_box, triage_chips_row], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ),
-            cards_col,
+            ft.Container(padding=ft.padding.only(bottom=90), content=cards_col),
+        ]
+
+    # Tab 4: Trợ lý AI Thú y (Chatbot) — khởi tạo sẵn để đồng bộ 100% với Popup Chat góc phải
+    main_chat_card, _ = build_chat_panel(
+        page=page,
+        user=user,
+        get_diagnosis_context=lambda: state.get("result"),
+        compact=False,
+    )
+
+    def build_chatbot_tab():
+        from services.chatbot_service import refresh_all_chat_views
+
+        refresh_all_chat_views(page)
+        return [
+            tech_banner(
+                "Trợ lý AI Thú y (Chatbot)",
+                "Chỉ giải đáp chuyên môn: Bệnh ngoài da ở heo, kết quả chẩn đoán mô hình Deep Learning (MobileNetV2, EfficientNet-B0) & hướng dẫn sử dụng PigSkinTech",
+                badge_text="Domain Guardrail Active",
+                page=page,
+            ),
+            main_chat_card,
         ]
 
     destinations = [
         ("Chẩn đoán bệnh", ft.Icons.IMAGE_SEARCH_OUTLINED, ft.Icons.IMAGE_SEARCH_ROUNDED),
         ("Lịch sử khám", ft.Icons.HISTORY_OUTLINED, ft.Icons.HISTORY_ROUNDED),
         ("Cẩm nang bệnh lý", ft.Icons.MENU_BOOK_OUTLINED, ft.Icons.MENU_BOOK_ROUNDED),
+        ("Trợ lý AI Thú y (Chatbot)", ft.Icons.SMART_TOY_OUTLINED, ft.Icons.SMART_TOY_ROUNDED),
     ]
 
     return build_role_shell(
@@ -1257,5 +1633,5 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         user=user,
         title="Không gian Người Chăn Nuôi",
         destinations=destinations,
-        tab_builders=[build_predict_tab, build_history_tab, build_wiki_tab],
+        tab_builders=[build_predict_tab, build_history_tab, build_wiki_tab, build_chatbot_tab],
     )

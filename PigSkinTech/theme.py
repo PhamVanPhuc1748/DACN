@@ -136,11 +136,28 @@ def css_card(
     width: int | float | None = None,
     height: int | float | None = None,
     page: ft.Page | None = None,
+    hover_lift: bool = False,
 ) -> ft.Container:
-    """Standardized Shadcn/Tailwind Card supporting Light & Dark Mode."""
+    """Standardized Shadcn/Tailwind Card supporting Light & Dark Mode and optional hover_lift."""
     pal = get_theme_palette(page)
     resolved_bg = bgcolor if bgcolor is not None else pal["BG_CARD"]
     resolved_border = border_color if border_color is not None else pal["BORDER_LIGHT"]
+    base_shadow = css_shadow(0.18 if pal["IS_DARK"] else 0.04, 24, 6)
+
+    def _on_card_hover(e):
+        cur_pal = get_theme_palette(page)
+        hovered = str(getattr(e, "data", "")).lower() == "true"
+        e.control.border = ft.border.all(
+            1.5 if hovered else 1,
+            PRIMARY if hovered else (border_color if border_color is not None else cur_pal["BORDER_LIGHT"]),
+        )
+        e.control.shadow = (
+            css_shadow(0.28 if cur_pal["IS_DARK"] else 0.10, 32, 10)
+            if hovered
+            else css_shadow(0.18 if cur_pal["IS_DARK"] else 0.04, 24, 6)
+        )
+        e.control.update()
+
     return ft.Container(
         content=content,
         width=width,
@@ -151,8 +168,9 @@ def css_card(
         gradient=gradient,
         border_radius=border_radius,
         border=ft.border.all(1, resolved_border),
-        shadow=css_shadow(0.18 if pal["IS_DARK"] else 0.04, 24, 6),
+        shadow=base_shadow,
         animate=make_smooth_animation(200),
+        on_hover=_on_card_hover if hover_lift else None,
     )
 
 

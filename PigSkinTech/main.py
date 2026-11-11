@@ -34,8 +34,8 @@ def main(page: ft.Page):
     if hasattr(page, "window"):
         page.window.width = 1440
         page.window.height = 900
-        page.window.min_width = 1024
-        page.window.min_height = 680
+        page.window.min_width = 1100
+        page.window.min_height = 720
 
     ROUTE_BUILDERS = {
         "/user": ("user", build_user_view),

@@ -1,412 +1,340 @@
-import io
-import asyncio
+from __future__ import annotations
+
+from datetime import datetime
 import json
-import logging
-import time
-import uuid
-from datetime import datetime, timezone
+import sys
+import tempfile
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Optional
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request as UrlRequest, urlopen
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from app.database import get_feedback, get_record, get_records, save_feedback, save_record
-from app.diseases_data import DISEASES_DATA
-from app.config import settings
+from .config import get_settings, save_env_settings
+from .database import Base, ChatHistory, Disease, PredictionHistory, User, engine, get_db, get_engine
+from .diseases_data import DISEASES_SEED
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("PigSkinAPI")
+# Allow importing PigSkinTech real inference pipeline
+PIGSKIN_DIR = Path(__file__).resolve().parents[2] / "PigSkinTech"
+if str(PIGSKIN_DIR) not in sys.path:
+    sys.path.insert(0, str(PIGSKIN_DIR))
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-WEIGHTS_DIR = BASE_DIR.parent / "ml_workspace" / "weights"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
-MAX_BATCH_FILES = 30
+app = FastAPI(title="PigSkinTech API", version="2.0.0")
 
-app = FastAPI(
-    title="Pig Skin Disease Detection API",
-    description="API nghiên cứu để phân tích ảnh da heo, tra cứu bệnh và lưu hồ sơ theo dõi.",
-    version="1.2.0",
-)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
-app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 
-class FeedbackRequest(BaseModel):
-    record_id: str
-    doctor_status: Literal["CONFIRMED", "CORRECTED"]
-    corrected_disease_code: Optional[str] = None
-    doctor_notes: Optional[str] = Field(default=None, max_length=2000)
+def seed_initial_data(db: Session) -> None:
+    if db.query(Disease).count() > 0:
+        return
+    for item in DISEASES_SEED:
+        db.add(Disease(**item))
+    db.commit()
 
 
-class ModelSwitchRequest(BaseModel):
-    filename: str
+@app.on_event("startup")
+def on_startup() -> None:
+    active_engine = get_engine()
+    Base.metadata.create_all(bind=active_engine)
+    db = next(get_db())
+    try:
+        seed_initial_data(db)
+    finally:
+        db.close()
 
 
-class ChatMessage(BaseModel):
-    role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=4000)
+class AuthRequest(BaseModel):
+    username: str
+    password: str
+    role: Optional[str] = "farmer"
+
+
+class ChatMessageItem(BaseModel):
+    role: str
+    content: str
 
 
 class ChatRequest(BaseModel):
-    messages: List[ChatMessage] = Field(min_length=1, max_length=12)
+    message: str
+    history: list[ChatMessageItem] = []
+    user_id: Optional[int] = None
+    context: Optional[str] = None
 
 
-@app.get("/")
-def read_root():
-    return {"status": "online", "service": "PigSkin API", "version": "1.2.0", "database": "SQLite", "docs": "/docs"}
+class AdminSettingsPayload(BaseModel):
+    database_engine: str = "sqlserver"
+    sqlserver_host: str = "localhost"
+    sqlserver_port: int = 1433
+    sqlserver_database: str = "PigSkinTechDB"
+    sqlserver_username: str = ""
+    sqlserver_password: str = ""
+    sqlserver_driver: str = "ODBC Driver 17 for SQL Server"
+    sqlserver_trusted_connection: bool = True
+    ai_provider: str = "openai_compatible"
+    ai_base_url: str = "https://api.openai.com/v1"
+    ai_api_key: str = ""
+    ai_model: str = "gpt-4o-mini"
+    ai_system_prompt: str = (
+        "Bạn là bác sĩ thú y AI chuyên về bệnh ngoài da ở heo của hệ thống PigSkinTech. "
+        "Hãy trả lời ngắn gọn, dễ hiểu, thực tế về triệu chứng, cách xử lý ban đầu, "
+        "an toàn sinh học và khi nào cần gọi bác sĩ thú y."
+    )
+
+
+def _require_admin(request: Request, db: Session) -> User:
+    username = (request.headers.get("X-Admin-Username") or "").strip()
+    if not username:
+        raise HTTPException(status_code=403, detail="Thiếu thông tin xác thực quản trị viên")
+    user = db.query(User).filter(User.username == username).first()
+    if not user or user.role != "admin":
+        raise HTTPException(status_code=403, detail="Chỉ quản trị viên mới có quyền truy cập mục này")
+    return user
 
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "database": "SQLite"}
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.post("/auth/register")
+def register(payload: AuthRequest, db: Session = Depends(get_db)):
+    exists = db.query(User).filter(User.username == payload.username).first()
+    if exists:
+        raise HTTPException(status_code=400, detail="Username already exists")
+
+    role = payload.role if payload.role in {"farmer", "admin", "expert"} else "farmer"
+    user = User(username=payload.username, password=payload.password, role=role)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"id": user.id, "username": user.username, "role": user.role}
+
+
+@app.post("/auth/login")
+def login(payload: AuthRequest, db: Session = Depends(get_db)):
+    user = (
+        db.query(User)
+        .filter(User.username == payload.username, User.password == payload.password)
+        .first()
+    )
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    return {"id": user.id, "username": user.username, "role": user.role}
 
 
 @app.get("/diseases")
-def list_diseases():
-    return list(DISEASES_DATA.values())
+def list_diseases(search: Optional[str] = None, db: Session = Depends(get_db)):
+    query = db.query(Disease)
+    if search:
+        pattern = f"%{search.strip()}%"
+        query = query.filter((Disease.name_vi.ilike(pattern)) | (Disease.code.ilike(pattern)))
 
-
-@app.get("/diseases/{code}")
-def get_disease_detail(code: str):
-    disease = DISEASES_DATA.get(code.upper())
-    if not disease:
-        raise HTTPException(status_code=404, detail="Không tìm thấy bệnh theo mã đã yêu cầu.")
-    return disease
-
-
-def _request_ai_reply(messages: list[ChatMessage]) -> str:
-    if not settings.ai_is_configured:
-        raise HTTPException(
-            status_code=503,
-            detail="Trợ lý AI chưa được cấu hình đầy đủ. Hãy điền AI_BASE_URL, AI_MODEL và khóa API phù hợp trong backend/.env, rồi khởi động lại backend.",
-        )
-
-    provider_messages = [
-        {"role": "system", "content": settings.ai_system_prompt},
-        *[{"role": message.role, "content": message.content} for message in messages],
-    ]
-    payload = json.dumps(
+    items = query.order_by(Disease.name_vi.asc()).all()
+    return [
         {
-            "model": settings.ai_model,
-            "messages": provider_messages,
-            "max_tokens": settings.ai_max_tokens,
-            "temperature": 0.3,
+            "id": d.id,
+            "code": d.code,
+            "name_vi": d.name_vi,
+            "symptoms": d.symptoms,
+            "treatment": d.treatment,
+            "prevention": d.prevention,
+            "reference_image": d.reference_image,
         }
-    ).encode("utf-8")
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if settings.ai_api_key:
-        headers["Authorization"] = f"Bearer {settings.ai_api_key}"
-    request = Request(
-        f"{settings.ai_base_url}/chat/completions",
-        data=payload,
-        headers=headers,
-        method="POST",
-    )
-
-    try:
-        with urlopen(request, timeout=settings.ai_timeout_seconds) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except HTTPError as error:
-        logger.warning("Configured AI provider returned HTTP %s", error.code)
-        raise HTTPException(status_code=502, detail="AI provider từ chối yêu cầu. Hãy kiểm tra cấu hình model và API key.") from error
-    except (URLError, TimeoutError, OSError) as error:
-        logger.warning("Could not reach configured AI provider: %s", type(error).__name__)
-        raise HTTPException(status_code=502, detail="Không kết nối được AI provider. Hãy kiểm tra địa chỉ API và kết nối mạng.") from error
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        logger.warning("Configured AI provider returned invalid JSON")
-        raise HTTPException(status_code=502, detail="AI provider trả về dữ liệu không hợp lệ.") from error
-
-    try:
-        content = result["choices"][0]["message"]["content"]
-        if isinstance(content, list):
-            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-        reply = str(content).strip()
-    except (KeyError, IndexError, TypeError) as error:
-        raise HTTPException(status_code=502, detail="AI provider không trả về câu trả lời hợp lệ.") from error
-    if not reply:
-        raise HTTPException(status_code=502, detail="AI provider trả về câu trả lời trống.")
-    return reply
-
-
-@app.post("/chat")
-async def chat_with_ai(request: ChatRequest):
-    """Generate a text reply through the configured OpenAI-compatible provider."""
-    reply = await asyncio.to_thread(_request_ai_reply, request.messages)
-    return {"reply": reply, "model": settings.ai_model}
-
-
-def serialize_record(record: dict):
-    image_path = record.get("image_path", "")
-    record["image_url"] = f"/uploads/{Path(image_path).name}" if image_path else None
-    return record
-
-
-@app.get("/records")
-def list_diagnostic_records(
-    limit: int = Query(100, ge=1, le=200),
-    pen_id: Optional[str] = None,
-    ear_tag: Optional[str] = None,
-    disease_code: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    q: Optional[str] = None,
-):
-    return [serialize_record(record) for record in get_records(limit, pen_id, disease_code, ear_tag, start_date, end_date, q)]
-
-
-@app.get("/records/{record_id}")
-def get_diagnostic_record(record_id: str):
-    record = get_record(record_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Không tìm thấy hồ sơ phân tích.")
-    return serialize_record(record)
-
-
-def _save_upload_image(image: Image.Image, record_id: str):
-    filename = f"{record_id.lower()}.webp"
-    image.convert("RGB").save(UPLOAD_DIR / filename, "WEBP", quality=88, method=5)
-    return f"uploads/{filename}"
-
-
-def _demo_disease_code(filename: str):
-    name = Path(filename or "").name.lower()
-    matchers = {
-        "VIRA_FMD": ("fmd", "mong"), "VIRA_POX": ("pox", "dau"),
-        "PARA_MANGE": ("mange", "ghe"), "BACT_GPD": ("gpd", "tiet_dich"),
-        "FUNG_RING": ("ringworm",), "FUNG_ROSEA": ("rosea",),
-        "ENV_DERM": ("dermatitis", "derm"), "ENV_SUN": ("sunburn",),
-        "HEALTHY": ("healthy", "khoe"),
-    }
-    for code, keys in matchers.items():
-        if any(key in name for key in keys):
-            return code
-    return "BACT_ERY"
-
-
-async def _read_upload(file: UploadFile):
-    allowed_types = {"image/jpeg", "image/png", "image/webp"}
-    if file.content_type not in allowed_types:
-        raise HTTPException(status_code=415, detail="Chỉ nhận ảnh JPG, PNG hoặc WEBP.")
-    contents = await file.read(MAX_IMAGE_BYTES + 1)
-    if len(contents) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Ảnh vượt quá dung lượng tối đa 10 MB.")
-    try:
-        image = Image.open(io.BytesIO(contents))
-        image.verify()
-        image = Image.open(io.BytesIO(contents)).convert("RGB")
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
-        raise HTTPException(status_code=400, detail="Không thể đọc ảnh. Hãy chọn một tệp JPG, PNG hoặc WEBP hợp lệ.")
-    return image
-
-
-def _create_prediction(image: Image.Image, filename: str, ear_tag: Optional[str], pen_id: Optional[str], notes: Optional[str], threshold: float):
-    record_id = f"PIG-{uuid.uuid4().hex[:12].upper()}"
-    code = _demo_disease_code(filename)
-    disease = DISEASES_DATA[code]
-    healthy = code == "HEALTHY"
-    confidence = 0.982 if healthy else 0.948
-    width, height = image.size
-    detections = []
-    if not healthy and confidence >= threshold:
-        detections.append({
-            "label": f"Vùng da cần quan sát · {disease['name_vi']}",
-            "confidence": confidence,
-            "bbox": [int(width * .22), int(height * .25), int(width * .78), int(height * .8)],
-        })
-    created_at = datetime.now(timezone.utc).isoformat()
-    image_path = _save_upload_image(image, record_id)
-    record = {
-        "id": record_id,
-        "filename": Path(filename or "anh-tai-len").name,
-        "image_path": image_path,
-        "image_url": f"/uploads/{Path(image_path).name}",
-        "ear_tag": (ear_tag or "").strip(),
-        "pen_id": (pen_id or "").strip(),
-        "disease_code": code,
-        "disease_name": disease["name_vi"],
-        "confidence": confidence,
-        "urgency_level": disease["urgency_level"],
-        "urgency_label": disease["urgency_label"],
-        "treatment_summary": disease.get("care_summary", ""),
-        "abnormal": not healthy,
-        "detections": detections,
-        "notes": (notes or "").strip(),
-        "source": "Mô phỏng theo tên tệp · chưa nạp mô hình AI",
-        "created_at": created_at,
-    }
-    save_record(record)
-    return {key: value for key, value in record.items() if key != "image_path"}
+        for d in items
+    ]
 
 
 @app.post("/predict")
-async def predict(
+async def predict_disease(
     file: UploadFile = File(...),
-    ear_tag: Optional[str] = Form(None),
-    pen_id: Optional[str] = Form(None),
-    notes: Optional[str] = Form(None),
-    threshold: float = Form(0.5, ge=0.1, le=0.95),
+    user_id: Optional[int] = Form(default=None),
+    model_run: Optional[str] = Form(default=None),
+    db: Session = Depends(get_db),
 ):
-    image = await _read_upload(file)
-    logger.info("Received %s (%sx%s), ear=%s, pen=%s", file.filename, image.width, image.height, ear_tag, pen_id)
-    return _create_prediction(image, file.filename or "", ear_tag, pen_id, notes, threshold)
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
+    suffix = Path(file.filename or "upload.jpg").suffix or ".jpg"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
 
-@app.post("/predict/batch")
-async def predict_batch(
-    files: List[UploadFile] = File(...),
-    ear_tag: Optional[str] = Form(None),
-    pen_id: Optional[str] = Form(None),
-    notes: Optional[str] = Form(None),
-    threshold: float = Form(0.5, ge=0.1, le=0.95),
-):
-    if not files:
-        raise HTTPException(status_code=400, detail="Hãy chọn ít nhất một ảnh.")
-    if len(files) > MAX_BATCH_FILES:
-        raise HTTPException(status_code=413, detail=f"Mỗi lượt chỉ nhận tối đa {MAX_BATCH_FILES} ảnh.")
-    results = []
-    for file in files:
+    try:
+        from services.inference import predict as run_real_predict
+
+        pred = run_real_predict(tmp_path, run_name=model_run)
+    finally:
         try:
-            image = await _read_upload(file)
-            result = _create_prediction(image, file.filename or "", ear_tag, pen_id, notes, threshold)
-            results.append({"ok": True, "result": result})
-        except HTTPException as exc:
-            results.append({"ok": False, "filename": Path(file.filename or "").name, "error": exc.detail})
-    successful = [item["result"] for item in results if item["ok"]]
-    abnormal = sum(1 for item in successful if item["abnormal"])
-    return {"results": results, "total": len(files), "processed": len(successful), "abnormal_count": abnormal}
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if not pred.get("ok"):
+        raise HTTPException(status_code=400, detail=pred.get("error", "Inference error"))
+
+    predicted_code = pred["label"]
+    confidence = float(pred["confidence"])
+    disease_info = pred.get("disease", {})
+
+    record = PredictionHistory(
+        user_id=user_id,
+        image_name=file.filename or "uploaded_image.jpg",
+        predicted_code=predicted_code,
+        confidence=confidence,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    return {
+        "prediction_id": record.id,
+        "predicted_code": predicted_code,
+        "confidence": confidence,
+        "inference_ms": pred.get("inference_ms", 0.0),
+        "architecture": pred.get("architecture", ""),
+        "scores": pred.get("scores", []),
+        "top3": pred.get("top3", []),
+        "disease": {
+            "code": predicted_code,
+            "name_vi": disease_info.get("name_vi", predicted_code),
+            "symptoms": disease_info.get("symptoms", ""),
+            "treatment": disease_info.get("drugs", ""),
+            "prevention": disease_info.get("isolation", ""),
+        },
+        "created_at": record.created_at.isoformat(),
+    }
 
 
-@app.post("/feedback")
-def submit_feedback(feedback: FeedbackRequest):
-    if not get_record(feedback.record_id):
-        raise HTTPException(status_code=404, detail="Không tìm thấy hồ sơ cần phản hồi.")
-    corrected = feedback.corrected_disease_code.upper() if feedback.corrected_disease_code else ""
-    if feedback.doctor_status == "CORRECTED" and corrected not in DISEASES_DATA:
-        raise HTTPException(status_code=422, detail="Hãy chọn một mã bệnh hợp lệ khi đính chính.")
-    if feedback.doctor_status == "CONFIRMED":
-        corrected = ""
-    disease_name = DISEASES_DATA[corrected]["name_vi"] if corrected else ""
-    save_feedback({
-        "record_id": feedback.record_id,
-        "doctor_status": feedback.doctor_status,
-        "corrected_disease_code": corrected,
-        "corrected_disease_name": disease_name,
-        "doctor_notes": feedback.doctor_notes or "",
-    })
-    return {"status": "success", "feedback": get_feedback(feedback.record_id)}
+@app.get("/admin/settings")
+def get_admin_settings(request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    cfg = get_settings()
+    return {
+        "database_engine": cfg.database_engine,
+        "sqlserver_host": cfg.sqlserver_host,
+        "sqlserver_port": cfg.sqlserver_port,
+        "sqlserver_database": cfg.sqlserver_database,
+        "sqlserver_username": cfg.sqlserver_username,
+        "sqlserver_password": cfg.sqlserver_password,
+        "sqlserver_driver": cfg.sqlserver_driver,
+        "sqlserver_trusted_connection": cfg.sqlserver_trusted_connection,
+        "ai_provider": cfg.ai_provider,
+        "ai_base_url": cfg.ai_base_url,
+        "ai_api_key": cfg.ai_api_key,
+        "ai_model": cfg.ai_model,
+        "ai_system_prompt": cfg.ai_system_prompt,
+    }
 
 
-@app.get("/export/xlsx")
-def export_xlsx(
-    pen_id: Optional[str] = None,
-    ear_tag: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-):
+@app.put("/admin/settings")
+def update_admin_settings(payload: AdminSettingsPayload, request: Request, db: Session = Depends(get_db)):
+    _require_admin(request, db)
+    save_env_settings(
+        {
+            "DATABASE_ENGINE": payload.database_engine,
+            "SQLSERVER_HOST": payload.sqlserver_host,
+            "SQLSERVER_PORT": str(payload.sqlserver_port),
+            "SQLSERVER_DATABASE": payload.sqlserver_database,
+            "SQLSERVER_USERNAME": payload.sqlserver_username,
+            "SQLSERVER_PASSWORD": payload.sqlserver_password,
+            "SQLSERVER_DRIVER": payload.sqlserver_driver,
+            "SQLSERVER_TRUSTED_CONNECTION": "true" if payload.sqlserver_trusted_connection else "false",
+            "AI_PROVIDER": payload.ai_provider,
+            "AI_BASE_URL": payload.ai_base_url,
+            "AI_API_KEY": payload.ai_api_key,
+            "AI_MODEL": payload.ai_model,
+            "AI_SYSTEM_PROMPT": payload.ai_system_prompt,
+        }
+    )
+    active_engine = get_engine()
+    Base.metadata.create_all(bind=active_engine)
+    return {"status": "saved"}
+
+
+@app.post("/chat")
+def chat_with_ai(payload: ChatRequest, db: Session = Depends(get_db)):
+    from services.chatbot_service import (
+        STRICT_DOMAIN_SYSTEM_PROMPT,
+        build_refusal_response,
+        ensure_disclaimer,
+        is_in_domain,
+    )
+
+    user_msg = (payload.message or "").strip()
+    if not user_msg:
+        raise HTTPException(status_code=400, detail="Tin nhắn không được để trống")
+
+    # Kiểm soát nội dung nghiêm ngặt (Strict Domain Guardrail)
+    if not is_in_domain(user_msg):
+        refusal = build_refusal_response()
+        db.add(ChatHistory(user_id=payload.user_id, role="user", message=user_msg))
+        db.add(ChatHistory(user_id=payload.user_id, role="assistant", message=refusal))
+        db.commit()
+        return {"reply": refusal, "model": "PigSkinTech Domain Guardrail"}
+
+    cfg = get_settings()
+    base_url = cfg.ai_base_url.rstrip("/")
+    endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+
+    system_prompt = f"{STRICT_DOMAIN_SYSTEM_PROMPT}\n\n{cfg.ai_system_prompt}"
+    if payload.context:
+        system_prompt += f"\n\nNgữ cảnh ca chẩn đoán hiện tại:\n{payload.context}"
+
+    messages = [{"role": "system", "content": system_prompt}]
+    for item in payload.history[-10:]:
+        if item.role in {"user", "assistant"} and item.content.strip():
+            messages.append({"role": item.role, "content": item.content.strip()})
+    messages.append({"role": "user", "content": user_msg})
+
+    headers = {"Content-Type": "application/json"}
+    if cfg.ai_api_key:
+        headers["Authorization"] = f"Bearer {cfg.ai_api_key}"
+
+    req_body = json.dumps(
+        {
+            "model": cfg.ai_model,
+            "messages": messages,
+            "temperature": 0.25,
+        }
+    ).encode("utf-8")
+
     try:
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill
-    except ImportError:
-        raise HTTPException(status_code=503, detail="Chưa cài openpyxl. Chạy pip install -r backend/requirements.txt.")
-    records = get_records(200, pen_id=pen_id, ear_tag=ear_tag, start_date=start_date, end_date=end_date)
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Lịch sử phân tích"
-    headers = ["Mã phân tích", "Tên ảnh", "Mã tai", "Dãy chuồng", "Kết quả", "Mã bệnh", "Độ tin cậy", "Mức cảnh báo", "Ghi chú", "Thời gian"]
-    sheet.append(headers)
-    for cell in sheet[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="315B49")
-    for item in records:
-        sheet.append([item["id"], item["filename"], item["ear_tag"], item["pen_id"], item["disease_name"], item["disease_code"], item["confidence"], item["urgency_label"], item["notes"], item["created_at"]])
-    for column in sheet.columns:
-        width = min(max(max(len(str(cell.value or "")) for cell in column) + 2, 12), 42)
-        sheet.column_dimensions[column[0].column_letter].width = width
-    output = io.BytesIO()
-    workbook.save(output)
-    output.seek(0)
-    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=pigskin-history.xlsx"})
+        req = UrlRequest(endpoint, data=req_body, headers=headers, method="POST")
+        with urlopen(req, timeout=45) as resp:
+            resp_data = json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        err_text = exc.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=502, detail=f"AI API trả lỗi ({exc.code}): {err_text[:240]}") from exc
+    except URLError as exc:
+        raise HTTPException(status_code=502, detail=f"Không kết nối được tới AI server ({endpoint}): {exc.reason}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lỗi gọi AI: {exc}") from exc
 
+    reply = ""
+    choices = resp_data.get("choices") or []
+    if choices:
+        reply = (choices[0].get("message") or {}).get("content") or ""
+    if not reply and isinstance(resp_data.get("message"), dict):
+        reply = resp_data["message"].get("content") or ""
+    if not reply:
+        reply = "Không nhận được phản hồi văn bản từ mô hình AI."
 
-def _pdf_font():
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-    candidates = [
-        Path("C:/Windows/Fonts/arial.ttf"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-        Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"),
-    ]
-    for path in candidates:
-        if path.exists():
-            pdfmetrics.registerFont(TTFont("PigSkinSans", str(path)))
-            return "PigSkinSans"
-    return "Helvetica"
+    reply = ensure_disclaimer(reply)
 
+    db.add(ChatHistory(user_id=payload.user_id, role="user", message=user_msg))
+    db.add(ChatHistory(user_id=payload.user_id, role="assistant", message=reply))
+    db.commit()
 
-@app.get("/export/pdf/{record_id}")
-def export_record_pdf(record_id: str):
-    try:
-        from reportlab.lib import colors
-        from reportlab.lib.enums import TA_LEFT
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-        from reportlab.lib.units import mm
-        from reportlab.platypus import Image as PDFImage, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-    except ImportError:
-        raise HTTPException(status_code=503, detail="Chưa cài reportlab. Chạy pip install -r backend/requirements.txt.")
-    record = get_record(record_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="Không tìm thấy hồ sơ cần xuất.")
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=18 * mm, leftMargin=18 * mm, topMargin=16 * mm, bottomMargin=16 * mm, title=f"Phiếu phân tích {record_id}")
-    font = _pdf_font()
-    styles = getSampleStyleSheet()
-    title = ParagraphStyle("PigSkinTitle", parent=styles["Title"], fontName=font, fontSize=20, textColor=colors.HexColor("#203b30"), alignment=TA_LEFT, spaceAfter=8)
-    body = ParagraphStyle("PigSkinBody", parent=styles["BodyText"], fontName=font, fontSize=10, leading=15)
-    story = [Paragraph("Phiếu phân tích ảnh da heo", title), Paragraph("Bản ghi nghiên cứu · Không thay thế chẩn đoán của bác sĩ thú y", body), Spacer(1, 7 * mm)]
-    rows = [
-        ["Mã hồ sơ", record["id"]], ["Thời gian", record["created_at"]],
-        ["Mã tai / chuồng", f"{record['ear_tag'] or '—'} / {record['pen_id'] or '—'}"],
-        ["Kết quả mô hình", record["disease_name"]], ["Độ tin cậy", f"{record['confidence'] * 100:.1f}%"],
-        ["Mức cảnh báo", record["urgency_label"]],
-    ]
-    table = Table([[Paragraph(str(a), body), Paragraph(str(b), body)] for a, b in rows], colWidths=[43 * mm, 125 * mm])
-    table.setStyle(TableStyle([("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#edf3ed")), ("GRID", (0, 0), (-1, -1), .4, colors.HexColor("#dce5dc")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7)]))
-    story.extend([table, Spacer(1, 6 * mm), Paragraph("Ghi chú", styles["Heading3"]), Paragraph(record["notes"] or "Không có ghi chú.", body), Spacer(1, 4 * mm), Paragraph("Hướng xử lý tham khảo", styles["Heading3"]), Paragraph(record["treatment_summary"] or "Theo dõi biểu hiện và liên hệ bác sĩ thú y để được đánh giá.", body)])
-    image_path = BASE_DIR / record.get("image_path", "")
-    if image_path.is_file():
-        story.extend([Spacer(1, 6 * mm), Paragraph("Ảnh đã lưu", styles["Heading3"]), PDFImage(str(image_path), width=70 * mm, height=58 * mm, kind="proportional")])
-    doc.build(story)
-    buffer.seek(0)
-    return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={record_id}.pdf"})
-
-
-@app.get("/models")
-def list_models():
-    WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
-    models = [{"filename": path.name, "format": path.suffix.lower(), "size_bytes": path.stat().st_size, "loadable": False} for path in sorted(WEIGHTS_DIR.iterdir()) if path.is_file() and path.suffix.lower() in {".pt", ".onnx"}]
-    return {"models": models, "active_model": None, "inference_ready": False, "message": "Chưa có bộ nạp mô hình trong backend."}
-
-
-@app.post("/models/switch")
-def switch_model(request: ModelSwitchRequest):
-    candidate = Path(request.filename).name
-    path = (WEIGHTS_DIR / candidate).resolve()
-    if path.parent != WEIGHTS_DIR.resolve() or path.suffix.lower() not in {".pt", ".onnx"} or not path.is_file():
-        raise HTTPException(status_code=404, detail="Không tìm thấy tệp mô hình hợp lệ trong ml_workspace/weights.")
-    raise HTTPException(status_code=409, detail="Tệp trọng số tồn tại nhưng chưa có bộ nạp suy luận để kích hoạt an toàn.")
+    return {"reply": reply, "model": cfg.ai_model}

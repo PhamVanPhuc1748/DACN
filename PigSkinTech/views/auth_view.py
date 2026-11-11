@@ -1,25 +1,36 @@
 """Authentication & Google OAuth Login View (/login) — Clean Pig Background & Minimalist SaaS Login Card."""
+import asyncio
 from pathlib import Path
 
 import flet as ft
 
 from services.auth_service import (
+    GOOGLE_REDIRECT_URI,
     ROLE_COLORS,
     ROLE_LABELS,
     authenticate_google,
     authenticate_local,
-    build_google_oauth_provider,
     close_dialog,
     ensure_flet_compat,
-    get_mock_google_accounts,
-    is_real_oauth_configured,
+    get_google_oauth_config,
     open_dialog,
     role_home_route,
+    run_google_oauth_desktop_flow,
+    save_google_oauth_config,
     save_session_user,
     show_snack,
     theme_tokens,
 )
 from theme import make_smooth_animation
+
+
+def _make_shake_animation(duration: int = 70):
+    curve = getattr(ft.AnimationCurve, "EASE_IN_OUT", None)
+    if hasattr(ft, "animation") and hasattr(ft.animation, "Animation"):
+        return ft.animation.Animation(duration, curve)
+    if hasattr(ft, "Animation"):
+        return ft.Animation(duration, curve)
+    return None
 
 
 def _resolve_login_bg_image() -> Path:
@@ -64,7 +75,25 @@ def build_auth_view(page: ft.Page) -> ft.Control:
 
     bg_img_path = _resolve_login_bg_image()
 
-    error_text = ft.Text("", size=12, color="#DC2626", visible=False)
+    error_text = ft.Text("", size=12.5, color="#DC2626", weight=ft.FontWeight.W_600, visible=False)
+    shake_wrapper = ft.Container(
+        offset=ft.Offset(0, 0),
+        animate_offset=_make_shake_animation(70),
+    )
+
+    async def _run_error_shake():
+        for dx in (-0.02, 0.02, -0.01, 0.0):
+            shake_wrapper.offset = ft.Offset(dx, 0)
+            page.update()
+            await asyncio.sleep(0.07)
+
+    def _trigger_shake():
+        if hasattr(page, "run_task"):
+            try:
+                page.run_task(_run_error_shake)
+                return
+            except Exception:
+                pass
 
     def complete_login(user_record: dict):
         session_user = save_session_user(page, user_record)
@@ -80,37 +109,46 @@ def build_auth_view(page: ft.Page) -> ft.Control:
             error_text.value = str(err)
             error_text.visible = True
             page.update()
+            _trigger_shake()
 
-    # (3) Email Input (No floating label, no prefix_icon)
+    # (3) Email Input (filled, #F8FAFC, prefix_icon MAIL_OUTLINE_ROUNDED)
     email_input = ft.TextField(
         value="nongdan.pigskin@gmail.com",
         hint_text="you@pigskintech.com",
-        height=48,
-        text_size=14,
-        border_radius=8,
-        bgcolor="#FFFFFF",
-        border_color="#E5E7EB",
+        prefix_icon=ft.Icons.MAIL_OUTLINE_ROUNDED,
+        filled=True,
+        bgcolor="#F8FAFC",
+        fill_color="#F8FAFC",
+        height=50,
+        text_size=15,
+        border_radius=12,
+        border_color="#CBD5E1",
         focused_border_color="#16A34A",
-        color="#111827",
-        hint_style=ft.TextStyle(color="#9CA3AF", size=14),
+        focused_border_width=2,
+        color="#0F172A",
+        hint_style=ft.TextStyle(color="#94A3B8", size=14),
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
         on_submit=handle_local_login,
     )
 
-    # (4) Password Input (No floating label, no prefix_icon)
+    # (4) Password Input (filled, #F8FAFC, prefix_icon LOCK_OUTLINE_ROUNDED)
     password_input = ft.TextField(
         value="123456",
         hint_text="••••••••",
+        prefix_icon=ft.Icons.LOCK_OUTLINE_ROUNDED,
         password=True,
         can_reveal_password=True,
-        height=48,
-        text_size=14,
-        border_radius=8,
-        bgcolor="#FFFFFF",
-        border_color="#E5E7EB",
+        filled=True,
+        bgcolor="#F8FAFC",
+        fill_color="#F8FAFC",
+        height=50,
+        text_size=15,
+        border_radius=12,
+        border_color="#CBD5E1",
         focused_border_color="#16A34A",
-        color="#111827",
-        hint_style=ft.TextStyle(color="#9CA3AF", size=14),
+        focused_border_width=2,
+        color="#0F172A",
+        hint_style=ft.TextStyle(color="#94A3B8", size=14),
         content_padding=ft.padding.symmetric(horizontal=16, vertical=14),
         on_submit=handle_local_login,
     )
@@ -137,134 +175,127 @@ def build_auth_view(page: ft.Page) -> ft.Control:
 
     page.on_login = on_oauth_login
 
-    def open_mock_google_chooser():
-        accounts = get_mock_google_accounts()
-        custom_email_field = ft.TextField(
-            label="Nhập email Google khác (Tự động tạo tài khoản Role: User)",
-            hint_text="vidu.trangtrai@gmail.com",
-            prefix_icon=ft.Icons.ALTERNATE_EMAIL_ROUNDED,
+    google_btn_label = ft.Text(
+        "Tiếp tục với Google",
+        size=14.5,
+        weight=ft.FontWeight.W_600,
+        color="#1E293B",
+    )
+
+    def open_google_oauth_config_dialog():
+        cfg = get_google_oauth_config()
+        cid_input = ft.TextField(
+            label="GOOGLE_CLIENT_ID",
+            value=cfg.get("client_id", ""),
+            hint_text="xxxx-yyyy.apps.googleusercontent.com",
+            prefix_icon=ft.Icons.KEY_ROUNDED,
             dense=True,
         )
-        dialog_error = ft.Text("", size=12, color="#DC2626", visible=False)
-        chooser_dialog = ft.AlertDialog(modal=True)
+        csec_input = ft.TextField(
+            label="GOOGLE_CLIENT_SECRET",
+            value=cfg.get("client_secret", ""),
+            hint_text="GOCSPX-...",
+            password=True,
+            can_reveal_password=True,
+            prefix_icon=ft.Icons.LOCK_PERSON_ROUNDED,
+            dense=True,
+        )
+        dlg_err = ft.Text("", size=12, color="#DC2626", visible=False)
+        cfg_dialog = ft.AlertDialog(modal=True)
 
-        def pick_account(email: str, full_name: str = "", avatar_url: str = ""):
-            try:
-                user_record = authenticate_google(email, full_name=full_name, avatar_url=avatar_url)
-                close_dialog(page, chooser_dialog)
-                complete_login(user_record)
-            except ValueError as err:
-                dialog_error.value = str(err)
-                dialog_error.visible = True
+        def save_and_start_oauth(e=None):
+            cid = (cid_input.value or "").strip()
+            csec = (csec_input.value or "").strip()
+            if not cid or not csec:
+                dlg_err.value = "Vui lòng nhập đầy đủ GOOGLE_CLIENT_ID và GOOGLE_CLIENT_SECRET."
+                dlg_err.visible = True
                 page.update()
+                return
+            save_google_oauth_config(cid, csec)
+            close_dialog(page, cfg_dialog)
+            show_snack(page, "Đã lưu cấu hình Google OAuth 2.0 vào .env! Đang mở trình duyệt...", "#059669")
+            handle_google_button(None)
 
-        account_tiles = []
-        for acc in accounts:
-            role_code = acc.get("role", "user")
-            badge_color = ROLE_COLORS.get(role_code, "#059669")
-            account_tiles.append(
-                ft.Container(
-                    padding=12,
-                    border=ft.border.all(1, t["BORDER"]),
-                    border_radius=12,
-                    bgcolor=t["SUB_SURFACE"],
-                    ink=True,
-                    on_click=lambda e, em=acc["email"], fn=acc["full_name"], av=acc.get("avatar_url", ""): pick_account(em, fn, av),
-                    content=ft.Row(
-                        [
-                            ft.CircleAvatar(
-                                bgcolor=badge_color,
-                                radius=18,
-                                content=ft.Text(
-                                    (acc["full_name"] or "G")[0].upper(),
-                                    color="#FFFFFF",
-                                    weight=ft.FontWeight.BOLD,
-                                ),
-                            ),
-                            ft.Column(
-                                [
-                                    ft.Text(acc["full_name"], size=13, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
-                                    ft.Text(acc["email"], size=12, color=t["MUTED"]),
-                                ],
-                                spacing=2,
-                                expand=True,
-                            ),
-                            ft.Container(
-                                bgcolor=badge_color,
-                                padding=ft.padding.symmetric(horizontal=10, vertical=4),
-                                border_radius=12,
-                                content=ft.Text(
-                                    ROLE_LABELS.get(role_code, role_code),
-                                    size=10,
-                                    color="#FFFFFF",
-                                    weight=ft.FontWeight.BOLD,
-                                ),
-                            ),
-                        ],
-                        spacing=10,
-                    ),
-                )
-            )
-
-        chooser_dialog.title = ft.Row(
+        cfg_dialog.title = ft.Row(
             [
                 _google_logo_badge(),
                 ft.Column(
                     [
-                        ft.Text("Chọn tài khoản để tiếp tục tới PigSkinTech", size=15, weight=ft.FontWeight.BOLD),
-                        ft.Text("Google OAuth 2.0 (Chế độ Mock Fallback khi chưa đặt GOOGLE_CLIENT_ID)", size=11, color=t["MUTED"]),
+                        ft.Text("Cấu hình Google OAuth 2.0 Thật", size=15, weight=ft.FontWeight.BOLD),
+                        ft.Text(f"Callback Server: {GOOGLE_REDIRECT_URI}", size=11, color=t["MUTED"]),
                     ],
                     spacing=1,
                 ),
             ],
             spacing=10,
         )
-        chooser_dialog.content = ft.Container(
-            width=490,
+        cfg_dialog.content = ft.Container(
+            width=480,
             content=ft.Column(
                 [
-                    ft.Text("Tài khoản Google mẫu theo 3 vai trò (RBAC):", size=12, weight=ft.FontWeight.W_600, color=t["TEXT"]),
-                    *account_tiles,
-                    ft.Divider(height=12, color=t["BORDER"]),
-                    ft.Text("Hoặc đăng nhập bằng tài khoản Google tùy chỉnh:", size=12, weight=ft.FontWeight.W_600, color=t["TEXT"]),
-                    custom_email_field,
-                    dialog_error,
+                    ft.Text(
+                        f"Nhập Client ID & Client Secret từ Google Cloud Console (Authorized redirect URI: {GOOGLE_REDIRECT_URI}):",
+                        size=12,
+                        color=t["TEXT"],
+                    ),
+                    cid_input,
+                    csec_input,
+                    dlg_err,
                 ],
                 spacing=10,
                 tight=True,
             ),
         )
-        chooser_dialog.actions = [
-            ft.TextButton("Hủy", on_click=lambda e: close_dialog(page, chooser_dialog)),
+        cfg_dialog.actions = [
+            ft.TextButton("Hủy", on_click=lambda e: close_dialog(page, cfg_dialog)),
             ft.FilledButton(
-                "Tiếp tục với Email tùy chỉnh",
-                icon=ft.Icons.LOGIN_ROUNDED,
-                on_click=lambda e: pick_account(custom_email_field.value),
+                "Lưu .env & Xác thực Google",
+                icon=ft.Icons.OPEN_IN_BROWSER_ROUNDED,
+                on_click=save_and_start_oauth,
             ),
         ]
-        open_dialog(page, chooser_dialog)
+        open_dialog(page, cfg_dialog)
+
+    oauth_busy = {"running": False}
+
+    async def _run_google_oauth_task():
+        if oauth_busy["running"]:
+            return
+        oauth_busy["running"] = True
+        error_text.visible = False
+        google_btn_label.value = "Đang chờ xác thực tại 127.0.0.1:8765/callback..."
+        page.update()
+
+        res = await asyncio.to_thread(run_google_oauth_desktop_flow, 120)
+
+        oauth_busy["running"] = False
+        google_btn_label.value = "Tiếp tục với Google"
+        page.update()
+
+        if res.get("needs_credentials"):
+            open_google_oauth_config_dialog()
+            return
+
+        if not res.get("ok"):
+            error_text.value = res.get("error") or "Đăng nhập Google OAuth 2.0 thất bại."
+            error_text.visible = True
+            page.update()
+            _trigger_shake()
+            return
+
+        user_record = res["user"]
+        show_snack(page, f"Đã xác thực Google OAuth 2.0: {user_record['full_name']} ({user_record['email']})", "#059669")
+        complete_login(user_record)
 
     def handle_google_button(e):
-        provider = build_google_oauth_provider()
-        if is_real_oauth_configured():
-            try:
-                page.login(provider)
-                return
-            except Exception:
-                pass
-        open_mock_google_chooser()
+        if hasattr(page, "run_task"):
+            page.run_task(_run_google_oauth_task)
 
-    instant_login_state = {"enabled": True}
-
-    def fill_demo_account(email_val: str, role_label: str):
+    def quick_login_role(email_val: str):
         email_input.value = email_val
         password_input.value = "123456"
         error_text.visible = False
-        if instant_login_state["enabled"]:
-            handle_local_login()
-            return
-        show_snack(page, f"Đã điền tài khoản {role_label}: {email_val} (Mật khẩu: 123456)", "#16A34A")
-        page.update()
+        handle_local_login()
 
     def handle_forgot_password(e):
         password_input.value = "123456"
@@ -272,47 +303,34 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         show_snack(page, "Đã khôi phục mật khẩu mặc định của tài khoản demo: 123456", "#16A34A")
         page.update()
 
-    def _underlined_role_link(label: str, email_val: str) -> ft.Control:
-        return ft.Container(
-            ink=True,
-            on_click=lambda e: fill_demo_account(email_val, label),
-            content=ft.Text(
-                label,
-                size=12,
-                weight=ft.FontWeight.W_600,
-                color="#16A34A",
-                style=ft.TextStyle(decoration=ft.TextDecoration.UNDERLINE),
-            ),
+    def _quick_role_pill(label: str, email_val: str, accent_fg: str, soft_bg: str, border_col: str) -> ft.Control:
+        def on_pill_hover(e):
+            hovered = str(getattr(e, "data", "")).lower() == "true"
+            e.control.bgcolor = accent_fg if hovered else soft_bg
+            lbl_ctrl.color = "#FFFFFF" if hovered else accent_fg
+            e.control.update()
+
+        lbl_ctrl = ft.Text(
+            label,
+            size=12.5,
+            weight=ft.FontWeight.W_700,
+            color=accent_fg,
+            text_align=ft.TextAlign.CENTER,
+            no_wrap=True,
         )
-
-    instant_toggle_label = ft.Text(
-        "⚡ 1-Click Đăng nhập thẳng: BẬT",
-        size=11,
-        weight=ft.FontWeight.BOLD,
-        color="#15803D",
-    )
-
-    instant_toggle_btn = ft.Container(
-        padding=ft.padding.symmetric(horizontal=10, vertical=4),
-        border_radius=14,
-        bgcolor="#DCFCE7",
-        border=ft.border.all(1, "#86EFAC"),
-        animate=make_smooth_animation(180),
-        ink=True,
-        tooltip="Bật để nhấn vào vai trò mẫu là đăng nhập thẳng; tắt để chỉ điền sẵn Email/Mật khẩu",
-        content=instant_toggle_label,
-    )
-
-    def toggle_instant_login(e):
-        instant_login_state["enabled"] = not instant_login_state["enabled"]
-        on = instant_login_state["enabled"]
-        instant_toggle_label.value = "⚡ 1-Click Đăng nhập thẳng: BẬT" if on else "⚡ 1-Click Đăng nhập thẳng: TẮT"
-        instant_toggle_label.color = "#15803D" if on else "#6B7280"
-        instant_toggle_btn.bgcolor = "#DCFCE7" if on else "#F3F4F6"
-        instant_toggle_btn.border = ft.border.all(1, "#86EFAC" if on else "#E5E7EB")
-        page.update()
-
-    instant_toggle_btn.on_click = toggle_instant_login
+        return ft.Container(
+            expand=1,
+            height=38,
+            bgcolor=soft_bg,
+            border=ft.border.all(1, border_col),
+            border_radius=20,
+            alignment=ft.alignment.center,
+            animate=make_smooth_animation(160),
+            ink=True,
+            on_click=lambda e: quick_login_role(email_val),
+            on_hover=on_pill_hover,
+            content=lbl_ctrl,
+        )
 
     # 100% Clean Full-Window Pig Background
     full_bg_image = (
@@ -331,34 +349,66 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         )
     )
 
+    # (0) Brand Header Pill above Eyebrow Text
+    brand_header_pill = ft.Row(
+        [
+            ft.Container(
+                width=36,
+                height=36,
+                border_radius=10,
+                gradient=ft.LinearGradient(
+                    colors=["#10B981", "#059669"],
+                    begin=ft.alignment.top_left,
+                    end=ft.alignment.bottom_right,
+                ),
+                alignment=ft.alignment.center,
+                shadow=ft.BoxShadow(
+                    blur_radius=10,
+                    color=ft.Colors.with_opacity(0.25, "#10B981"),
+                    offset=ft.Offset(0, 3),
+                ),
+                content=ft.Icon(ft.Icons.PETS_ROUNDED, size=20, color="#FFFFFF"),
+            ),
+            ft.Text(
+                "PigSkinTech AI Studio",
+                size=15,
+                weight=ft.FontWeight.W_800,
+                color="#0F172A",
+            ),
+        ],
+        spacing=10,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
     # (1) Eyebrow Text
     eyebrow_text = ft.Text(
         "+ CHÀO MỪNG TRỞ LẠI",
         size=11,
-        weight=ft.FontWeight.W_600,
+        weight=ft.FontWeight.W_700,
         color="#16A34A",
         style=ft.TextStyle(letter_spacing=1.2),
     )
 
-    # (2) Two-tone Headline + Subtitle (4px below)
+    # (2) Two-tone Headline on 1 single line ("Đăng nhập ngay.") + Subtitle
     headline_block = ft.Column(
         [
             ft.Text(
+                no_wrap=True,
                 spans=[
                     ft.TextSpan(
                         "Đăng nhập ",
-                        ft.TextStyle(size=34, weight=ft.FontWeight.W_800, color="#111827"),
+                        ft.TextStyle(size=32, weight=ft.FontWeight.W_800, color="#0F172A"),
                     ),
                     ft.TextSpan(
-                        "vào hệ thống.",
-                        ft.TextStyle(size=34, weight=ft.FontWeight.W_800, color="#16A34A"),
+                        "ngay.",
+                        ft.TextStyle(size=32, weight=ft.FontWeight.W_800, color="#16A34A"),
                     ),
                 ],
             ),
             ft.Text(
                 "Tiếp tục công việc chẩn đoán và quản lý trang trại của bạn.",
                 size=14,
-                color="#4B5563",
+                color="#475569",
             ),
         ],
         spacing=4,
@@ -368,17 +418,32 @@ def build_auth_view(page: ft.Page) -> ft.Control:
     # (3) Email Field with Label on top
     email_block = ft.Column(
         [
-            ft.Text("Email", size=13, weight=ft.FontWeight.W_600, color="#1F2937"),
+            ft.Text("Email", size=13.5, weight=ft.FontWeight.W_600, color="#1E293B"),
             email_input,
         ],
         spacing=6,
         tight=True,
     )
 
-    # (4) Password Field with Label on top
+    # (4) Password Field with Label + Forgot Password on top
     password_block = ft.Column(
         [
-            ft.Text("Mật khẩu", size=13, weight=ft.FontWeight.W_600, color="#1F2937"),
+            ft.Row(
+                [
+                    ft.Text("Mật khẩu", size=13.5, weight=ft.FontWeight.W_600, color="#1E293B", expand=True),
+                    ft.Container(
+                        ink=True,
+                        on_click=handle_forgot_password,
+                        content=ft.Text(
+                            "Quên mật khẩu?",
+                            size=12.5,
+                            weight=ft.FontWeight.W_600,
+                            color="#16A34A",
+                        ),
+                    ),
+                ],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
             password_input,
         ],
         spacing=6,
@@ -387,59 +452,65 @@ def build_auth_view(page: ft.Page) -> ft.Control:
 
     def on_primary_login_hover(e):
         hovered = str(getattr(e, "data", "")).lower() == "true"
-        e.control.bgcolor = "#15803D" if hovered else "#16A34A"
+        e.control.scale = 1.02 if hovered else 1.0
         e.control.shadow = ft.BoxShadow(
-            blur_radius=20 if hovered else 14,
-            color=ft.Colors.with_opacity(0.32 if hovered else 0.24, "#15803D" if hovered else "#16A34A"),
+            blur_radius=22 if hovered else 14,
+            color=ft.Colors.with_opacity(0.35 if hovered else 0.24, "#059669"),
             offset=ft.Offset(0, 6 if hovered else 4),
         )
         e.control.update()
 
-    # (5) Full Pill-Shaped Primary Login Button ("Đăng nhập  →") placed 20px below Password
+    # (5) Full Pill-Shaped Primary Login Button ("Đăng nhập  →") with LinearGradient & scale hover
     primary_login_btn = ft.Container(
         width=float("inf"),
-        height=50,
+        height=52,
         border_radius=30,
-        bgcolor="#16A34A",
-        alignment=ft.alignment.center,
+        gradient=ft.LinearGradient(
+            colors=["#16A34A", "#059669"],
+            begin=ft.alignment.center_left,
+            end=ft.alignment.center_right,
+        ),
+        scale=1.0,
+        animate_scale=make_smooth_animation(160),
         animate=make_smooth_animation(180),
+        alignment=ft.alignment.center,
         ink=True,
         on_click=handle_local_login,
         on_hover=on_primary_login_hover,
         shadow=ft.BoxShadow(
             blur_radius=14,
-            color=ft.Colors.with_opacity(0.24, "#16A34A"),
+            color=ft.Colors.with_opacity(0.24, "#059669"),
             offset=ft.Offset(0, 4),
         ),
         content=ft.Text(
             "Đăng nhập  →",
-            size=15,
-            weight=ft.FontWeight.W_600,
+            size=16,
+            weight=ft.FontWeight.BOLD,
             color="#FFFFFF",
         ),
     )
 
-    # (6) Centered "Hoặc" divider with 14px top/bottom spacing
+    # (6) Centered "Hoặc" divider
     or_divider = ft.Container(
         width=float("inf"),
-        padding=ft.padding.symmetric(vertical=14),
+        padding=ft.padding.symmetric(vertical=12),
         alignment=ft.alignment.center,
-        content=ft.Text("Hoặc", size=13, color="#6B7280"),
+        content=ft.Text("Hoặc", size=13, color="#64748B", weight=ft.FontWeight.W_500),
     )
 
     def on_google_btn_hover(e):
         hovered = str(getattr(e, "data", "")).lower() == "true"
         e.control.bgcolor = "#F8FAFC" if hovered else "#FFFFFF"
-        e.control.border = ft.border.all(1, "#CBD5E1" if hovered else "#E5E7EB")
+        e.control.border = ft.border.all(1.5 if hovered else 1, "#94A3B8" if hovered else "#CBD5E1")
         e.control.update()
 
-    # (7) Outlined White Google Button below "Hoặc"
+    # (7) Outlined White Google Button (border_radius=30, height=48)
     google_outlined_btn = ft.Container(
         width=float("inf"),
-        height=46,
+        height=48,
         bgcolor="#FFFFFF",
-        border=ft.border.all(1, "#E5E7EB"),
-        border_radius=8,
+        border=ft.border.all(1, "#CBD5E1"),
+        border_radius=30,
         alignment=ft.alignment.center,
         animate=make_smooth_animation(180),
         ink=True,
@@ -448,57 +519,41 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         content=ft.Row(
             [
                 _google_logo_badge(),
-                ft.Text(
-                    "Tiếp tục với Google",
-                    size=14,
-                    weight=ft.FontWeight.W_600,
-                    color="#1F2937",
-                ),
+                google_btn_label,
             ],
             alignment=ft.MainAxisAlignment.CENTER,
             spacing=10,
         ),
     )
 
-    # (8) Compact Footer Links at bottom of Card
-    footer_links = ft.Column(
-        [
-            ft.Row(
-                [
-                    ft.Text("Quên mật khẩu? ", size=13, color="#4B5563"),
-                    ft.Container(
-                        ink=True,
-                        on_click=handle_forgot_password,
-                        content=ft.Text(
-                            "Khôi phục tại đây",
-                            size=13,
-                            weight=ft.FontWeight.W_600,
-                            color="#16A34A",
-                            style=ft.TextStyle(decoration=ft.TextDecoration.UNDERLINE),
-                        ),
-                    ),
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                spacing=0,
-            ),
-            ft.Row(
-                [
-                    ft.Text("Điền nhanh tài khoản mẫu: ", size=12, color="#6B7280"),
-                    _underlined_role_link("Người chăn nuôi", "nongdan.pigskin@gmail.com"),
-                    ft.Text("  •  ", size=12, color="#9CA3AF"),
-                    _underlined_role_link("Chuyên gia", "bs.thuy.pigskin@gmail.com"),
-                    ft.Text("  •  ", size=12, color="#9CA3AF"),
-                    _underlined_role_link("Quản trị viên", "admin.pigskin@gmail.com"),
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                spacing=0,
-                wrap=True,
-            ),
-            instant_toggle_btn,
-        ],
-        spacing=8,
-        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        tight=True,
+    # (8) 1-Click Quick Role Selector Box at bottom of Card
+    quick_roles_box = ft.Container(
+        width=float("inf"),
+        padding=ft.padding.symmetric(horizontal=14, vertical=12),
+        bgcolor="#F8FAFC",
+        border_radius=16,
+        border=ft.border.all(1, "#E2E8F0"),
+        content=ft.Column(
+            [
+                ft.Text(
+                    "⚡ Đăng nhập nhanh 1-Click theo vai trò:",
+                    size=12.5,
+                    weight=ft.FontWeight.W_700,
+                    color="#475569",
+                ),
+                ft.Row(
+                    [
+                        _quick_role_pill("🌾 Nông dân", "nongdan.pigskin@gmail.com", "#059669", "#ECFDF5", "#A7F3D0"),
+                        _quick_role_pill("🩺 Chuyên gia", "bs.thuy.pigskin@gmail.com", "#0284C7", "#EFF6FF", "#BAE6FD"),
+                        _quick_role_pill("🛡️ Quản trị", "admin.pigskin@gmail.com", "#7C3AED", "#F3E8FF", "#DDD6FE"),
+                    ],
+                    spacing=8,
+                ),
+            ],
+            spacing=8,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            tight=True,
+        ),
     )
 
     # Minimalist SaaS Login Card (width=520, pure white #FFFFFF, border_radius=24)
@@ -506,7 +561,7 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         width=520,
         bgcolor="#FFFFFF",
         border_radius=24,
-        padding=ft.padding.symmetric(horizontal=48, vertical=44),
+        padding=ft.padding.symmetric(horizontal=46, vertical=38),
         shadow=ft.BoxShadow(
             blur_radius=36,
             color=ft.Colors.with_opacity(0.22, ft.Colors.BLACK),
@@ -514,33 +569,36 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         ),
         content=ft.Column(
             [
+                brand_header_pill,
+                ft.Container(height=12),
                 eyebrow_text,
-                ft.Container(height=6),
+                ft.Container(height=4),
                 headline_block,
-                ft.Container(height=22),
+                ft.Container(height=18),
                 email_block,
-                ft.Container(height=14),
+                ft.Container(height=12),
                 password_block,
                 error_text,
-                ft.Container(height=20),
+                ft.Container(height=18),
                 primary_login_btn,
                 or_divider,
                 google_outlined_btn,
-                ft.Container(height=22),
-                footer_links,
+                ft.Container(height=18),
+                quick_roles_box,
             ],
             spacing=0,
             tight=True,
         ),
     )
+    shake_wrapper.content = login_card
 
     right_aligned_wrapper = ft.Container(
         expand=True,
         width=float("inf"),
         height=float("inf"),
-        padding=ft.padding.only(right=72, left=40, top=28, bottom=28),
+        padding=ft.padding.only(right=72, left=40, top=24, bottom=24),
         alignment=ft.alignment.center_right,
-        content=login_card,
+        content=shake_wrapper,
     )
 
     return ft.Stack(

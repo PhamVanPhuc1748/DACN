@@ -3,32 +3,32 @@ import csv
 import hashlib
 import json
 import os
-import sys
 from pathlib import Path
+
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 CODE_ROOT = APP_ROOT.parent.parent
 CLASSES_JSON_PATH = APP_ROOT / "models" / "classes.json"
 ACTIVE_MODEL_STATE_PATH = APP_ROOT / "models" / "active_model.json"
 
-CLASS_NAMES_VI = {
-    "Healthy": "Khỏe mạnh",
-    "Infected_Bacterial_Erysipelas": "Đóng dấu heo",
-    "Infected_Bacterial_Exudative_Epidermitis": "Viêm da tiết dịch",
-    "Infected_Fungal_Ringworm": "Nấm da",
-    "Infected_Parasitic_Scabies": "Ghẻ ngứa",
-    "Infected_Viral_African_Swine_Fever": "Dịch tả lợn châu Phi",
-    "Infected_Viral_Classical_Swine_Fever": "Dịch tả lợn cổ điển",
-    "Infected_Viral_Foot_and_Mouth_Disease": "Lở mồm long móng",
-    "Infected_Viral_Porcine_Dermatitis_and_Nephropathy_Syndrome": "Hội chứng PDNS",
-    "Infected_Viral_Swinepox": "Đậu heo",
-}
-
 APP_MODEL_NAMES = {
     "mobilenet_v2": "MobileNetV2",
     "efficientnet_b0": "EfficientNet-B0",
+    "mobilenet_v3_large": "MobileNetV3-Large",
 }
-APP_MODEL_MANIFEST_SHA256 = "dba25e5585884d3bcb7039e1e6bd921ab73e123cf53334792e973742efe9ea99"
+
+CLASS_NAMES_VI = {
+    "Healthy": "Khỏe mạnh",
+    "Infected_Bacterial_Erysipelas": "Bệnh đóng dấu lợn",
+    "Infected_Bacterial_Greasy_Pig_Disease": "Viêm da tiết dịch",
+    "Infected_Environmental_Dermatitis": "Viêm da do môi trường",
+    "Infected_Environmental_Sunburn": "Cháy nắng",
+    "Infected_Fungal_Pityriasis_Rosea": "Vảy phấn hồng",
+    "Infected_Fungal_Ringworm": "Nấm da (hắc lào)",
+    "Infected_Parasitic_Mange": "Ghẻ",
+    "Infected_Viral_Foot_and_Mouth_Disease": "Lở mồm long móng",
+    "Infected_Viral_Swinepox": "Đậu heo",
+}
 
 
 def load_classes_config() -> dict:
@@ -56,6 +56,12 @@ def load_classes_config() -> dict:
 def save_classes_config(data: dict) -> None:
     CLASSES_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
     CLASSES_JSON_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        from services.store import sync_disease_catalog_to_sql
+
+        sync_disease_catalog_to_sql(data)
+    except Exception:
+        pass
 
 
 def get_class_info(name: str) -> dict:
@@ -128,43 +134,46 @@ def display_class(name):
 
 
 def training_roots():
-    """Discover candidate roots for training runs and manifests."""
-    paths = []
-    override = os.environ.get("PIGSKIN_RESEARCH_ROOT")
-    if override:
-        paths.append(Path(override))
-    paths.extend([
-        APP_ROOT / "models",
+    configured = os.environ.get("PIGSKIN_RESEARCH_ROOT", "").strip()
+    candidates = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.extend([
         CODE_ROOT / "PigSkinResearchStudio",
-        CODE_ROOT / "PigSkinTech" / "ml_workspace",
         APP_ROOT.parent / "ml_workspace",
     ])
-    seen = set()
-    ordered = []
-    for path in paths:
+    roots = []
+    for candidate in candidates:
         try:
-            resolved = path.resolve()
+            resolved = candidate.resolve()
         except OSError:
             continue
-        if resolved not in seen and resolved.exists():
-            seen.add(resolved)
-            ordered.append(resolved)
-    return ordered
+        if resolved.is_dir() and resolved not in roots:
+            roots.append(resolved)
+    return roots
 
 
 def _run_candidates():
     candidates = []
+    runs_directories = []
     for root in training_roots():
-        subfolders = [root / "runs", root / "ml_workspace" / "runs"] if root.is_dir() else []
-        for parent in [root, *subfolders]:
-            if not parent.is_dir():
+        runs_dir = root / "ml_workspace" / "runs"
+        if not runs_dir.is_dir() and root.name == "ml_workspace":
+            runs_dir = root / "runs"
+        if runs_dir.is_dir() and runs_dir not in runs_directories:
+            runs_directories.append(runs_dir)
+
+    bundled_runs = APP_ROOT / "models" / "runs"
+    if bundled_runs.is_dir() and bundled_runs not in runs_directories:
+        runs_directories.append(bundled_runs)
+
+    for runs_dir in runs_directories:
+        for folder in runs_dir.iterdir():
+            if not folder.is_dir():
                 continue
-            for folder in parent.iterdir():
-                if not folder.is_dir():
-                    continue
-                required = [folder / "best_model.pt", folder / "config.json", folder / "final_metrics.json"]
-                if all(path.is_file() for path in required):
-                    candidates.append(folder)
+            required = [folder / "best_model.pt", folder / "config.json", folder / "final_metrics.json"]
+            if all(path.is_file() for path in required):
+                candidates.append(folder)
     return sorted(candidates, key=lambda item: item.name, reverse=True)
 
 
@@ -180,23 +189,67 @@ def list_model_runs() -> list[dict]:
             metrics = json.loads((folder / "final_metrics.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             cfg, metrics = {}, {}
+        model_code = cfg.get("model", "mobilenet_v2")
+        display_arch = APP_MODEL_NAMES.get(model_code, model_code)
         items.append({
             "name": folder.name,
+            "run_name": folder.name,
             "directory": str(folder),
             "checkpoint": str(ckpt),
-            "model": cfg.get("model", "mobilenet_v2"),
+            "model": model_code,
+            "model_label": display_arch,
+            "display_name": f"{display_arch} ({folder.name})",
             "classes_count": len(cfg.get("classes", [])),
             "val_f1": metrics.get("best_val_macro_f1"),
             "test_acc": metrics.get("test_metrics", {}).get("accuracy"),
+            "test_macro_f1": metrics.get("test_metrics", {}).get("macro_f1"),
+            "best_epoch": metrics.get("best_epoch"),
             "is_active": str(ckpt.resolve()) == active_ckpt,
         })
     return items
+
+
+def available_model_runs() -> list[dict]:
+    """Return available runs sorted with MobileNetV2 and EfficientNet-B0 first (merged from DACN-devP)."""
+    runs = []
+    seen_models = set()
+    for folder in _run_candidates():
+        try:
+            config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+            metrics = json.loads((folder / "final_metrics.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        model_name = str(config.get("model", "")).strip()
+        if model_name not in APP_MODEL_NAMES or model_name in seen_models:
+            continue
+        seen_models.add(model_name)
+        runs.append({
+            "run_name": folder.name,
+            "name": folder.name,
+            "model": model_name,
+            "model_label": APP_MODEL_NAMES[model_name],
+            "directory": folder,
+            "checkpoint": folder / "best_model.pt",
+            "config_path": folder / "config.json",
+            "metrics_path": folder / "final_metrics.json",
+            "history_path": folder / "history.csv",
+            "config": config,
+            "metrics": metrics,
+        })
+    order = {"mobilenet_v2": 0, "efficientnet_b0": 1, "mobilenet_v3_large": 2}
+    return sorted(runs, key=lambda item: (order.get(item["model"], 99), item["run_name"]))
 
 
 def set_active_checkpoint(checkpoint_path: str) -> dict:
     p = Path(checkpoint_path)
     if p.is_dir():
         p = p / "best_model.pt"
+    if not p.is_file():
+        # Try matching by run_name or model code in _run_candidates
+        for cand in _run_candidates():
+            if cand.name.lower() == str(checkpoint_path).strip().lower():
+                p = cand / "best_model.pt"
+                break
     if not p.is_file():
         raise FileNotFoundError(f"Không tìm thấy trọng số mô hình tại: {p}")
     ACTIVE_MODEL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -208,43 +261,80 @@ def set_active_checkpoint(checkpoint_path: str) -> dict:
 
 
 def _read_manifest(path):
-    if not path or not path.is_file():
-        return None
-    counts = {"train": 0, "val": 0, "test": 0, "other": 0}
-    per_class = {}
-    hasher = hashlib.sha256()
-    with path.open("rb") as raw:
-        while chunk := raw.read(65536):
-            hasher.update(chunk)
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
+    split_counts = {"train": 0, "val": 0, "test": 0}
+    class_counts = {split: {} for split in split_counts}
+    total = 0
+    with path.open("r", encoding="utf-8-sig", newline="") as stream:
+        for row in csv.DictReader(stream):
             split = (row.get("split") or "").strip().lower()
-            if split in counts:
-                counts[split] += 1
-            else:
-                counts["other"] += 1
-            label = row.get("label") or "unknown"
-            per_class[label] = per_class.get(label, 0) + 1
-    total = sum(counts.values())
+            if split not in split_counts:
+                continue
+            raw_labels = (row.get("labels") or "").strip()
+            try:
+                labels = json.loads(raw_labels) if raw_labels.startswith("[") else [raw_labels]
+            except json.JSONDecodeError:
+                labels = [raw_labels]
+            labels = [str(name).strip() for name in labels if str(name).strip()]
+            if not labels:
+                continue
+            total += 1
+            split_counts[split] += 1
+            for name in labels:
+                class_counts[split][name] = class_counts[split].get(name, 0) + 1
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
     return {
         "path": path,
-        "sha256": hasher.hexdigest(),
         "total": total,
-        "counts": counts,
-        "per_class": per_class,
+        "split_counts": split_counts,
+        "class_counts": class_counts,
+        "sha256": digest,
     }
 
 
-def active_run(run_name=None):
-    """Return a complete local run, optionally selecting its exact run folder or active checkpoint."""
+def _enrich_metrics(metrics: dict) -> dict:
+    """Ensure metrics dict exposes both raw test_metrics.per_class and normalized per_class_f1 / accuracy from real evaluation."""
+    if not isinstance(metrics, dict):
+        return {}
+    out = dict(metrics)
+    test_m = out.get("test_metrics") or {}
+    per_cls = test_m.get("per_class") or {}
+    if per_cls and "per_class_f1" not in out:
+        out["per_class_f1"] = {
+            cls_code: float(vals.get("f1", 0.0)) if isinstance(vals, dict) else float(vals)
+            for cls_code, vals in per_cls.items()
+        }
+    if "accuracy" not in out and "accuracy" in test_m:
+        out["accuracy"] = float(test_m["accuracy"])
+    if "macro_f1" not in out:
+        out["macro_f1"] = float(test_m.get("macro_f1") or out.get("best_val_macro_f1") or 0.0)
+    return out
+
+
+def active_run(run_name: str | None = None):
+    """Return the selected or newest complete local run and counts read from its manifest."""
     candidates = _run_candidates()
     if not candidates:
         return None
     folder = None
     if run_name:
-        folder = next((item for item in candidates if item.name == run_name), None)
-    elif ACTIVE_MODEL_STATE_PATH.is_file():
+        target = str(run_name).strip().lower()
+        for item in candidates:
+            if item.name.lower() == target:
+                folder = item
+                break
+        if folder is None:
+            for item in candidates:
+                try:
+                    cfg = json.loads((item / "config.json").read_text(encoding="utf-8"))
+                    m_code = str(cfg.get("model", "")).lower()
+                    m_lbl = APP_MODEL_NAMES.get(m_code, m_code).lower()
+                    if target in (m_code, m_lbl):
+                        folder = item
+                        break
+                except Exception:
+                    pass
+
+    if folder is None and ACTIVE_MODEL_STATE_PATH.is_file():
         try:
             saved = json.loads(ACTIVE_MODEL_STATE_PATH.read_text(encoding="utf-8"))
             ckpt_path = Path(saved.get("checkpoint", ""))
@@ -252,76 +342,55 @@ def active_run(run_name=None):
                 folder = ckpt_path.parent
         except (OSError, json.JSONDecodeError):
             folder = None
+
     if folder is None:
         folder = max(candidates, key=lambda item: item.name)
     try:
         config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
-        metrics = json.loads((folder / "final_metrics.json").read_text(encoding="utf-8"))
+        metrics = _enrich_metrics(json.loads((folder / "final_metrics.json").read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return None
 
-    manifest_path = Path(config.get("manifest_path", ""))
-    manifest_info = None
+    manifest_path = Path(config.get("manifest", ""))
+    if not manifest_path.is_absolute():
+        roots = training_roots()
+        manifest_root = roots[0] if roots else folder
+        manifest_path = (manifest_root / manifest_path).resolve()
+    data = None
     if manifest_path.is_file():
-        manifest_info = _read_manifest(manifest_path)
-    else:
-        for root in training_roots():
-            candidate = root / "data" / "splits" / "manifest_v4_dedup_leakage_clean.csv"
-            if candidate.is_file():
-                manifest_info = _read_manifest(candidate)
-                break
+        try:
+            data = _read_manifest(manifest_path)
+            expected = config.get("manifest_sha256")
+            data["matches_run"] = not expected or data["sha256"] == expected
+        except (OSError, csv.Error):
+            data = None
 
+    model_code = config.get("model", "mobilenet_v2")
     return {
         "name": folder.name,
+        "run_name": folder.name,
+        "model": model_code,
+        "model_label": APP_MODEL_NAMES.get(model_code, model_code),
         "directory": folder,
         "checkpoint": folder / "best_model.pt",
+        "config_path": folder / "config.json",
+        "metrics_path": folder / "final_metrics.json",
+        "history_path": folder / "history.csv",
         "config": config,
         "metrics": metrics,
-        "manifest": manifest_info,
+        "data": data,
     }
-
-
-def available_model_runs():
-    """Choose one comparable checkpoint per supported architecture by validation macro-F1."""
-    best = {}
-    for folder in _run_candidates():
-        try:
-            config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
-            model_name = config.get("model")
-            if model_name not in APP_MODEL_NAMES:
-                continue
-            if config.get("manifest_sha256") != APP_MODEL_MANIFEST_SHA256:
-                continue
-            val_file = folder / "best_validation.json"
-            if val_file.is_file():
-                validation = json.loads(val_file.read_text(encoding="utf-8"))
-                macro_f1 = float(validation.get("macro_f1", 0))
-            else:
-                final_file = folder / "final_metrics.json"
-                final_data = json.loads(final_file.read_text(encoding="utf-8")) if final_file.is_file() else {}
-                macro_f1 = float(final_data.get("best_val_macro_f1", 0))
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            continue
-        previous = best.get(model_name)
-        if previous is None or (macro_f1, folder.name) > (previous["validation_macro_f1"], previous["name"]):
-            run = active_run(folder.name)
-            if run:
-                run["validation_macro_f1"] = macro_f1
-                best[model_name] = run
-    return best
 
 
 def torch_python():
     """Use the app interpreter when it has Torch; otherwise use the training venv."""
     import importlib.util
-    if importlib.util.find_spec("torch") is not None:
-        return sys.executable
+    import sys
+
+    if importlib.util.find_spec("torch") and importlib.util.find_spec("torchvision"):
+        return Path(sys.executable)
     for root in training_roots():
-        for candidate in [
-            root / ".venv" / "Scripts" / "python.exe",
-            root / "venv" / "Scripts" / "python.exe",
-            root.parent / ".venv" / "Scripts" / "python.exe",
-        ]:
-            if candidate.is_file():
-                return str(candidate)
-    return sys.executable
+        candidate = root / ".venv" / "Scripts" / "python.exe"
+        if candidate.is_file():
+            return candidate
+    return None

@@ -7,7 +7,11 @@ from services.auth_service import (
     build_role_shell,
     create_file_picker,
     ensure_flet_compat,
+    export_inspections_csv,
+    export_vet_report_html,
+    generate_lesion_heatmap,
     header_stat_pill,
+    is_dark_mode,
     kpi_stat_card,
     make_dropdown,
     make_image,
@@ -19,11 +23,24 @@ from services.auth_service import (
     tech_card,
     theme_tokens,
 )
+from services.clinical_widgets import (
+    build_clinical_charts_section,
+    build_disease_catalog_crud_card,
+    open_disease_editor_modal,
+)
 from services.inference import predict_batch
-from services.project_data import display_class, get_class_info, list_class_keys, load_classes_config
+from services.project_data import (
+    active_run,
+    display_class,
+    get_class_info,
+    list_class_keys,
+    list_model_runs,
+    load_classes_config,
+)
 from services.store import (
     approve_for_dataset,
     get_sample_gallery,
+    get_system_stats,
     list_curated_candidates,
     list_review_queue,
     recent,
@@ -40,6 +57,17 @@ def _conf_color(conf: float) -> str:
     return "#EF4444"
 
 
+def _case_code(case: dict | None) -> str:
+    """Mã hồ sơ chuẩn: ưu tiên case_id, nếu rỗng sinh PS-xxxxxx từ id hoặc dùng animal_id."""
+    case = case or {}
+    return (str(case.get("case_id") or "").strip()) or (
+        f"PS-{int(case['id']):06d}" if case.get("id") else (case.get("animal_id") or "PS-000001")
+    )
+
+
+REVIEW_PANEL_HEIGHT = 560
+
+
 def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
     ensure_flet_compat(page)
     batch_picker = create_file_picker(page)
@@ -49,12 +77,100 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
         "queue_filter": "all",
         "batch_paths": [],
         "batch_results": [],
+        "expert_heatmap_mode": False,
     }
 
     def select_case_and_open_tab2(rec: dict):
         state["selected_case"] = rec
+        state["expert_heatmap_mode"] = False
         if nav_ref.get("switch_tab"):
             nav_ref["switch_tab"](1)
+
+    def _build_empty_state_card(
+        title_text: str = "Hàng đợi thẩm định hiện đang trống",
+        desc_text: str = (
+            "Tất cả các ca bệnh do người chăn nuôi gửi lên đều đã được Chuyên gia xử lý hoàn tất, "
+            "hoặc hiện chưa có yêu cầu hội chẩn mới."
+        ),
+        icon_name: object = ft.Icons.FACT_CHECK_ROUNDED,
+        on_refresh=None,
+        secondary_label: str = "Xem Kho Dataset chuẩn",
+        secondary_icon: object = ft.Icons.DATASET_LINKED_ROUNDED,
+        secondary_tab_idx: int = 2,
+    ) -> ft.Container:
+        cur_t = theme_tokens(page)
+        dark = is_dark_mode(page)
+
+        def _handle_refresh(e):
+            if callable(on_refresh):
+                on_refresh(e)
+            elif nav_ref.get("switch_tab"):
+                nav_ref["switch_tab"](1)
+            show_snack(page, "Đã làm mới dữ liệu từ SQL Database!", "#059669")
+
+        def _handle_secondary(e):
+            if nav_ref.get("switch_tab"):
+                nav_ref["switch_tab"](secondary_tab_idx)
+
+        card = tech_card(
+            page=page,
+            padding=40,
+            border_radius=20,
+            bgcolor=cur_t["SURFACE"],
+            border_color=cur_t["BORDER"],
+            content=ft.Column(
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=14,
+                tight=True,
+                controls=[
+                    ft.Container(
+                        width=76,
+                        height=76,
+                        border_radius=38,
+                        bgcolor=cur_t["EMERALD_SOFT"] if dark else "#ECFDF5",
+                        alignment=ft.alignment.center,
+                        content=ft.Icon(icon_name, size=40, color="#10B981"),
+                    ),
+                    ft.Text(
+                        title_text,
+                        size=20,
+                        weight=ft.FontWeight.BOLD,
+                        color=cur_t["TEXT"],
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Text(
+                        desc_text,
+                        size=14,
+                        color=cur_t["MUTED"],
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Row(
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        spacing=12,
+                        wrap=True,
+                        controls=[
+                            ft.FilledButton(
+                                "Làm mới danh sách",
+                                icon=ft.Icons.REFRESH_ROUNDED,
+                                on_click=_handle_refresh,
+                            ),
+                            ft.OutlinedButton(
+                                secondary_label,
+                                icon=secondary_icon,
+                                on_click=_handle_secondary,
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        )
+        card.width = 520
+        return ft.Container(
+            expand=True,
+            alignment=ft.alignment.center,
+            padding=ft.padding.symmetric(vertical=28),
+            content=card,
+        )
 
     # Tab 1: Review Queue
     def build_queue_tab():
@@ -149,10 +265,17 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             queue_col.controls.clear()
             if not filtered:
                 queue_col.controls.append(
-                    tech_card(
-                        page=page,
-                        padding=24,
-                        content=ft.Text("Không có ca bệnh nào khớp bộ lọc đã chọn.", size=14, color=cur_t["MUTED"]),
+                    _build_empty_state_card(
+                        title_text="Hàng đợi thẩm định hiện đang trống",
+                        desc_text=(
+                            "Tất cả các ca bệnh do người chăn nuôi gửi lên đều đã được Chuyên gia xử lý hoàn tất, "
+                            "hoặc hiện chưa có yêu cầu hội chẩn mới khớp bộ lọc đã chọn."
+                        ),
+                        icon_name=ft.Icons.FACT_CHECK_ROUNDED,
+                        on_refresh=lambda e: (nav_ref["switch_tab"](0) if nav_ref.get("switch_tab") else render_queue_items()),
+                        secondary_label="Quản lý Danh mục Bệnh lý",
+                        secondary_icon=ft.Icons.MEDICAL_SERVICES_ROUNDED,
+                        secondary_tab_idx=3,
                     )
                 )
                 return
@@ -197,6 +320,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                     tech_card(
                         page=page,
                         padding=20,
+                        hover_lift=True,
                         content=ft.Row(
                             [
                                 preview_thumbnail_with_zoom(
@@ -231,7 +355,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                                         ft.Row(
                                             [
                                                 ft.Text(
-                                                    f"AI dự đoán: {display_class(rec.get('predicted_class'))}",
+                                                    f"AI dự đoán: {rec.get('predicted_label') or display_class(rec.get('predicted_class'))} ({rec.get('predicted_class')})",
                                                     size=14,
                                                     weight=ft.FontWeight.BOLD,
                                                     color=cur_t["CYAN"],
@@ -269,33 +393,82 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
 
         search_input.on_change = render_queue_items
         render_queue_items()
+        sys_stats = get_system_stats()
+
+        expert_kpi_row = ft.ResponsiveRow(
+            [
+                kpi_stat_card(
+                    "Ca chờ thẩm định",
+                    str(pending_count),
+                    "Hàng đợi ưu tiên",
+                    ft.Icons.PENDING_ACTIONS_ROUNDED,
+                    accent="#D97706",
+                    soft_bg=t["AMBER_SOFT"],
+                    page=page,
+                    col={"xs": 12, "sm": 6, "lg": 3},
+                ),
+                kpi_stat_card(
+                    "Ca độ tin cậy < 75%",
+                    str(low_conf_count),
+                    "Cần hội chẩn kỹ",
+                    ft.Icons.WARNING_AMBER_ROUNDED,
+                    accent="#DC2626",
+                    soft_bg=t["RED_SOFT"],
+                    page=page,
+                    col={"xs": 12, "sm": 6, "lg": 3},
+                ),
+                kpi_stat_card(
+                    "Đã thẩm định lâm sàng",
+                    str(reviewed_total),
+                    agreed_badge,
+                    ft.Icons.VERIFIED_ROUNDED,
+                    accent="#059669",
+                    soft_bg=t["EMERALD_SOFT"],
+                    page=page,
+                    col={"xs": 12, "sm": 6, "lg": 3},
+                ),
+                kpi_stat_card(
+                    "Ảnh Dataset chuẩn",
+                    str(sys_stats.get("curated_count", 0)),
+                    "Chuẩn hóa huấn luyện",
+                    ft.Icons.DATASET_LINKED_ROUNDED,
+                    accent="#0284C7",
+                    soft_bg=t["CYAN_SOFT"],
+                    page=page,
+                    col={"xs": 12, "sm": 6, "lg": 3},
+                ),
+            ],
+            run_spacing=16,
+            spacing=16,
+        )
 
         return [
             tech_banner(
-                "Hàng đợi Thẩm định Chuyên gia",
-                "Rà soát các ca bệnh do Người chăn nuôi gửi lên và kê phác đồ điều trị thú y",
+                "Tổng quan & Hàng đợi Thẩm định Chuyên gia",
+                "Giám sát thống kê dịch tễ, rà soát các ca bệnh do Người chăn nuôi gửi lên và kê phác đồ điều trị thú y",
                 pills=header_pills,
                 page=page,
             ),
+            expert_kpi_row,
+            build_clinical_charts_section(page, sys_stats),
             tech_card(
                 page=page,
                 padding=18,
-                content=ft.Column(
+                content=ft.Row(
                     [
                         search_input,
-                        ft.Column(
-                            [
-                                ft.Text("Lọc theo trạng thái", size=13, weight=ft.FontWeight.W_600, color=t["SECONDARY"]),
-                                filter_chips_row,
-                            ],
-                            spacing=8,
-                            tight=True,
+                        filter_chips_row,
+                        ft.OutlinedButton(
+                            "📥 Xuất Báo cáo CSV",
+                            icon=ft.Icons.DOWNLOAD_ROUNDED,
+                            on_click=lambda e: export_inspections_csv(page, all_items, "BaoCao_ThamDinh_Expert"),
                         ),
                     ],
-                    spacing=14,
+                    spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
             ),
-            queue_col,
+            ft.Container(padding=ft.padding.only(bottom=90), content=queue_col),
         ]
 
     # Tab 2: Diagnosis & Relabeling
@@ -304,11 +477,63 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
         queue_items = list_review_queue(confidence_threshold=0.75)
         rec = state["selected_case"] or (queue_items[0] if queue_items else None)
         if not rec:
-            return [ft.Text("Hiện chưa có ca bệnh nào trong hàng đợi cần thẩm định.", size=15, color=t["TEXT"])]
+            empty_pills = [
+                header_stat_pill(
+                    "Mã hồ sơ",
+                    "Trống",
+                    ft.Icons.FOLDER_SHARED_ROUNDED,
+                    "#0284C7",
+                    t["CYAN_SOFT"],
+                    "0 ca chờ",
+                    page=page,
+                ),
+                header_stat_pill(
+                    "Độ tin cậy AI",
+                    "100%",
+                    ft.Icons.AUTO_GRAPH_ROUNDED,
+                    "#10B981",
+                    t["EMERALD_SOFT"],
+                    "Đã xử lý hết",
+                    page=page,
+                ),
+                header_stat_pill(
+                    "Trạng thái",
+                    "Hoàn tất",
+                    ft.Icons.VERIFIED_ROUNDED,
+                    "#059669",
+                    t["EMERALD_SOFT"],
+                    "Hội chẩn chuyên khoa",
+                    page=page,
+                ),
+            ]
+            return [
+                tech_banner(
+                    "Chi tiết Thẩm định & Gán nhãn",
+                    "Xác nhận hoặc hiệu chỉnh nhãn bệnh của AI và kê phác đồ điều trị trả về cho chủ trại",
+                    pills=empty_pills,
+                    page=page,
+                ),
+                _build_empty_state_card(
+                    title_text="Hàng đợi thẩm định hiện đang trống",
+                    desc_text=(
+                        "Tất cả các ca bệnh do người chăn nuôi gửi lên đều đã được Chuyên gia xử lý hoàn tất, "
+                        "hoặc hiện chưa có yêu cầu hội chẩn mới."
+                    ),
+                    icon_name=ft.Icons.FACT_CHECK_ROUNDED,
+                    on_refresh=lambda e: nav_ref["switch_tab"](1) if nav_ref.get("switch_tab") else None,
+                    secondary_label="Xem Kho Dataset chuẩn",
+                    secondary_icon=ft.Icons.DATASET_LINKED_ROUNDED,
+                    secondary_tab_idx=2,
+                ),
+            ]
         state["selected_case"] = rec
+        case_code = _case_code(rec)
 
         case_options = [
-            (str(it["id"]), f"{it.get('case_id')} - {display_class(it.get('predicted_class'))} ({float(it.get('confidence') or 0)*100:.1f}%)")
+            (
+                str(it["id"]),
+                f"{_case_code(it)} - {it.get('predicted_label') or display_class(it.get('predicted_class'))} ({it.get('predicted_class')}) ({float(it.get('confidence') or 0)*100:.1f}%)",
+            )
             for it in queue_items
         ]
 
@@ -317,6 +542,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             found = next((x for x in queue_items if int(x["id"]) == chosen_id), None)
             if found:
                 state["selected_case"] = found
+                state["expert_heatmap_mode"] = False
                 if nav_ref.get("switch_tab"):
                     nav_ref["switch_tab"](1)
 
@@ -350,8 +576,9 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             label="Ghi chú phác đồ điều trị & Lời khuyên dùng thuốc gửi trả về cho Người chăn nuôi",
             value=default_tx,
             multiline=True,
-            min_lines=4,
-            max_lines=6,
+            min_lines=3,
+            max_lines=5,
+            expand=True,
             page=page,
         )
 
@@ -368,7 +595,10 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             on_change=on_decision_change,
             content=ft.Row(
                 [
-                    ft.Radio(value="agree", label=f"Đồng ý với AI ({display_class(pred_code)})"),
+                    ft.Radio(
+                        value="agree",
+                        label=f"Đồng ý với AI ({rec.get('predicted_label') or display_class(pred_code)})",
+                    ),
                     ft.Radio(value="relabel", label="Sửa lại nhãn bệnh (Relabel)"),
                 ],
                 spacing=24,
@@ -389,7 +619,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             state["selected_case"] = next((x for x in refreshed if int(x["id"]) == int(rec["id"])), rec)
             show_snack(
                 page,
-                f"Đã lưu kết quả thẩm định hồ sơ {rec.get('case_id')} và gửi phác đồ về cho User!",
+                f"Đã lưu kết quả thẩm định hồ sơ {case_code} và gửi phác đồ về cho User!",
                 "#059669",
             )
             if nav_ref.get("switch_tab"):
@@ -398,68 +628,160 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
         queue_thumb_row = ft.Row(
             [
                 ft.Container(
-                    padding=4,
-                    border_radius=12,
+                    padding=3,
+                    border_radius=10,
                     border=ft.border.all(2 if int(it["id"]) == int(rec["id"]) else 1, "#10B981" if int(it["id"]) == int(rec["id"]) else t["BORDER"]),
                     ink=True,
-                    tooltip=f"Chuyển sang {it.get('case_id')} ({display_class(it.get('predicted_class'))})",
+                    tooltip=f"Chuyển sang {_case_code(it)} ({display_class(it.get('predicted_class'))})",
                     on_click=lambda e, item=it: select_case_and_open_tab2(item),
-                    content=ft.Image(
-                        src=str(it.get("image_path") or ""),
-                        fit=ft.ImageFit.COVER,
-                        width=88,
-                        height=88,
-                        border_radius=10,
-                    ),
+                    content=make_image(it.get("image_path") or "", width=60, height=60, border_radius=8),
                 )
-                for it in queue_items[:5]
+                for it in queue_items[:12]
             ],
-            spacing=10,
-            wrap=True,
+            spacing=8,
+            scroll=ft.ScrollMode.AUTO,
         )
+
+        # Khung hiển thị ảnh DUY NHẤT (height=300) — bật Heatmap cập nhật trực tiếp lên chính khung này
+        image_preview_host = ft.Container(
+            height=300,
+            border_radius=12,
+            padding=6,
+            alignment=ft.alignment.center,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            ink=True,
+            tooltip="Nhấn để phóng to ảnh",
+        )
+        heatmap_toggle_host = ft.Container()
+
+        def render_expert_image_preview():
+            cur_t = theme_tokens(page)
+            is_hm = bool(state.get("expert_heatmap_mode"))
+            orig_path = rec.get("image_path") or ""
+            shown_path = generate_lesion_heatmap(orig_path) if is_hm else orig_path
+            image_preview_host.bgcolor = cur_t["SUB_SURFACE"] if is_dark_mode(page) else "#F8FAFC"
+            image_preview_host.border = ft.border.all(1.5 if is_hm else 1, "#D97706" if is_hm else cur_t["BORDER"])
+            image_preview_host.on_click = lambda e: open_image_zoom_dialog(
+                page,
+                shown_path,
+                f"Hồ sơ {case_code}{' • AI Heatmap' if is_hm else ''}",
+            )
+            image_preview_host.content = make_image(
+                shown_path,
+                width=None,
+                height=288,
+                border_radius=10,
+                fit=ft.ImageFit.CONTAIN,
+            )
+            heatmap_toggle_host.content = ft.Container(
+                bgcolor="#D97706" if is_hm else cur_t["EMERALD_SOFT"],
+                border=ft.border.all(1, "#D97706" if is_hm else "#10B981"),
+                padding=ft.padding.symmetric(horizontal=10, vertical=7),
+                border_radius=10,
+                ink=True,
+                on_click=toggle_expert_heatmap,
+                content=ft.Row(
+                    [
+                        ft.Icon(
+                            ft.Icons.THERMOSTAT_AUTO_ROUNDED if is_hm else ft.Icons.BIOTECH_ROUNDED,
+                            size=16,
+                            color="#FFFFFF" if is_hm else cur_t["EMERALD"],
+                        ),
+                        ft.Text(
+                            "Đang bật Heatmap (Tắt)" if is_hm else "Soi vùng tổn thương AI",
+                            size=12.5,
+                            weight=ft.FontWeight.W_600,
+                            color="#FFFFFF" if is_hm else cur_t["EMERALD"],
+                            no_wrap=True,
+                        ),
+                    ],
+                    spacing=6,
+                    tight=True,
+                ),
+            )
+
+        def toggle_expert_heatmap(e):
+            state["expert_heatmap_mode"] = not bool(state.get("expert_heatmap_mode"))
+            render_expert_image_preview()
+            if state["expert_heatmap_mode"]:
+                show_snack(page, "🔬 Đã bật chế độ soi vùng tổn thương AI cho chuyên gia thú y.", "#D97706")
+            page.update()
+
+        def handle_export_expert_report(e):
+            is_agree = decision_group.value == "agree"
+            chosen_label = pred_code if is_agree else (relabel_dropdown.value or pred_code)
+            cls_meta = get_class_info(chosen_label)
+            scores = rec.get("scores_json") or {pred_code: conf}
+            export_vet_report_html(
+                page,
+                {
+                    "case_id": case_code,
+                    "created_at": rec.get("created_at") or "",
+                    "farm_name": rec.get("farm_name") or "Trang trại chăn nuôi",
+                    "animal_id": rec.get("animal_id") or "Chưa gán thẻ",
+                    "pig_age": rec.get("pig_age") or "—",
+                    "body_site": rec.get("body_site") or "Toàn thân",
+                    "symptoms": rec.get("symptoms") or "Không có ghi chú",
+                    "image_path": rec.get("image_path") or "",
+                    "predicted_class": chosen_label,
+                    "confidence": conf,
+                    "danger_level": cls_meta.get("danger_level", "Trung bình"),
+                    "scores": scores if isinstance(scores, dict) else {pred_code: conf},
+                    "expert_label": chosen_label,
+                    "expert_note": (treatment_note.value or "").strip() or cls_meta.get("treatment", ""),
+                    "reviewed_by": user.get("email", "bs.thuy.pigskin@gmail.com"),
+                },
+            )
+
+        render_expert_image_preview()
 
         left_panel = tech_card(
             page=page,
-            expand=1,
-            padding=24,
+            padding=20,
             content=ft.Column(
                 [
+                    # 1. Header nhỏ: Icon + Tiêu đề + 2 nút thao tác nằm gọn bên phải
                     ft.Row(
                         [
                             ft.Icon(ft.Icons.IMAGE_SEARCH_ROUNDED, color=t["CYAN"], size=22),
-                            ft.Text("Ảnh gốc & Thông tin Người gửi", size=18, weight=ft.FontWeight.BOLD, color=t["TEXT"], expand=True),
+                            ft.Text(
+                                "Hình ảnh Lâm sàng Cần Thẩm định",
+                                size=16.5,
+                                weight=ft.FontWeight.BOLD,
+                                color=t["TEXT"],
+                                expand=True,
+                                max_lines=2,
+                                overflow=ft.TextOverflow.ELLIPSIS,
+                            ),
+                            heatmap_toggle_host,
                             ft.OutlinedButton(
                                 "Phóng to ảnh (Zoom)",
                                 icon=ft.Icons.ZOOM_IN_ROUNDED,
-                                on_click=lambda e: open_image_zoom_dialog(page, rec.get("image_path"), f"Hồ sơ {rec.get('case_id')}"),
+                                on_click=lambda e: open_image_zoom_dialog(page, rec.get("image_path"), f"Hồ sơ {case_code}"),
                             ),
-                        ]
+                        ],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
-                    ft.Container(
-                        bgcolor=t["SUB_SURFACE"],
-                        padding=10,
-                        border_radius=12,
-                        border=ft.border.all(1, t["BORDER"]),
-                        alignment=ft.alignment.center,
-                        ink=True,
-                        on_click=lambda e: open_image_zoom_dialog(page, rec.get("image_path"), f"Hồ sơ {rec.get('case_id')}"),
-                        content=make_image(rec.get("image_path"), width=420, height=250, border_radius=8),
-                    ),
-                    ft.Text("Chuyển nhanh qua ảnh thật trong hàng đợi (click ảnh để thẩm định):", size=13, weight=ft.FontWeight.W_600, color=t["SECONDARY"]),
+                    # 2. Khung ảnh chính duy nhất (height=300, CONTAIN, nền #F8FAFC)
+                    image_preview_host,
+                    # 3. Thumbnails hàng đợi + Thông tin hồ sơ
+                    ft.Text("Chuyển nhanh qua ảnh thật trong hàng đợi (click ảnh để thẩm định):", size=12.5, weight=ft.FontWeight.W_600, color=t["SECONDARY"]),
                     queue_thumb_row,
-                    ft.Text(f"Mã hồ sơ: {rec.get('case_id')} • Thời gian gửi: {rec.get('created_at')}", size=14.5, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
-                    ft.Text(f"Người chăn nuôi: {rec.get('user_name')} ({rec.get('user_email')})", size=14, color=t["CYAN"], weight=ft.FontWeight.W_600),
-                    ft.Text(f"Trang trại: {rec.get('farm_name') or '—'} • Mã cá thể: {rec.get('animal_id') or '—'}", size=13.5, color=t["SECONDARY"]),
-                    ft.Text(f"Triệu chứng ghi nhận: {rec.get('symptoms') or 'Không có'}", size=14, color=t["TEXT"]),
+                    ft.Text(f"Mã hồ sơ: {case_code} • Thời gian gửi: {rec.get('created_at') or '—'}", size=14, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
+                    ft.Text(f"Người chăn nuôi: {rec.get('user_name') or '—'} ({rec.get('user_email') or '—'})", size=13.5, color=t["CYAN"], weight=ft.FontWeight.W_600),
+                    ft.Text(f"Trang trại: {rec.get('farm_name') or '—'} • Mã cá thể: {rec.get('animal_id') or '—'}", size=13, color=t["SECONDARY"]),
+                    ft.Text(f"Triệu chứng ghi nhận: {rec.get('symptoms') or 'Không có'}", size=13.5, color=t["TEXT"]),
                 ],
                 spacing=10,
+                scroll=ft.ScrollMode.AUTO,
             ),
         )
+        left_panel.height = REVIEW_PANEL_HEIGHT
 
         right_panel = tech_card(
             page=page,
-            expand=1,
-            padding=24,
+            padding=20,
             content=ft.Column(
                 [
                     ft.Row(
@@ -479,10 +801,23 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                                 ft.Row(
                                     [
                                         ft.Text("AI dự đoán:", size=14, color=t["SECONDARY"]),
-                                        ft.Text(display_class(pred_code), size=17, weight=ft.FontWeight.BOLD, color=t["CYAN"], expand=True),
+                                        ft.Column(
+                                            [
+                                                ft.Text(
+                                                    rec.get("predicted_label") or display_class(pred_code),
+                                                    size=16.5,
+                                                    weight=ft.FontWeight.BOLD,
+                                                    color=t["CYAN"],
+                                                ),
+                                                ft.Text(f"Mã lớp: {pred_code}", size=12.5, color=t["SECONDARY"]),
+                                            ],
+                                            spacing=2,
+                                            expand=True,
+                                        ),
                                         ft.Text(f"{conf*100:.1f}%", size=17, weight=ft.FontWeight.BOLD, color=c_color),
                                     ],
                                     spacing=8,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                                 ),
                                 ft.ProgressBar(value=conf, bar_height=9, color=c_color, bgcolor=t["BORDER"]),
                             ],
@@ -493,25 +828,34 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                     decision_group,
                     ft.Row([relabel_dropdown]),
                     ft.Text("2. Phác đồ điều trị & Lời khuyên dùng thuốc gửi User:", size=14.5, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
-                    treatment_note,
+                    ft.Row([treatment_note]),
                     ft.Row(
                         [
                             ft.FilledButton(
                                 "Xác nhận Thẩm định & Gửi Phác đồ cho User",
                                 icon=ft.Icons.VERIFIED_ROUNDED,
                                 on_click=handle_submit_review,
-                            )
-                        ]
+                            ),
+                            ft.OutlinedButton(
+                                "🖨️ Xuất Phiếu Khám",
+                                icon=ft.Icons.PRINT_ROUNDED,
+                                on_click=handle_export_expert_report,
+                            ),
+                        ],
+                        spacing=10,
+                        wrap=True,
                     ),
                 ],
-                spacing=14,
+                spacing=12,
+                scroll=ft.ScrollMode.AUTO,
             ),
         )
+        right_panel.height = REVIEW_PANEL_HEIGHT
 
         relabel_pills = [
             header_stat_pill(
                 "Mã hồ sơ",
-                str(rec.get("case_id") or "—"),
+                case_code,
                 ft.Icons.FOLDER_SHARED_ROUNDED,
                 "#0284C7",
                 t["CYAN_SOFT"],
@@ -547,16 +891,23 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             ),
             tech_card(
                 page=page,
-                padding=16,
-                content=ft.Column(
-                    [
-                        ft.Text("Hồ sơ đang thẩm định", size=14, weight=ft.FontWeight.W_600, color=t["SECONDARY"]),
-                        case_selector,
-                    ],
-                    spacing=8,
+                padding=12,
+                content=ft.Row(
+                    [ft.Text("Chuyển nhanh hồ sơ:", size=14.5, weight=ft.FontWeight.BOLD, color=t["TEXT"]), case_selector],
+                    spacing=12,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
             ),
-            ft.Row([left_panel, right_panel], spacing=18, vertical_alignment=ft.CrossAxisAlignment.START),
+            # 2 cột Trái (Hình ảnh) & Phải (Kết quả AI & Quyết định) ngang bằng nhau, căn trên, cùng chiều cao
+            ft.ResponsiveRow(
+                [
+                    ft.Container(col={"xs": 12, "lg": 6}, content=left_panel),
+                    ft.Container(col={"xs": 12, "lg": 6}, content=right_panel),
+                ],
+                run_spacing=18,
+                spacing=18,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
         ]
 
     # Tab 3: Dataset Curation
@@ -658,6 +1009,23 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             )
 
             list_col.controls.clear()
+            if not candidates:
+                list_col.controls.append(
+                    _build_empty_state_card(
+                        title_text="Chưa có ca bệnh nào được thẩm định vào Dataset",
+                        desc_text=(
+                            "Khi Chuyên gia hoàn tất thẩm định các ca bệnh từ hàng đợi, hồ sơ chuẩn hóa nhãn "
+                            "sẽ hiển thị tại đây để duyệt đưa vào bộ dữ liệu huấn luyện AI."
+                        ),
+                        icon_name=ft.Icons.VERIFIED_ROUNDED,
+                        on_refresh=refresh_curation,
+                        secondary_label="Quản lý Danh mục Bệnh lý",
+                        secondary_icon=ft.Icons.MEDICAL_SERVICES_ROUNDED,
+                        secondary_tab_idx=3,
+                    )
+                )
+                page.update()
+                return
             for item in candidates:
                 in_ds = int(item.get("in_dataset") or 0) == 1
                 final_cls = item.get("expert_label") or item.get("predicted_class")
@@ -747,22 +1115,39 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
         refresh_curation()
         return [
             curation_header_host,
-            ft.Text("Tình hình dữ liệu đã chuẩn hóa", size=16, weight=ft.FontWeight.BOLD, color=theme_tokens(page)["TEXT"]),
+            build_clinical_charts_section(page, get_system_stats()),
             dist_host,
-            ft.Text("Hồ sơ chờ đóng góp vào dataset", size=16, weight=ft.FontWeight.BOLD, color=theme_tokens(page)["TEXT"]),
-            list_col,
+            ft.Container(padding=ft.padding.only(bottom=90), content=list_col),
         ]
 
     # Tab 4: Batch Inference
     def build_batch_tab():
         t = theme_tokens(page)
+        runs = list_model_runs()
+        cur_r = active_run() or {}
+        default_run = state.get("batch_run") or cur_r.get("name") or (runs[0]["name"] if runs else "")
+        state["batch_run"] = default_run
+
+        batch_model_dd = make_dropdown(
+            label="Kiến trúc mô hình kiểm thử",
+            value=default_run,
+            options=[
+                (r["name"], f"{r.get('model_label', r['model'])} ({r['name']})")
+                for r in runs
+            ]
+            or [("default", "MobileNetV2")],
+            on_change=lambda e: state.update({"batch_run": e.control.value}),
+            width=290,
+            page=page,
+        )
+
         status_text = ft.Text(
             f"Đã chọn {len(state['batch_paths'])} ảnh để kiểm thử." if state["batch_paths"] else "Chưa chọn lô ảnh kiểm thử.",
             size=14,
             color=t["SECONDARY"],
         )
         progress = ft.ProgressBar(visible=False, color="#0284C7")
-        summary_row = ft.Row(spacing=14)
+        summary_row = ft.ResponsiveRow(run_spacing=16, spacing=16)
         results_col = ft.Column(spacing=14)
         batch_header_host = ft.Container()
 
@@ -796,7 +1181,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                     ft.Icons.ANALYTICS_ROUNDED,
                     "#D97706",
                     cur_t["AMBER_SOFT"],
-                    "PigSkin AI",
+                    "Tensor Softmax",
                     page=page,
                 ),
             ]
@@ -821,9 +1206,36 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
 
             summary_row.controls.extend(
                 [
-                    kpi_stat_card("Tổng số ảnh đã phân tích", str(len(results)), "Kiểm thử song song", ft.Icons.COLLECTIONS_ROUNDED, "#0284C7", cur_t["CYAN_SOFT"], page=page),
-                    kpi_stat_card("Độ tự tin trung bình", f"{avg_conf:.1f}%", "Độ tin cậy PigSkin AI", ft.Icons.ANALYTICS_ROUNDED, "#059669", cur_t["EMERALD_SOFT"], page=page),
-                    kpi_stat_card("Số ca dưới ngưỡng nhạy 75%", str(low_sens), "Cần hội chẩn chuyên khoa", ft.Icons.WARNING_AMBER_ROUNDED, "#DC2626", cur_t["RED_SOFT"], page=page),
+                    kpi_stat_card(
+                        "Tổng số ảnh đã phân tích",
+                        str(len(results)),
+                        "Kiểm thử song song",
+                        ft.Icons.COLLECTIONS_ROUNDED,
+                        "#0284C7",
+                        cur_t["CYAN_SOFT"],
+                        page=page,
+                        col={"xs": 12, "sm": 6, "lg": 4},
+                    ),
+                    kpi_stat_card(
+                        "Độ tự tin trung bình",
+                        f"{avg_conf:.1f}%",
+                        "Độ tin cậy Softmax",
+                        ft.Icons.ANALYTICS_ROUNDED,
+                        "#059669",
+                        cur_t["EMERALD_SOFT"],
+                        page=page,
+                        col={"xs": 12, "sm": 6, "lg": 4},
+                    ),
+                    kpi_stat_card(
+                        "Số ca dưới ngưỡng nhạy 75%",
+                        str(low_sens),
+                        "Cần hội chẩn chuyên khoa",
+                        ft.Icons.WARNING_AMBER_ROUNDED,
+                        "#DC2626",
+                        cur_t["RED_SOFT"],
+                        page=page,
+                        col={"xs": 12, "sm": 6, "lg": 4},
+                    ),
                 ]
             )
 
@@ -832,6 +1244,13 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                 c_col = _conf_color(conf)
                 img_path = (r.get("info") or {}).get("path")
                 img_name = (r.get("info") or {}).get("name", f"Image #{idx}")
+                arch = r.get("architecture") or r.get("model_label") or "MobileNetV2"
+                ms = r.get("inference_ms", "-")
+                top3 = r.get("top3") or (r.get("scores") or [])[:3]
+                top3_txt = " • ".join(
+                    f"{display_class(s.get('label'))}: {float(s.get('confidence') or 0)*100:.1f}%"
+                    for s in top3
+                )
                 results_col.controls.append(
                     tech_card(
                         page=page,
@@ -841,16 +1260,26 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                                 preview_thumbnail_with_zoom(page, img_path, img_name, width=88, height=88, border_radius=10),
                                 ft.Column(
                                     [
-                                        ft.Text(f"#{idx} • {img_name}", size=14.5, weight=ft.FontWeight.BOLD, color=cur_t["TEXT"]),
+                                        ft.Text(
+                                            f"#{idx} • {img_name} ({arch} • {ms} ms)",
+                                            size=14.5,
+                                            weight=ft.FontWeight.BOLD,
+                                            color=cur_t["TEXT"],
+                                        ),
                                         ft.Text(
                                             f"AI dự đoán: {r.get('display_label')} ({r.get('label')})",
                                             size=14,
                                             color=cur_t["CYAN"],
                                             weight=ft.FontWeight.W_600,
                                         ),
+                                        ft.Text(
+                                            f"Top-3 Softmax: {top3_txt}",
+                                            size=12.5,
+                                            color=cur_t["SECONDARY"],
+                                        ),
                                         ft.ProgressBar(value=conf, bar_height=7, color=c_col, bgcolor=cur_t["BORDER"]),
                                     ],
-                                    spacing=6,
+                                    spacing=5,
                                     expand=True,
                                 ),
                                 ft.Text(f"{conf*100:.1f}%", size=17, weight=ft.FontWeight.BOLD, color=c_col),
@@ -882,7 +1311,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             status_text.value = "Đang phân tích hàng loạt bằng Trí tuệ nhân tạo PigSkin AI..."
             page.update()
             try:
-                res = await asyncio.to_thread(predict_batch, state["batch_paths"])
+                res = await asyncio.to_thread(predict_batch, state["batch_paths"], state.get("batch_run"))
                 state["batch_results"] = res
                 status_text.value = f"Hoàn tất kiểm thử {len(res)} ảnh!"
                 render_batch_results()
@@ -899,36 +1328,88 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                 padding=20,
                 content=ft.Column(
                     [
-                        ft.Text("1. Chọn ảnh cần kiểm thử", size=14, weight=ft.FontWeight.W_600, color=t["SECONDARY"]),
                         ft.Row(
                             [
+                                batch_model_dd,
                                 ft.OutlinedButton("Chọn nhiều ảnh (Batch)", icon=ft.Icons.COLLECTIONS_ROUNDED, on_click=handle_pick_batch),
                                 ft.OutlinedButton("Nạp bộ 5 ảnh mẫu lâm sàng", icon=ft.Icons.AUTO_AWESOME_MOTION_ROUNDED, on_click=handle_load_sample_batch),
-                            ],
-                            spacing=10,
-                            wrap=True,
-                        ),
-                        ft.Row(
-                            [
                                 ft.FilledButton("Chạy Phân tích Hàng loạt", icon=ft.Icons.BOLT_ROUNDED, on_click=handle_run_batch),
                                 status_text,
                             ],
                             spacing=12,
                             wrap=True,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                         progress,
                     ],
-                    spacing=12,
+                    spacing=10,
                 ),
             ),
             summary_row,
-            results_col,
+            ft.Container(padding=ft.padding.only(bottom=90), content=results_col),
+        ]
+
+    # Tab 5: Danh mục Bệnh lý & Phác đồ (Expert Clinical Catalog CRUD)
+    def build_catalog_tab():
+        catalog_header_host = ft.Container()
+
+        def refresh_catalog_header():
+            cur_t = theme_tokens(page)
+            latest = load_classes_config()
+            urgent_cnt = sum(1 for v in latest.values() if v.get("danger_level") in ("Cao", "Khẩn cấp"))
+            safe_cnt = sum(1 for k, v in latest.items() if v.get("danger_level") in ("An toàn", "Thấp") or k == "Healthy")
+            catalog_pills = [
+                header_stat_pill(
+                    "Nhóm bệnh lý chuẩn",
+                    str(len(latest)),
+                    ft.Icons.MEDICAL_SERVICES_ROUNDED,
+                    "#059669",
+                    cur_t["EMERALD_SOFT"],
+                    "Đồng bộ classes.json & SQL",
+                    page=page,
+                ),
+                header_stat_pill(
+                    "Mức nguy hiểm cao",
+                    str(urgent_cnt),
+                    ft.Icons.WARNING_AMBER_ROUNDED,
+                    "#DC2626",
+                    cur_t["RED_SOFT"],
+                    "Cần cách ly khẩn",
+                    page=page,
+                ),
+                header_stat_pill(
+                    "Nhóm an toàn / nhẹ",
+                    str(safe_cnt),
+                    ft.Icons.HEALTH_AND_SAFETY_ROUNDED,
+                    "#0284C7",
+                    cur_t["CYAN_SOFT"],
+                    "Theo dõi định kỳ",
+                    page=page,
+                ),
+            ]
+            catalog_header_host.content = tech_banner(
+                "Quản lý Danh mục Bệnh lý & Phác đồ Điều trị",
+                "Chuyên gia Thú y thêm mới lớp bệnh, cập nhật triệu chứng nhận diện, biện pháp phòng ngừa và phác đồ điều trị chuẩn",
+                pills=catalog_pills,
+                page=page,
+            )
+
+        refresh_catalog_header()
+        crud_card = build_disease_catalog_crud_card(
+            page=page,
+            title_text="Quản lý Danh mục Bệnh lý & Phác đồ Điều trị Mặc định",
+            on_changed=refresh_catalog_header,
+        )
+        return [
+            catalog_header_host,
+            crud_card,
         ]
 
     destinations = [
         ("Hàng đợi thẩm định", ft.Icons.PENDING_ACTIONS_OUTLINED, ft.Icons.PENDING_ACTIONS_ROUNDED),
         ("Thẩm định & Gán nhãn", ft.Icons.FACT_CHECK_OUTLINED, ft.Icons.FACT_CHECK_ROUNDED),
         ("Đóng góp Dataset", ft.Icons.DATASET_OUTLINED, ft.Icons.DATASET_ROUNDED),
+        ("Danh mục Bệnh lý & Phác đồ", ft.Icons.MEDICAL_INFORMATION_OUTLINED, ft.Icons.MEDICAL_INFORMATION_ROUNDED),
         ("Test chuyên sâu (Batch)", ft.Icons.SCIENCE_OUTLINED, ft.Icons.SCIENCE_ROUNDED),
     ]
 
@@ -937,6 +1418,6 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
         user=user,
         title="Không gian Chuyên Gia Thú Y",
         destinations=destinations,
-        tab_builders=[build_queue_tab, build_relabel_tab, build_curation_tab, build_batch_tab],
+        tab_builders=[build_queue_tab, build_relabel_tab, build_curation_tab, build_catalog_tab, build_batch_tab],
         external_nav_ref=nav_ref,
     )

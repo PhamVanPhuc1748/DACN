@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import threading
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -160,21 +161,59 @@ def _build_sqlserver_conn_str(settings: dict[str, str], database: str | None = N
     if port and port != "1433" and "," not in server and "\\" not in server:
         server = f"{server},{port}"
     db_name = (database or settings.get("DB_NAME") or settings.get("SQLSERVER_DATABASE") or "PigSkinTechDB").strip()
-    user = (settings.get("DB_USER") or settings.get("SQLSERVER_USERNAME") or "").strip()
-    password = (settings.get("DB_PASSWORD") or settings.get("SQLSERVER_PASSWORD") or "").strip()
-    tc_raw = (settings.get("Trusted_Connection") or settings.get("SQLSERVER_TRUSTED_CONNECTION") or "yes").strip().lower()
-    trusted = tc_raw in ("yes", "true", "1", "sspi")
     driver = _pick_odbc_driver(settings.get("SQLSERVER_DRIVER", "ODBC Driver 17 for SQL Server"))
 
-    parts = [f"DRIVER={{{driver}}}", f"SERVER={server}", f"DATABASE={db_name}"]
-    if trusted and not user:
-        parts.append("Trusted_Connection=yes")
-    else:
-        parts.append(f"UID={user}")
-        parts.append(f"PWD={password}")
+    parts = [
+        f"DRIVER={{{driver}}}",
+        f"SERVER={server}",
+        f"DATABASE={db_name}",
+        "Trusted_Connection=yes",
+    ]
     if "Driver 18" in driver:
         parts.append("TrustServerCertificate=yes")
     return ";".join(parts)
+
+
+def _ensure_sqlserver_database(settings: dict[str, str]) -> bool:
+    """Create the configured database on SQL Server when it does not exist.
+
+    Returns True only when this call created the database. Windows integrated
+    authentication is used by _build_sqlserver_conn_str; creation requires the
+    current Windows login to have CREATE DATABASE permission.
+    """
+    if pyodbc is None:
+        raise RuntimeError("Chưa cài thư viện pyodbc.")
+
+    db_name = (
+        settings.get("DB_NAME")
+        or settings.get("SQLSERVER_DATABASE")
+        or "PigSkinTechDB"
+    ).strip()
+    if not db_name or len(db_name) > 128:
+        raise ValueError("Tên database SQL Server phải có từ 1 đến 128 ký tự.")
+
+    quoted_name = f"[{db_name.replace(']', ']]')}]"
+    master = pyodbc.connect(
+        _build_sqlserver_conn_str(settings, database="master"),
+        timeout=3,
+        autocommit=True,
+    )
+    try:
+        cursor = master.cursor()
+        cursor.execute("SELECT DB_ID(?)", (db_name,))
+        if cursor.fetchone()[0] is not None:
+            return False
+        try:
+            cursor.execute(f"CREATE DATABASE {quoted_name}")
+            return True
+        except Exception:
+            # A second app instance may have created it between DB_ID and CREATE.
+            cursor.execute("SELECT DB_ID(?)", (db_name,))
+            if cursor.fetchone()[0] is not None:
+                return False
+            raise
+    finally:
+        master.close()
 
 
 class _DictRow(dict):
@@ -226,6 +265,8 @@ _SHARED_CONN_LOCK = threading.RLock()
 _SHARED_RAW_CONN: Any = None
 _SHARED_ENGINE_TYPE: str | None = None
 _SHARED_CONN_STR: str = ""
+_SQLSERVER_RETRY_AFTER = 0.0
+_SQLSERVER_FAILED_CONN_STR = ""
 
 
 def _get_shared_connection(force_reconnect: bool = False) -> tuple[Any, bool]:
@@ -234,6 +275,7 @@ def _get_shared_connection(force_reconnect: bool = False) -> tuple[Any, bool]:
     Tự động tái sử dụng kết nối đang mở và tự động kết nối lại (auto-reconnect) nếu bị ngắt.
     """
     global _SHARED_RAW_CONN, _SHARED_ENGINE_TYPE, _SHARED_CONN_STR
+    global _SQLSERVER_RETRY_AFTER, _SQLSERVER_FAILED_CONN_STR
     with _SHARED_CONN_LOCK:
         settings = read_settings()
         engine_pref = (settings.get("DATABASE_ENGINE") or "sqlserver").strip().lower()
@@ -244,9 +286,20 @@ def _get_shared_connection(force_reconnect: bool = False) -> tuple[Any, bool]:
             except Exception:
                 pass
             _SHARED_RAW_CONN = None
+            _SQLSERVER_RETRY_AFTER = 0.0
+            _SQLSERVER_FAILED_CONN_STR = ""
 
         if pyodbc is not None and engine_pref == "sqlserver":
             conn_str = _build_sqlserver_conn_str(settings)
+            # Don't block every DB operation by retrying an unavailable SQL Server.
+            # Retry after a short cooldown, or immediately when settings change.
+            if (
+                _SHARED_RAW_CONN is not None
+                and _SHARED_ENGINE_TYPE == "sqlite"
+                and _SQLSERVER_FAILED_CONN_STR == conn_str
+                and time.monotonic() < _SQLSERVER_RETRY_AFTER
+            ):
+                return _SHARED_RAW_CONN, False
             # Kiểm tra kết nối SQL Server hiện tại
             if _SHARED_RAW_CONN is not None and _SHARED_ENGINE_TYPE == "sqlserver" and _SHARED_CONN_STR == conn_str:
                 try:
@@ -262,37 +315,30 @@ def _get_shared_connection(force_reconnect: bool = False) -> tuple[Any, bool]:
                         pass
                     _SHARED_RAW_CONN = None
 
-            # Tạo kết nối SQL Server mới
+            # Ensure the configured database exists, then connect to that
+            # database (not merely to master) before reporting SQL as active.
             try:
+                database_created = _ensure_sqlserver_database(settings)
                 _SHARED_RAW_CONN = pyodbc.connect(conn_str, timeout=3)
                 _SHARED_ENGINE_TYPE = "sqlserver"
                 _SHARED_CONN_STR = conn_str
+                _SQLSERVER_FAILED_CONN_STR = ""
+                _SQLSERVER_RETRY_AFTER = 0.0
                 _ACTIVE_DB_INFO.update({
                     "engine": "SQL Server (pyodbc)",
                     "server": settings.get("DB_SERVER") or settings.get("SQLSERVER_HOST") or "localhost",
                     "database": settings.get("DB_NAME") or "PigSkinTechDB",
-                    "status": "Đã kết nối SQL Server thực tế (Connection Pooling Active)",
+                    "status": (
+                        f"Đã tạo database {settings.get('DB_NAME') or 'PigSkinTechDB'} và kết nối SQL Server."
+                        if database_created
+                        else "Đã kết nối đúng database trên SQL Server (Connection Pooling Active)."
+                    ),
                 })
                 return _SHARED_RAW_CONN, True
-            except Exception:
-                try:
-                    master_str = _build_sqlserver_conn_str(settings, database="master")
-                    m_conn = pyodbc.connect(master_str, timeout=3, autocommit=True)
-                    db_name = (settings.get("DB_NAME") or "PigSkinTechDB").replace("]", "")
-                    m_conn.execute(f"IF DB_ID(N'{db_name}') IS NULL CREATE DATABASE [{db_name}];")
-                    m_conn.close()
-                    _SHARED_RAW_CONN = pyodbc.connect(_build_sqlserver_conn_str(settings), timeout=3)
-                    _SHARED_ENGINE_TYPE = "sqlserver"
-                    _SHARED_CONN_STR = conn_str
-                    _ACTIVE_DB_INFO.update({
-                        "engine": "SQL Server (pyodbc)",
-                        "server": settings.get("DB_SERVER") or settings.get("SQLSERVER_HOST") or "localhost",
-                        "database": db_name,
-                        "status": f"Đã tự động khởi tạo & kết nối SQL Server ({db_name})",
-                    })
-                    return _SHARED_RAW_CONN, True
-                except Exception as exc:
-                    _ACTIVE_DB_INFO["last_error"] = str(exc)
+            except Exception as exc:
+                _ACTIVE_DB_INFO["last_error"] = str(exc)
+                _SQLSERVER_FAILED_CONN_STR = conn_str
+                _SQLSERVER_RETRY_AFTER = time.monotonic() + 30.0
 
         # Fallback SQLite
         if _SHARED_RAW_CONN is not None and _SHARED_ENGINE_TYPE == "sqlite":
@@ -386,20 +432,23 @@ def get_db_status() -> dict[str, str]:
 
 
 def test_sqlserver_connection(custom_settings: dict[str, str] | None = None) -> dict[str, Any]:
+    global _SHARED_RAW_CONN, _SQLSERVER_RETRY_AFTER, _SQLSERVER_FAILED_CONN_STR
     if pyodbc is None:
         return {"ok": False, "message": "Chưa cài đặt thư viện pyodbc."}
     cfg = read_settings()
     if custom_settings:
         cfg.update(custom_settings)
     try:
-        conn_str = _build_sqlserver_conn_str(cfg, database="master")
+        created = _ensure_sqlserver_database(cfg)
+        conn_str = _build_sqlserver_conn_str(cfg)
         c = pyodbc.connect(conn_str, timeout=3)
         cur = c.cursor()
-        cur.execute("SELECT @@VERSION")
-        ver = cur.fetchone()[0].splitlines()[0]
+        cur.execute("SELECT @@VERSION, DB_NAME()")
+        row = cur.fetchone()
+        ver = row[0].splitlines()[0]
+        database = row[1]
         c.close()
         # Reset shared connection để cập nhật cấu hình mới nếu có
-        global _SHARED_RAW_CONN
         with _SHARED_CONN_LOCK:
             if _SHARED_RAW_CONN is not None:
                 try:
@@ -407,9 +456,35 @@ def test_sqlserver_connection(custom_settings: dict[str, str] | None = None) -> 
                 except Exception:
                     pass
                 _SHARED_RAW_CONN = None
-        return {"ok": True, "message": f"Kết nối SQL Server thành công: {ver}"}
+            _SQLSERVER_RETRY_AFTER = 0.0
+            _SQLSERVER_FAILED_CONN_STR = ""
+        state = "đã được tạo và kết nối" if created else "đã tồn tại và kết nối"
+        return {
+            "ok": True,
+            "message": f"SQL Server kết nối thành công; database '{database}' {state}. {ver}",
+        }
     except Exception as exc:
-        return {"ok": False, "message": f"Không thể kết nối SQL Server: {exc}"}
+        server = (cfg.get("DB_SERVER") or cfg.get("SQLSERVER_HOST") or "localhost").strip()
+        port = (cfg.get("SQLSERVER_PORT") or "1433").strip()
+        detail = str(exc)
+        if "create database permission denied" in detail.lower():
+            return {
+                "ok": False,
+                "message": (
+                    f"Đã tới được SQL Server '{server}', nhưng tài khoản Windows hiện tại không có quyền tạo database. "
+                    "Cần cấp quyền dbcreator/CREATE DATABASE hoặc nhờ quản trị viên tạo database trước. "
+                    f"Chi tiết: {detail}"
+                ),
+            }
+        return {
+            "ok": False,
+            "message": (
+                f"Không kết nối được SQL Server '{server}' (cổng {port}). "
+                "Hãy kiểm tra tên máy/instance, dịch vụ SQL Server đang chạy, TCP/IP và firewall. "
+                "Nếu dùng SQL Express, nhập dạng TEN-MAY\\SQLEXPRESS. "
+                f"Chi tiết ODBC: {detail}"
+            ),
+        }
 
 
 def initialize():
@@ -1162,6 +1237,96 @@ def create_user_account(
         )
         row = c.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
         return dict(row)
+
+
+def update_user_profile(
+    user_id: int,
+    full_name: str,
+    avatar_url: str | None = None,
+    email: str | None = None,
+) -> dict:
+    """Update profile fields and keep email-keyed account history in sync."""
+    initialize()
+    clean_name = (full_name or "").strip()
+    if not 2 <= len(clean_name) <= 100:
+        raise ValueError("Tên hiển thị cần từ 2 đến 100 ký tự.")
+    clean_email = (email or "").strip().lower() if email is not None else None
+    if clean_email is not None:
+        local_part, separator, domain = clean_email.partition("@")
+        if (
+            not separator
+            or not local_part
+            or "." not in domain
+            or any(char.isspace() for char in clean_email)
+            or len(clean_email) > 254
+        ):
+            raise ValueError("Vui lòng nhập địa chỉ email hợp lệ.")
+
+    with conn() as c:
+        row = c.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
+        if not row:
+            raise ValueError("Không tìm thấy tài khoản.")
+        old_email = str(row["email"] or "").strip().lower()
+        next_email = clean_email if clean_email is not None else old_email
+        if next_email != old_email:
+            if row["auth_provider"] == "google" and not row["google_sub"]:
+                raise ValueError(
+                    "Tài khoản Google chưa lưu mã định danh liên kết, nên chưa thể đổi email an toàn."
+                )
+            duplicate = c.execute(
+                "SELECT id FROM users WHERE LOWER(email)=LOWER(?) AND id<>?",
+                (next_email, int(user_id)),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("Email này đã được một tài khoản khác sử dụng.")
+        next_avatar = row["avatar_url"] if avatar_url is None else str(avatar_url).strip()
+        c.execute(
+            "UPDATE users SET full_name=?, email=?, avatar_url=? WHERE id=?",
+            (clean_name, next_email, next_avatar, int(user_id)),
+        )
+        if next_email != old_email:
+            c.execute(
+                "UPDATE inspections SET user_email=? WHERE user_id=? OR LOWER(user_email)=LOWER(?)",
+                (next_email, int(user_id), old_email),
+            )
+            c.execute(
+                "UPDATE ChatMessages SET user_email=? WHERE user_id=? OR LOWER(user_email)=LOWER(?)",
+                (next_email, int(user_id), old_email),
+            )
+        updated = c.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
+    return dict(updated)
+
+
+def change_user_password(
+    user_id: int,
+    current_password: str,
+    new_password: str,
+) -> None:
+    """Verify the current password and replace it for a local account."""
+    initialize()
+    current = (current_password or "").strip()
+    replacement = new_password or ""
+    if replacement != replacement.strip():
+        raise ValueError("Mật khẩu mới không được bắt đầu hoặc kết thúc bằng khoảng trắng.")
+    if len(replacement) < 8:
+        raise ValueError("Mật khẩu mới cần có ít nhất 8 ký tự.")
+    if len(replacement) > 128:
+        raise ValueError("Mật khẩu mới không được dài quá 128 ký tự.")
+    if current == replacement:
+        raise ValueError("Mật khẩu mới phải khác mật khẩu hiện tại.")
+
+    with conn() as c:
+        row = c.execute("SELECT password_hash FROM users WHERE id=?", (int(user_id),)).fetchone()
+        if not row:
+            raise ValueError("Không tìm thấy tài khoản.")
+        if not row["password_hash"]:
+            raise ValueError("Tài khoản này dùng đăng nhập Google và chưa có mật khẩu riêng.")
+        if _hash_password(current) != row["password_hash"]:
+            raise ValueError("Mật khẩu hiện tại chưa chính xác.")
+        c.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (_hash_password(replacement), int(user_id)),
+        )
 
 
 def toggle_user_lock(user_id: int) -> bool:

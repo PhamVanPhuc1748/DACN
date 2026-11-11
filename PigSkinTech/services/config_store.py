@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 
 try:
@@ -15,6 +16,19 @@ BACKEND_DIR = REPO_ROOT / "backend"
 ENV_FILE = APP_DIR / ".env"
 ROOT_ENV_FILE = REPO_ROOT / ".env"
 BACKEND_ENV_FILE = BACKEND_DIR / ".env"
+DATABASE_CONFIG_FILE = APP_DIR / "config" / "database.json"
+
+DATABASE_CONFIG_KEYS = (
+    "DATABASE_ENGINE",
+    "DB_SERVER",
+    "DB_NAME",
+    "SQLSERVER_HOST",
+    "SQLSERVER_PORT",
+    "SQLSERVER_DATABASE",
+    "SQLSERVER_DRIVER",
+    "Trusted_Connection",
+    "SQLSERVER_TRUSTED_CONNECTION",
+)
 
 DEFAULTS = {
     "DB_SERVER": "localhost",
@@ -77,6 +91,17 @@ def read_settings() -> dict[str, str]:
         env_val = os.environ.get(k)
         if env_val is not None and env_val != "":
             values[k] = env_val
+
+    # The admin page stores machine-specific SQL connection settings separately
+    # from API credentials in .env. JSON takes precedence for these DB fields.
+    try:
+        db_config = json.loads(DATABASE_CONFIG_FILE.read_text(encoding="utf-8"))
+        if isinstance(db_config, dict):
+            for key in DATABASE_CONFIG_KEYS:
+                if key in db_config and db_config[key] is not None:
+                    values[key] = str(db_config[key])
+    except (OSError, json.JSONDecodeError):
+        pass
 
     # Synchronize aliases between DB_* and SQLSERVER_*
     if values.get("DB_SERVER") and values.get("SQLSERVER_HOST") == DEFAULTS["SQLSERVER_HOST"]:
@@ -147,6 +172,16 @@ def save_settings(new_values: dict[str, str]) -> Path:
         os.environ[key] = val
 
     content = "\n".join(lines) + "\n"
+
+    DATABASE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    db_config = {key: settings[key] for key in DATABASE_CONFIG_KEYS if key in settings}
+    temp_config = DATABASE_CONFIG_FILE.with_suffix(".json.tmp")
+    temp_config.write_text(
+        json.dumps(db_config, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temp_config.replace(DATABASE_CONFIG_FILE)
+
     for target in (ENV_FILE, ROOT_ENV_FILE, BACKEND_ENV_FILE):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")

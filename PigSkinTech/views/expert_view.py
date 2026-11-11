@@ -191,7 +191,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
         agreed_badge = f"Đồng thuận AI {agreed_total}/{reviewed_total}" if reviewed_total else "Chưa duyệt"
 
         header_pills = [
-            header_stat_pill("Chờ thẩm định", str(pending_count), ft.Icons.PENDING_ACTIONS_ROUNDED, "#D97706", t["AMBER_SOFT"], "Cần duyệt", page=page),
+            header_stat_pill("Chờ thẩm định", str(pending_count), ft.Icons.PENDING_ACTIONS_ROUNDED, "#D97706", t["AMBER_SOFT"], "", page=page),
             header_stat_pill("Độ tin cậy thấp", str(low_conf_count), ft.Icons.WARNING_AMBER_ROUNDED, "#DC2626", t["RED_SOFT"], "Ưu tiên", page=page),
             header_stat_pill("Đã thẩm định", str(reviewed_total), ft.Icons.VERIFIED_ROUNDED, "#059669", t["EMERALD_SOFT"], agreed_badge, page=page),
         ]

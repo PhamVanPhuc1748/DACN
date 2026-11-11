@@ -301,16 +301,22 @@ def header_stat_pill(
                             alignment=ft.alignment.center,
                             content=ft.Icon(icon, color=accent, size=22),
                         ),
-                        ft.Container(
-                            bgcolor=box_bg,
-                            padding=ft.padding.symmetric(horizontal=10, vertical=4),
-                            border_radius=12,
-                            content=ft.Text(
-                                str(badge_text),
-                                size=12,
-                                color=accent,
-                                weight=ft.FontWeight.W_600,
-                            ),
+                        *(
+                            [
+                                ft.Container(
+                                    bgcolor=box_bg,
+                                    padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                                    border_radius=12,
+                                    content=ft.Text(
+                                        str(badge_text),
+                                        size=12,
+                                        color=accent,
+                                        weight=ft.FontWeight.W_600,
+                                    ),
+                                )
+                            ]
+                            if badge_text
+                            else []
                         ),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -500,6 +506,7 @@ def save_session_user(page: ft.Page, user: dict):
         "avatar_url": user.get("avatar_url", ""),
         "role": user["role"],
         "auth_provider": user.get("auth_provider", "google"),
+        "google_sub": user.get("google_sub", ""),
     }
     for k, v in payload.items():
         session_set(page, k, v)
@@ -523,6 +530,7 @@ def get_session_user(page: ft.Page) -> dict | None:
             "avatar_url": row["avatar_url"],
             "role": row["role"],
             "auth_provider": row["auth_provider"],
+            "google_sub": row["google_sub"],
         }
         session_set(page, "current_user", updated)
         session_set(page, "role", row["role"])
@@ -655,7 +663,12 @@ def authenticate_google(
     if not clean_email or "@" not in clean_email:
         raise ValueError("Vui lòng nhập địa chỉ email Google hợp lệ (ví dụ: tenban@gmail.com).")
     with conn() as c:
-        row = c.execute("SELECT * FROM users WHERE LOWER(email)=?", (clean_email,)).fetchone()
+        clean_sub = (google_sub or "").strip()
+        row = None
+        if clean_sub:
+            row = c.execute("SELECT * FROM users WHERE google_sub=?", (clean_sub,)).fetchone()
+        if not row:
+            row = c.execute("SELECT * FROM users WHERE LOWER(email)=?", (clean_email,)).fetchone()
         if not row:
             local_part = clean_email.split("@")[0]
             derived_name = (full_name or "").strip() or local_part.replace(".", " ").replace("_", " ").title()
@@ -672,15 +685,20 @@ def authenticate_google(
                     _hash_password("123456"),
                     derived_name,
                     derived_avatar,
-                    (google_sub or "").strip(),
+                    clean_sub,
                     now_str,
                 ),
             )
             row = c.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
         else:
             new_name = (full_name or "").strip() or row["full_name"]
-            new_avatar = (avatar_url or "").strip() or row["avatar_url"]
-            new_sub = (google_sub or "").strip() or row.get("google_sub", "")
+            stored_avatar = str(row["avatar_url"] or "").replace("\\", "/")
+            new_avatar = (
+                row["avatar_url"]
+                if stored_avatar.startswith("profile_avatars/")
+                else ((avatar_url or "").strip() or row["avatar_url"])
+            )
+            new_sub = clean_sub or row.get("google_sub", "")
             c.execute(
                 """UPDATE users
                 SET full_name=?, avatar_url=?, google_sub=?, auth_provider='google'
@@ -1586,6 +1604,15 @@ def build_role_shell(
     page.bgcolor = t["BG"]
     page.appbar = None
 
+    # Profile and account security are shared across all three role workspaces.
+    from views.profile_view import build_profile_view
+
+    destinations = [
+        *destinations,
+        ("Hồ sơ cá nhân", ft.Icons.ACCOUNT_CIRCLE_OUTLINED, ft.Icons.ACCOUNT_CIRCLE_ROUNDED),
+    ]
+    tab_builders = [*tab_builders, lambda: build_profile_view(page, user)]
+
     route_key = f"active_tab_{getattr(page, 'route', '') or title}"
     saved_idx = session_get(page, route_key)
     start_index = saved_idx if isinstance(saved_idx, int) and 0 <= saved_idx < len(tab_builders) else initial_index
@@ -1769,11 +1796,28 @@ def build_sidebar(
     role_color = ROLE_COLORS.get(role, "#059669")
     initials = "".join(part[0].upper() for part in (user.get("full_name") or "U").split()[:2]) or "U"
 
-    avatar = ft.CircleAvatar(
-        bgcolor=role_color,
-        radius=18,
-        content=ft.Text(initials, color="#FFFFFF", size=12.5, weight=ft.FontWeight.BOLD),
-    )
+    avatar_source = (user.get("avatar_url") or "").strip()
+    if avatar_source and not avatar_source.startswith(("https://", "http://")):
+        local_avatar = Path(avatar_source)
+        if not local_avatar.is_absolute():
+            local_avatar = Path(__file__).resolve().parent.parent / local_avatar
+        avatar_source = str(local_avatar.resolve()) if local_avatar.is_file() else ""
+
+    if avatar_source and Path(avatar_source).is_file():
+        avatar = ft.Container(
+            width=36,
+            height=36,
+            border_radius=18,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            content=make_image(Path(avatar_source), width=36, height=36, border_radius=18),
+        )
+    else:
+        avatar = ft.CircleAvatar(
+            bgcolor=role_color,
+            radius=18,
+            foreground_image_src=avatar_source or None,
+            content=ft.Text(initials, color="#FFFFFF", size=12.5, weight=ft.FontWeight.BOLD),
+        )
 
     role_badge_pill = ft.Container(
         padding=ft.padding.symmetric(horizontal=9, vertical=3),

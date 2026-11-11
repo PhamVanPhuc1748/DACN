@@ -1,5 +1,6 @@
 """Authentication & Google OAuth Login View (/login) — Clean Pig Background & Minimalist SaaS Login Card."""
 import asyncio
+import logging
 from pathlib import Path
 
 import flet as ft
@@ -100,16 +101,58 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         target_route = role_home_route(session_user["role"])
         page.go(target_route)
 
+    login_state = {"running": False}
+    login_btn_label = ft.Text(
+        "Đăng nhập  →",
+        size=16,
+        weight=ft.FontWeight.BOLD,
+        color="#FFFFFF",
+    )
+
+    async def _run_local_login():
+        if login_state["running"]:
+            return
+        login_state["running"] = True
+        error_text.visible = False
+        login_btn_label.value = "Đang đăng nhập..."
+        page.update()
+        try:
+            user_record = await asyncio.to_thread(
+                authenticate_local, email_input.value, password_input.value
+            )
+            complete_login(user_record)
+        except ValueError as err:
+            error_text.value = str(err)
+            error_text.visible = True
+            _trigger_shake()
+        except Exception as err:
+            logging.exception("Local login failed")
+            error_text.value = f"Không thể đăng nhập do lỗi hệ thống: {err}"
+            error_text.visible = True
+        finally:
+            login_state["running"] = False
+            login_btn_label.value = "Đăng nhập  →"
+            page.update()
+
     def handle_local_login(e=None):
         try:
-            error_text.visible = False
-            user_record = authenticate_local(email_input.value, password_input.value)
-            complete_login(user_record)
+            if hasattr(page, "run_task"):
+                page.run_task(_run_local_login)
+            else:
+                # Compatibility fallback for older Flet versions.
+                error_text.visible = False
+                user_record = authenticate_local(email_input.value, password_input.value)
+                complete_login(user_record)
         except ValueError as err:
             error_text.value = str(err)
             error_text.visible = True
             page.update()
             _trigger_shake()
+        except Exception as err:
+            logging.exception("Could not start local login")
+            error_text.value = f"Không thể đăng nhập do lỗi hệ thống: {err}"
+            error_text.visible = True
+            page.update()
 
     # (3) Email Input (filled, #F8FAFC, prefix_icon MAIL_OUTLINE_ROUNDED)
     email_input = ft.TextField(
@@ -165,8 +208,14 @@ def build_auth_view(page: ft.Page) -> ft.Control:
             email = oauth_user.get("email") or ""
             name = oauth_user.get("name") or ""
             picture = oauth_user.get("picture") or ""
+            google_sub = oauth_user.get("sub") or oauth_user.get("id") or ""
             try:
-                user_record = authenticate_google(email, full_name=name, avatar_url=picture)
+                user_record = authenticate_google(
+                    email,
+                    full_name=name,
+                    avatar_url=picture,
+                    google_sub=google_sub,
+                )
                 complete_login(user_record)
             except ValueError as err:
                 error_text.value = str(err)
@@ -482,12 +531,7 @@ def build_auth_view(page: ft.Page) -> ft.Control:
             color=ft.Colors.with_opacity(0.24, "#059669"),
             offset=ft.Offset(0, 4),
         ),
-        content=ft.Text(
-            "Đăng nhập  →",
-            size=16,
-            weight=ft.FontWeight.BOLD,
-            color="#FFFFFF",
-        ),
+        content=login_btn_label,
     )
 
     # (6) Centered "Hoặc" divider

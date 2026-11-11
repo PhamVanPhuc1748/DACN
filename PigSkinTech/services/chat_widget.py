@@ -63,6 +63,7 @@ def build_chat_panel(
     messages_list = ft.Column(
         spacing=10,
         scroll=ft.ScrollMode.AUTO,
+        auto_scroll=True,
         expand=True,
     )
     context_banner_box = ft.Container()
@@ -212,6 +213,19 @@ def build_chat_panel(
                     )
                 )
 
+        async def scroll_after_render() -> None:
+            # Wait for the refreshed bubbles to participate in layout before
+            # moving the inner conversation viewport to its newest message.
+            await asyncio.sleep(0.06)
+            try:
+                if getattr(messages_list, "page", None) is not None:
+                    messages_list.scroll_to(delta=1_000_000, duration=180)
+            except (AttributeError, RuntimeError):
+                pass
+
+        if hasattr(page, "run_task"):
+            page.run_task(scroll_after_render)
+
     register_chat_refresher(page, reload_history)
 
     async def _send_async(prefill_text: str | None = None) -> None:
@@ -334,7 +348,7 @@ def build_chat_panel(
                 context_banner_box,
                 chips_row,
                 ft.Container(
-                    height=295 if compact else 410,
+                    height=210 if compact else 410,
                     bgcolor=pal["BG_MAIN"],
                     border=ft.border.all(1, pal["BORDER_LIGHT"]),
                     border_radius=12,

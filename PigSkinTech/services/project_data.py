@@ -178,17 +178,24 @@ def _run_candidates():
 
 
 def list_model_runs() -> list[dict]:
-    """Return all available training runs with best_model.pt checkpoints."""
+    """Return unique available training runs with best_model.pt checkpoints."""
     active = active_run()
     active_ckpt = str(active["checkpoint"].resolve()) if active else ""
     items = []
+    seen_checkpoints = set()
     for folder in _run_candidates():
         ckpt = folder / "best_model.pt"
         try:
+            fingerprint = hashlib.sha256(ckpt.read_bytes()).hexdigest()
             cfg = json.loads((folder / "config.json").read_text(encoding="utf-8"))
             metrics = json.loads((folder / "final_metrics.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            cfg, metrics = {}, {}
+            continue
+        if fingerprint in seen_checkpoints:
+            if str(ckpt.resolve()) != active_ckpt:
+                continue
+            items = [item for item in items if item.get("fingerprint") != fingerprint]
+        seen_checkpoints.add(fingerprint)
         model_code = cfg.get("model", "mobilenet_v2")
         display_arch = APP_MODEL_NAMES.get(model_code, model_code)
         items.append({
@@ -199,6 +206,7 @@ def list_model_runs() -> list[dict]:
             "model": model_code,
             "model_label": display_arch,
             "display_name": f"{display_arch} ({folder.name})",
+            "fingerprint": fingerprint,
             "classes_count": len(cfg.get("classes", [])),
             "val_f1": metrics.get("best_val_macro_f1"),
             "test_acc": metrics.get("test_metrics", {}).get("accuracy"),
@@ -240,7 +248,8 @@ def available_model_runs() -> list[dict]:
     return sorted(runs, key=lambda item: (order.get(item["model"], 99), item["run_name"]))
 
 
-def set_active_checkpoint(checkpoint_path: str) -> dict:
+def read_checkpoint_details(checkpoint_path: str | Path) -> dict:
+    """Read model architecture, class list, training settings, and metrics beside a checkpoint."""
     p = Path(checkpoint_path)
     if p.is_dir():
         p = p / "best_model.pt"
@@ -252,9 +261,52 @@ def set_active_checkpoint(checkpoint_path: str) -> dict:
                 break
     if not p.is_file():
         raise FileNotFoundError(f"Không tìm thấy trọng số mô hình tại: {p}")
+    config_path = p.parent / "config.json"
+    metrics_path = p.parent / "final_metrics.json"
+    if not config_path.is_file() or not metrics_path.is_file():
+        raise ValueError("Run model cần có best_model.pt, config.json và final_metrics.json.")
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("Không đọc được config.json hoặc final_metrics.json của model đã chọn.") from exc
+    if not isinstance(config, dict) or not isinstance(metrics, dict):
+        raise ValueError("Thông tin model trong các file cấu hình không đúng định dạng.")
+    classes = config.get("classes")
+    if not isinstance(classes, list) or not classes or not all(isinstance(x, str) for x in classes) or config.get("model") not in {
+        "mobilenet_v2", "mobilenet_v3_large", "efficientnet_b0"
+    }:
+        raise ValueError("Model đã chọn thiếu danh sách lớp hoặc kiến trúc chưa được hỗ trợ.")
+    test_metrics = metrics.get("test_metrics", {})
+    if not isinstance(test_metrics, dict):
+        test_metrics = {}
+    return {
+        "checkpoint": p.resolve(),
+        "run_name": p.parent.name,
+        "model": config["model"],
+        "classes": classes,
+        "image_size": config.get("image_size"),
+        "epochs": config.get("epochs"),
+        "batch_size": config.get("batch_size"),
+        "best_epoch": metrics.get("best_epoch"),
+        "val_macro_f1": metrics.get("best_val_macro_f1"),
+        "test_accuracy": test_metrics.get("accuracy"),
+        "test_macro_f1": test_metrics.get("macro_f1"),
+        "config": config,
+        "metrics": metrics,
+    }
+
+
+def set_active_checkpoint(checkpoint_path: str) -> dict:
+    details = read_checkpoint_details(checkpoint_path)
+    p = details["checkpoint"]
     ACTIVE_MODEL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     ACTIVE_MODEL_STATE_PATH.write_text(
-        json.dumps({"checkpoint": str(p.resolve())}, ensure_ascii=False, indent=2),
+        json.dumps(
+            {"checkpoint": str(p), "run_name": p.parent.name},
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
     return active_run() or {}

@@ -34,3 +34,5 @@ PigSkinTech/pigskin_history.db-shm
 PigSkinTech/pigskin_history.db-wal
 PigSkinTech/case_images/heatmap_cache/
 PigSkinTech/exports/
+PigSkinTech/profile_avatars/
+PigSkinTech/config/database.json

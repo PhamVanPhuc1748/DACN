@@ -5,17 +5,18 @@ from pathlib import Path
 import flet as ft
 
 from services.auth_service import (
+    GOOGLE_REDIRECT_URI,
     ROLE_COLORS,
     ROLE_LABELS,
     authenticate_google,
     authenticate_local,
-    build_google_oauth_provider,
     close_dialog,
     ensure_flet_compat,
-    get_mock_google_accounts,
-    is_real_oauth_configured,
+    get_google_oauth_config,
     open_dialog,
     role_home_route,
+    run_google_oauth_desktop_flow,
+    save_google_oauth_config,
     save_session_user,
     show_snack,
     theme_tokens,
@@ -174,122 +175,121 @@ def build_auth_view(page: ft.Page) -> ft.Control:
 
     page.on_login = on_oauth_login
 
-    def open_mock_google_chooser():
-        accounts = get_mock_google_accounts()
-        custom_email_field = ft.TextField(
-            label="Nhập email Google khác (Tự động tạo tài khoản Role: User)",
-            hint_text="vidu.trangtrai@gmail.com",
-            prefix_icon=ft.Icons.ALTERNATE_EMAIL_ROUNDED,
+    google_btn_label = ft.Text(
+        "Tiếp tục với Google",
+        size=14.5,
+        weight=ft.FontWeight.W_600,
+        color="#1E293B",
+    )
+
+    def open_google_oauth_config_dialog():
+        cfg = get_google_oauth_config()
+        cid_input = ft.TextField(
+            label="GOOGLE_CLIENT_ID",
+            value=cfg.get("client_id", ""),
+            hint_text="xxxx-yyyy.apps.googleusercontent.com",
+            prefix_icon=ft.Icons.KEY_ROUNDED,
             dense=True,
         )
-        dialog_error = ft.Text("", size=12, color="#DC2626", visible=False)
-        chooser_dialog = ft.AlertDialog(modal=True)
+        csec_input = ft.TextField(
+            label="GOOGLE_CLIENT_SECRET",
+            value=cfg.get("client_secret", ""),
+            hint_text="GOCSPX-...",
+            password=True,
+            can_reveal_password=True,
+            prefix_icon=ft.Icons.LOCK_PERSON_ROUNDED,
+            dense=True,
+        )
+        dlg_err = ft.Text("", size=12, color="#DC2626", visible=False)
+        cfg_dialog = ft.AlertDialog(modal=True)
 
-        def pick_account(email: str, full_name: str = "", avatar_url: str = ""):
-            try:
-                user_record = authenticate_google(email, full_name=full_name, avatar_url=avatar_url)
-                close_dialog(page, chooser_dialog)
-                complete_login(user_record)
-            except ValueError as err:
-                dialog_error.value = str(err)
-                dialog_error.visible = True
+        def save_and_start_oauth(e=None):
+            cid = (cid_input.value or "").strip()
+            csec = (csec_input.value or "").strip()
+            if not cid or not csec:
+                dlg_err.value = "Vui lòng nhập đầy đủ GOOGLE_CLIENT_ID và GOOGLE_CLIENT_SECRET."
+                dlg_err.visible = True
                 page.update()
+                return
+            save_google_oauth_config(cid, csec)
+            close_dialog(page, cfg_dialog)
+            show_snack(page, "Đã lưu cấu hình Google OAuth 2.0 vào .env! Đang mở trình duyệt...", "#059669")
+            handle_google_button(None)
 
-        account_tiles = []
-        for acc in accounts:
-            role_code = acc.get("role", "user")
-            badge_color = ROLE_COLORS.get(role_code, "#059669")
-            account_tiles.append(
-                ft.Container(
-                    padding=12,
-                    border=ft.border.all(1, t["BORDER"]),
-                    border_radius=12,
-                    bgcolor=t["SUB_SURFACE"],
-                    ink=True,
-                    on_click=lambda e, em=acc["email"], fn=acc["full_name"], av=acc.get("avatar_url", ""): pick_account(em, fn, av),
-                    content=ft.Row(
-                        [
-                            ft.CircleAvatar(
-                                bgcolor=badge_color,
-                                radius=18,
-                                content=ft.Text(
-                                    (acc["full_name"] or "G")[0].upper(),
-                                    color="#FFFFFF",
-                                    weight=ft.FontWeight.BOLD,
-                                ),
-                            ),
-                            ft.Column(
-                                [
-                                    ft.Text(acc["full_name"], size=13, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
-                                    ft.Text(acc["email"], size=12, color=t["MUTED"]),
-                                ],
-                                spacing=2,
-                                expand=True,
-                            ),
-                            ft.Container(
-                                bgcolor=badge_color,
-                                padding=ft.padding.symmetric(horizontal=10, vertical=4),
-                                border_radius=12,
-                                content=ft.Text(
-                                    ROLE_LABELS.get(role_code, role_code),
-                                    size=10,
-                                    color="#FFFFFF",
-                                    weight=ft.FontWeight.BOLD,
-                                ),
-                            ),
-                        ],
-                        spacing=10,
-                    ),
-                )
-            )
-
-        chooser_dialog.title = ft.Row(
+        cfg_dialog.title = ft.Row(
             [
                 _google_logo_badge(),
                 ft.Column(
                     [
-                        ft.Text("Chọn tài khoản để tiếp tục tới PigSkinTech", size=15, weight=ft.FontWeight.BOLD),
-                        ft.Text("Google OAuth 2.0 (Chế độ Mock Fallback khi chưa đặt GOOGLE_CLIENT_ID)", size=11, color=t["MUTED"]),
+                        ft.Text("Cấu hình Google OAuth 2.0 Thật", size=15, weight=ft.FontWeight.BOLD),
+                        ft.Text(f"Callback Server: {GOOGLE_REDIRECT_URI}", size=11, color=t["MUTED"]),
                     ],
                     spacing=1,
                 ),
             ],
             spacing=10,
         )
-        chooser_dialog.content = ft.Container(
-            width=490,
+        cfg_dialog.content = ft.Container(
+            width=480,
             content=ft.Column(
                 [
-                    ft.Text("Tài khoản Google mẫu theo 3 vai trò (RBAC):", size=12, weight=ft.FontWeight.W_600, color=t["TEXT"]),
-                    *account_tiles,
-                    ft.Divider(height=12, color=t["BORDER"]),
-                    ft.Text("Hoặc đăng nhập bằng tài khoản Google tùy chỉnh:", size=12, weight=ft.FontWeight.W_600, color=t["TEXT"]),
-                    custom_email_field,
-                    dialog_error,
+                    ft.Text(
+                        f"Nhập Client ID & Client Secret từ Google Cloud Console (Authorized redirect URI: {GOOGLE_REDIRECT_URI}):",
+                        size=12,
+                        color=t["TEXT"],
+                    ),
+                    cid_input,
+                    csec_input,
+                    dlg_err,
                 ],
                 spacing=10,
                 tight=True,
             ),
         )
-        chooser_dialog.actions = [
-            ft.TextButton("Hủy", on_click=lambda e: close_dialog(page, chooser_dialog)),
+        cfg_dialog.actions = [
+            ft.TextButton("Hủy", on_click=lambda e: close_dialog(page, cfg_dialog)),
             ft.FilledButton(
-                "Tiếp tục với Email tùy chỉnh",
-                icon=ft.Icons.LOGIN_ROUNDED,
-                on_click=lambda e: pick_account(custom_email_field.value),
+                "Lưu .env & Xác thực Google",
+                icon=ft.Icons.OPEN_IN_BROWSER_ROUNDED,
+                on_click=save_and_start_oauth,
             ),
         ]
-        open_dialog(page, chooser_dialog)
+        open_dialog(page, cfg_dialog)
+
+    oauth_busy = {"running": False}
+
+    async def _run_google_oauth_task():
+        if oauth_busy["running"]:
+            return
+        oauth_busy["running"] = True
+        error_text.visible = False
+        google_btn_label.value = "Đang chờ xác thực tại 127.0.0.1:8765/callback..."
+        page.update()
+
+        res = await asyncio.to_thread(run_google_oauth_desktop_flow, 120)
+
+        oauth_busy["running"] = False
+        google_btn_label.value = "Tiếp tục với Google"
+        page.update()
+
+        if res.get("needs_credentials"):
+            open_google_oauth_config_dialog()
+            return
+
+        if not res.get("ok"):
+            error_text.value = res.get("error") or "Đăng nhập Google OAuth 2.0 thất bại."
+            error_text.visible = True
+            page.update()
+            _trigger_shake()
+            return
+
+        user_record = res["user"]
+        show_snack(page, f"Đã xác thực Google OAuth 2.0: {user_record['full_name']} ({user_record['email']})", "#059669")
+        complete_login(user_record)
 
     def handle_google_button(e):
-        provider = build_google_oauth_provider()
-        if is_real_oauth_configured():
-            try:
-                page.login(provider)
-                return
-            except Exception:
-                pass
-        open_mock_google_chooser()
+        if hasattr(page, "run_task"):
+            page.run_task(_run_google_oauth_task)
 
     def quick_login_role(email_val: str):
         email_input.value = email_val
@@ -519,12 +519,7 @@ def build_auth_view(page: ft.Page) -> ft.Control:
         content=ft.Row(
             [
                 _google_logo_badge(),
-                ft.Text(
-                    "Tiếp tục với Google",
-                    size=14.5,
-                    weight=ft.FontWeight.W_600,
-                    color="#1E293B",
-                ),
+                google_btn_label,
             ],
             alignment=ft.MainAxisAlignment.CENTER,
             spacing=10,

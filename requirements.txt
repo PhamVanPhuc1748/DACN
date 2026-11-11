@@ -1,6 +1,7 @@
-fastapi
-uvicorn[standard]
-python-multipart
-ultralytics
-streamlit
-opencv-python-headless
+flet>=0.28.0
+Pillow>=10.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+pyodbc>=5.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0

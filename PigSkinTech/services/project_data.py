@@ -11,6 +11,12 @@ CODE_ROOT = APP_ROOT.parent.parent
 CLASSES_JSON_PATH = APP_ROOT / "models" / "classes.json"
 ACTIVE_MODEL_STATE_PATH = APP_ROOT / "models" / "active_model.json"
 
+APP_MODEL_NAMES = {
+    "mobilenet_v2": "MobileNetV2",
+    "efficientnet_b0": "EfficientNet-B0",
+    "mobilenet_v3_large": "MobileNetV3-Large",
+}
+
 CLASS_NAMES_VI = {
     "Healthy": "Khỏe mạnh",
     "Infected_Bacterial_Erysipelas": "Bệnh đóng dấu lợn",
@@ -50,6 +56,12 @@ def load_classes_config() -> dict:
 def save_classes_config(data: dict) -> None:
     CLASSES_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
     CLASSES_JSON_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        from services.store import sync_disease_catalog_to_sql
+
+        sync_disease_catalog_to_sql(data)
+    except Exception:
+        pass
 
 
 def get_class_info(name: str) -> dict:
@@ -177,23 +189,67 @@ def list_model_runs() -> list[dict]:
             metrics = json.loads((folder / "final_metrics.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             cfg, metrics = {}, {}
+        model_code = cfg.get("model", "mobilenet_v2")
+        display_arch = APP_MODEL_NAMES.get(model_code, model_code)
         items.append({
             "name": folder.name,
+            "run_name": folder.name,
             "directory": str(folder),
             "checkpoint": str(ckpt),
-            "model": cfg.get("model", "mobilenet_v2"),
+            "model": model_code,
+            "model_label": display_arch,
+            "display_name": f"{display_arch} ({folder.name})",
             "classes_count": len(cfg.get("classes", [])),
             "val_f1": metrics.get("best_val_macro_f1"),
             "test_acc": metrics.get("test_metrics", {}).get("accuracy"),
+            "test_macro_f1": metrics.get("test_metrics", {}).get("macro_f1"),
+            "best_epoch": metrics.get("best_epoch"),
             "is_active": str(ckpt.resolve()) == active_ckpt,
         })
     return items
+
+
+def available_model_runs() -> list[dict]:
+    """Return available runs sorted with MobileNetV2 and EfficientNet-B0 first (merged from DACN-devP)."""
+    runs = []
+    seen_models = set()
+    for folder in _run_candidates():
+        try:
+            config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+            metrics = json.loads((folder / "final_metrics.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        model_name = str(config.get("model", "")).strip()
+        if model_name not in APP_MODEL_NAMES or model_name in seen_models:
+            continue
+        seen_models.add(model_name)
+        runs.append({
+            "run_name": folder.name,
+            "name": folder.name,
+            "model": model_name,
+            "model_label": APP_MODEL_NAMES[model_name],
+            "directory": folder,
+            "checkpoint": folder / "best_model.pt",
+            "config_path": folder / "config.json",
+            "metrics_path": folder / "final_metrics.json",
+            "history_path": folder / "history.csv",
+            "config": config,
+            "metrics": metrics,
+        })
+    order = {"mobilenet_v2": 0, "efficientnet_b0": 1, "mobilenet_v3_large": 2}
+    return sorted(runs, key=lambda item: (order.get(item["model"], 99), item["run_name"]))
 
 
 def set_active_checkpoint(checkpoint_path: str) -> dict:
     p = Path(checkpoint_path)
     if p.is_dir():
         p = p / "best_model.pt"
+    if not p.is_file():
+        # Try matching by run_name or model code in _run_candidates
+        for cand in _run_candidates():
+            if cand.name.lower() == str(checkpoint_path).strip().lower():
+                p = cand / "best_model.pt"
+                break
     if not p.is_file():
         raise FileNotFoundError(f"Không tìm thấy trọng số mô hình tại: {p}")
     ACTIVE_MODEL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -235,13 +291,50 @@ def _read_manifest(path):
     }
 
 
-def active_run():
+def _enrich_metrics(metrics: dict) -> dict:
+    """Ensure metrics dict exposes both raw test_metrics.per_class and normalized per_class_f1 / accuracy from real evaluation."""
+    if not isinstance(metrics, dict):
+        return {}
+    out = dict(metrics)
+    test_m = out.get("test_metrics") or {}
+    per_cls = test_m.get("per_class") or {}
+    if per_cls and "per_class_f1" not in out:
+        out["per_class_f1"] = {
+            cls_code: float(vals.get("f1", 0.0)) if isinstance(vals, dict) else float(vals)
+            for cls_code, vals in per_cls.items()
+        }
+    if "accuracy" not in out and "accuracy" in test_m:
+        out["accuracy"] = float(test_m["accuracy"])
+    if "macro_f1" not in out:
+        out["macro_f1"] = float(test_m.get("macro_f1") or out.get("best_val_macro_f1") or 0.0)
+    return out
+
+
+def active_run(run_name: str | None = None):
     """Return the selected or newest complete local run and counts read from its manifest."""
     candidates = _run_candidates()
     if not candidates:
         return None
     folder = None
-    if ACTIVE_MODEL_STATE_PATH.is_file():
+    if run_name:
+        target = str(run_name).strip().lower()
+        for item in candidates:
+            if item.name.lower() == target:
+                folder = item
+                break
+        if folder is None:
+            for item in candidates:
+                try:
+                    cfg = json.loads((item / "config.json").read_text(encoding="utf-8"))
+                    m_code = str(cfg.get("model", "")).lower()
+                    m_lbl = APP_MODEL_NAMES.get(m_code, m_code).lower()
+                    if target in (m_code, m_lbl):
+                        folder = item
+                        break
+                except Exception:
+                    pass
+
+    if folder is None and ACTIVE_MODEL_STATE_PATH.is_file():
         try:
             saved = json.loads(ACTIVE_MODEL_STATE_PATH.read_text(encoding="utf-8"))
             ckpt_path = Path(saved.get("checkpoint", ""))
@@ -249,11 +342,12 @@ def active_run():
                 folder = ckpt_path.parent
         except (OSError, json.JSONDecodeError):
             folder = None
+
     if folder is None:
         folder = max(candidates, key=lambda item: item.name)
     try:
         config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
-        metrics = json.loads((folder / "final_metrics.json").read_text(encoding="utf-8"))
+        metrics = _enrich_metrics(json.loads((folder / "final_metrics.json").read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return None
 
@@ -271,8 +365,12 @@ def active_run():
         except (OSError, csv.Error):
             data = None
 
+    model_code = config.get("model", "mobilenet_v2")
     return {
         "name": folder.name,
+        "run_name": folder.name,
+        "model": model_code,
+        "model_label": APP_MODEL_NAMES.get(model_code, model_code),
         "directory": folder,
         "checkpoint": folder / "best_model.pt",
         "config_path": folder / "config.json",

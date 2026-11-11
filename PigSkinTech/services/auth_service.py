@@ -21,9 +21,17 @@ except ImportError:  # pragma: no cover
 if GoogleOAuthProvider and not hasattr(ft, "GoogleOAuthProvider"):
     ft.GoogleOAuthProvider = GoogleOAuthProvider
 
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import secrets
+import threading
+import time
+from urllib.parse import parse_qs, urlencode, urlparse
+import requests
+
+from services.config_store import read_settings, save_settings
 from services.inference import model_ready
 from services.project_data import active_run, display_class, get_class_info, load_classes_config
-from services.store import MOCK_GOOGLE_ACCOUNTS, _hash_password, conn, initialize, recent
+from services.store import _hash_password, conn, initialize, recent
 from theme import (
     BG_CARD,
     BG_MAIN,
@@ -45,7 +53,13 @@ from theme import (
 )
 
 
-REDIRECT_URL = "http://localhost:8550/api/oauth/redirect"
+GOOGLE_CALLBACK_HOST = "127.0.0.1"
+GOOGLE_CALLBACK_PORT = 8765
+REDIRECT_URL = f"http://{GOOGLE_CALLBACK_HOST}:{GOOGLE_CALLBACK_PORT}/callback"
+GOOGLE_REDIRECT_URI = REDIRECT_URL
+GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_ENDPOINT = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 ROLE_LABELS = {
     "user": "Người chăn nuôi",
@@ -260,51 +274,71 @@ def header_stat_pill(
     soft_bg: str = "#ECFDF5",
     badge_text: str = "Hoạt động tốt",
     page: ft.Page | None = None,
+    col: dict | None = None,
 ) -> ft.Container:
-    """Modern SaaS KPI Stat Card placed at the top of the page."""
+    """Modern SaaS KPI Stat Card with height=None, padding=16 and 3-row Column layout inside ResponsiveRow."""
     t = theme_tokens(page)
     dark = is_dark_mode(page)
     box_bg = ft.Colors.with_opacity(0.22, accent) if dark else soft_bg
     return ft.Container(
+        col=col or {"xs": 12, "sm": 6, "lg": 4},
+        height=None,
         bgcolor=t["SURFACE"],
         border=ft.border.all(1, t["BORDER"]),
         border_radius=16,
-        padding=ft.padding.symmetric(horizontal=18, vertical=14),
+        padding=16,
         shadow=css_shadow(0.18 if dark else 0.04, 24, 6),
         animate=make_smooth_animation(200),
-        content=ft.Row(
+        content=ft.Column(
             [
-                ft.Container(
-                    width=48,
-                    height=48,
-                    bgcolor=box_bg,
-                    border_radius=12,
-                    alignment=ft.alignment.center,
-                    content=ft.Icon(icon, color=accent, size=24),
-                ),
-                ft.Column(
+                ft.Row(
                     [
-                        ft.Row(
-                            [
-                                ft.Text(label, size=13, color=t["SECONDARY"], weight=ft.FontWeight.W_600),
-                                ft.Container(
-                                    bgcolor=box_bg,
-                                    padding=ft.padding.symmetric(horizontal=9, vertical=3),
-                                    border_radius=12,
-                                    content=ft.Text(badge_text, size=12.5, color=accent, weight=ft.FontWeight.W_600),
-                                ),
-                            ],
-                            spacing=8,
-                            tight=True,
+                        ft.Container(
+                            width=42,
+                            height=42,
+                            bgcolor=box_bg,
+                            border_radius=12,
+                            alignment=ft.alignment.center,
+                            content=ft.Icon(icon, color=accent, size=22),
                         ),
-                        ft.Text(value, size=26, color=t["TEXT"], weight=ft.FontWeight.W_800),
+                        ft.Container(
+                            bgcolor=box_bg,
+                            padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                            border_radius=12,
+                            content=ft.Text(
+                                str(badge_text),
+                                size=12,
+                                color=accent,
+                                weight=ft.FontWeight.W_600,
+                            ),
+                        ),
                     ],
-                    spacing=2,
-                    tight=True,
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Row(
+                    [
+                        ft.Text(
+                            str(label),
+                            size=14.5,
+                            color=t["TEXT"],
+                            weight=ft.FontWeight.W_700,
+                            expand=True,
+                        )
+                    ]
+                ),
+                ft.Row(
+                    [
+                        ft.Text(
+                            str(value),
+                            size=26,
+                            color=t["TEXT"],
+                            weight=ft.FontWeight.W_800,
+                        )
+                    ]
                 ),
             ],
-            spacing=12,
-            tight=True,
+            spacing=8,
         ),
     )
 
@@ -318,43 +352,57 @@ def tech_banner(
     pills: list[ft.Control] | None = None,
     page: ft.Page | None = None,
 ) -> ft.Container:
-    """Minimalist Clean SaaS Page Header with right-aligned KPI stat cards."""
+    """Minimalist Clean SaaS Page Header with ResponsiveRow KPI stat cards."""
     t = theme_tokens(page)
-    right_items: list[ft.Control] = []
-    if pills:
-        right_items.extend(pills)
-    elif badge_text:
-        right_items.append(
-            ft.Container(
-                bgcolor=t["SURFACE"],
-                border=ft.border.all(1, t["BORDER"]),
-                padding=ft.padding.symmetric(horizontal=14, vertical=7),
-                border_radius=20,
-                content=ft.Row(
-                    [
-                        ft.Container(width=8, height=8, bgcolor=PRIMARY, border_radius=4),
-                        ft.Text(badge_text, size=13, color=t["TEXT"], weight=ft.FontWeight.W_600),
-                    ],
-                    spacing=6,
-                    tight=True,
-                ),
-            )
-        )
-
     title_col_items = [ft.Text(title, size=26, weight=ft.FontWeight.W_800, color=t["TEXT"])]
     if subtitle:
         title_col_items.append(ft.Text(subtitle, size=14, color=t["SECONDARY"]))
 
-    return ft.Container(
-        padding=ft.padding.only(bottom=4),
-        content=ft.Row(
-            [
-                ft.Column(title_col_items, spacing=4, expand=True),
-                ft.Row(right_items, spacing=12, wrap=True),
-            ],
+    badge_ctrl = None
+    if badge_text and not pills:
+        badge_ctrl = ft.Container(
+            bgcolor=t["SURFACE"],
+            border=ft.border.all(1, t["BORDER"]),
+            padding=ft.padding.symmetric(horizontal=14, vertical=7),
+            border_radius=20,
+            content=ft.Row(
+                [
+                    ft.Container(width=8, height=8, bgcolor=PRIMARY, border_radius=4),
+                    ft.Text(badge_text, size=13, color=t["TEXT"], weight=ft.FontWeight.W_600),
+                ],
+                spacing=6,
+                tight=True,
+            ),
+        )
+
+    top_row_controls: list[ft.Control] = [ft.Column(title_col_items, spacing=4, expand=True)]
+    if badge_ctrl is not None:
+        top_row_controls.append(badge_ctrl)
+
+    banner_children: list[ft.Control] = [
+        ft.Row(
+            top_row_controls,
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        ),
+        )
+    ]
+
+    if pills:
+        lg_span = 3 if len(pills) >= 4 else 4
+        for p_ctrl in pills:
+            if isinstance(p_ctrl, ft.Container):
+                p_ctrl.col = {"xs": 12, "sm": 6, "lg": lg_span}
+        banner_children.append(
+            ft.ResponsiveRow(
+                controls=list(pills),
+                run_spacing=16,
+                spacing=16,
+            )
+        )
+
+    return ft.Container(
+        padding=ft.padding.only(bottom=4),
+        content=ft.Column(banner_children, spacing=14, tight=True),
     )
 
 
@@ -366,50 +414,80 @@ def kpi_stat_card(
     accent: str = PRIMARY_DARK,
     soft_bg: str = "#ECFDF5",
     page: ft.Page | None = None,
+    col: dict | None = None,
 ) -> ft.Container:
+    """
+    Thẻ KPI chuẩn ResponsiveRow (col={'xs': 12, 'sm': 6, 'lg': 3}, height=None, padding=16):
+    Bên trong dùng ft.Column 3 hàng:
+      - Hàng 1: Icon bên trái + Badge ngắn gọn bên phải
+      - Hàng 2: Tiêu đề thẻ
+      - Hàng 3: Con số thống kê lớn
+    """
     t = theme_tokens(page)
     dark = is_dark_mode(page)
     box_bg = ft.Colors.with_opacity(0.22, accent) if dark else soft_bg
-    return tech_card(
+    card_inner = tech_card(
         page=page,
-        padding=20,
-        expand=1,
+        padding=16,
         border_radius=16,
         hover_lift=True,
-        content=ft.Row(
+        content=ft.Column(
             [
-                ft.Container(
-                    width=48,
-                    height=48,
-                    bgcolor=box_bg,
-                    border_radius=12,
-                    alignment=ft.alignment.center,
-                    content=ft.Icon(icon, color=accent, size=24),
-                ),
-                ft.Column(
+                ft.Row(
                     [
-                        ft.Row(
-                            [
-                                ft.Text(title, size=13.5, color=t["SECONDARY"], weight=ft.FontWeight.W_600, expand=True),
-                                ft.Container(
-                                    bgcolor=box_bg,
-                                    padding=ft.padding.symmetric(horizontal=9, vertical=3),
-                                    border_radius=12,
-                                    content=ft.Text(subtitle, size=12.5, color=accent, weight=ft.FontWeight.W_600),
-                                ),
-                            ],
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ft.Container(
+                            width=44,
+                            height=44,
+                            bgcolor=box_bg,
+                            border_radius=12,
+                            alignment=ft.alignment.center,
+                            content=ft.Icon(icon, color=accent, size=23),
                         ),
-                        ft.Text(value, size=26, color=t["TEXT"], weight=ft.FontWeight.W_800),
+                        ft.Container(
+                            bgcolor=box_bg,
+                            padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                            border_radius=12,
+                            content=ft.Text(
+                                str(subtitle),
+                                size=12,
+                                color=accent,
+                                weight=ft.FontWeight.W_600,
+                            ),
+                        ),
                     ],
-                    spacing=4,
-                    expand=True,
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Row(
+                    [
+                        ft.Text(
+                            str(title),
+                            size=14.5,
+                            color=t["TEXT"],
+                            weight=ft.FontWeight.W_700,
+                            expand=True,
+                        )
+                    ]
+                ),
+                ft.Row(
+                    [
+                        ft.Text(
+                            str(value),
+                            size=26,
+                            color=t["TEXT"],
+                            weight=ft.FontWeight.W_800,
+                        )
+                    ]
                 ),
             ],
-            spacing=14,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=8,
         ),
+    )
+    card_inner.height = None
+    return ft.Container(
+        col=col or {"xs": 12, "sm": 6, "lg": 3},
+        height=None,
+        content=card_inner,
     )
 
 
@@ -462,22 +540,86 @@ def role_home_route(role: str) -> str:
     return ROLE_ROUTES.get(role, "/user")
 
 
+def get_google_oauth_config() -> dict[str, str]:
+    cfg = read_settings()
+    return {
+        "client_id": (cfg.get("GOOGLE_CLIENT_ID") or os.environ.get("GOOGLE_CLIENT_ID", "")).strip(),
+        "client_secret": (cfg.get("GOOGLE_CLIENT_SECRET") or os.environ.get("GOOGLE_CLIENT_SECRET", "")).strip(),
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+    }
+
+
+def save_google_oauth_config(client_id: str, client_secret: str) -> None:
+    save_settings({
+        "GOOGLE_CLIENT_ID": client_id.strip(),
+        "GOOGLE_CLIENT_SECRET": client_secret.strip(),
+        "GOOGLE_REDIRECT_URI": GOOGLE_REDIRECT_URI,
+    })
+
+
 def is_real_oauth_configured() -> bool:
-    return bool(
-        os.environ.get("GOOGLE_CLIENT_ID", "").strip()
-        and os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
-    )
+    cfg = get_google_oauth_config()
+    return bool(cfg["client_id"] and cfg["client_secret"])
 
 
 def build_google_oauth_provider():
     """Return configured ft.GoogleOAuthProvider instance."""
-    client_id = os.environ.get("GOOGLE_CLIENT_ID", "").strip() or "mock-google-client-id"
-    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip() or "mock-google-client-secret"
+    cfg = get_google_oauth_config()
     return ft.GoogleOAuthProvider(
-        client_id=client_id,
-        client_secret=client_secret,
-        redirect_url=REDIRECT_URL,
+        client_id=cfg["client_id"],
+        client_secret=cfg["client_secret"],
+        redirect_url=GOOGLE_REDIRECT_URI,
     )
+
+
+def build_google_auth_url(client_id: str, redirect_uri: str = GOOGLE_REDIRECT_URI, state: str = "") -> str:
+    params = {
+        "client_id": client_id.strip(),
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "access_type": "offline",
+        "prompt": "select_account",
+    }
+    if state:
+        params["state"] = state
+    return f"{GOOGLE_AUTH_ENDPOINT}?{urlencode(params)}"
+
+
+def exchange_code_for_tokens(
+    code: str,
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str = GOOGLE_REDIRECT_URI,
+) -> dict:
+    """Gọi POST tới https://oauth2.googleapis.com/token để đổi Authorization Code lấy access_token & id_token."""
+    resp = requests.post(
+        GOOGLE_TOKEN_ENDPOINT,
+        data={
+            "code": code,
+            "client_id": client_id.strip(),
+            "client_secret": client_secret.strip(),
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        },
+        headers={"Accept": "application/json"},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Google Token API ({resp.status_code}): {resp.text[:240]}")
+    return resp.json()
+
+
+def fetch_google_userinfo(access_token: str) -> dict:
+    """Gọi GET tới https://www.googleapis.com/oauth2/v3/userinfo để lấy email, name, picture, sub thật."""
+    resp = requests.get(
+        GOOGLE_USERINFO_ENDPOINT,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Google UserInfo API ({resp.status_code}): {resp.text[:240]}")
+    return resp.json()
 
 
 def authenticate_local(identifier: str, password: str) -> dict:
@@ -501,8 +643,13 @@ def authenticate_local(identifier: str, password: str) -> dict:
     return dict(row)
 
 
-def authenticate_google(email: str, full_name: str | None = None, avatar_url: str | None = None) -> dict:
-    """Verify Google email in DB or auto-provision a new account with default role 'user'."""
+def authenticate_google(
+    email: str,
+    full_name: str | None = None,
+    avatar_url: str | None = None,
+    google_sub: str | None = None,
+) -> dict:
+    """Verify Google email in SQL Database or auto-provision/update account with real Google profile."""
     initialize()
     clean_email = (email or "").strip().lower()
     if not clean_email or "@" not in clean_email:
@@ -517,38 +664,164 @@ def authenticate_google(email: str, full_name: str | None = None, avatar_url: st
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cur = c.execute(
                 """INSERT INTO users
-                (email, username, password_hash, full_name, avatar_url, role, auth_provider, is_active, created_at)
-                VALUES (?, ?, ?, ?, ?, 'user', 'google', 1, ?)""",
+                (email, username, password_hash, full_name, avatar_url, google_sub, role, auth_provider, is_active, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'user', 'google', 1, ?)""",
                 (
                     clean_email,
                     local_part,
                     _hash_password("123456"),
                     derived_name,
                     derived_avatar,
+                    (google_sub or "").strip(),
                     now_str,
                 ),
             )
             row = c.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
+        else:
+            new_name = (full_name or "").strip() or row["full_name"]
+            new_avatar = (avatar_url or "").strip() or row["avatar_url"]
+            new_sub = (google_sub or "").strip() or row.get("google_sub", "")
+            c.execute(
+                """UPDATE users
+                SET full_name=?, avatar_url=?, google_sub=?, auth_provider='google'
+                WHERE id=?""",
+                (new_name, new_avatar, new_sub, row["id"]),
+            )
+            row = c.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
     if int(row["is_active"]) == 0:
         raise ValueError("Tài khoản Google này đang bị khóa bởi Quản trị viên.")
     return dict(row)
 
 
-def get_mock_google_accounts() -> list[dict]:
-    """Return the 3 canonical Google mock accounts enriched with current DB role."""
+class _ReusableHTTPServer(HTTPServer):
+    allow_reuse_address = True
+
+
+def run_google_oauth_desktop_flow(timeout: int = 120) -> dict:
+    """
+    Luồng Google OAuth 2.0 Authorization Code Flow thực tế cho Desktop App:
+    1. Khởi tạo Local HTTP Callback Server tạm thời tại http://127.0.0.1:8765/callback
+    2. Mở trình duyệt tới https://accounts.google.com/o/oauth2/v2/auth?response_type=code&scope=openid%20email%20profile...
+    3. Bắt tham số ?code=... trả về tại cổng local, gọi POST https://oauth2.googleapis.com/token đổi code lấy access_token & id_token
+    4. Gọi https://www.googleapis.com/oauth2/v3/userinfo lấy email, name, picture, sub thật và lưu vào bảng Users trong SQL Database.
+    """
     initialize()
-    emails = [
-        "nongdan.pigskin@gmail.com",
-        "bs.thuy.pigskin@gmail.com",
-        "admin.pigskin@gmail.com",
-    ]
-    out = []
-    with conn() as c:
-        for em in emails:
-            row = c.execute("SELECT * FROM users WHERE LOWER(email)=?", (em,)).fetchone()
-            if row:
-                out.append(dict(row))
-    return out or [acc for acc in MOCK_GOOGLE_ACCOUNTS if acc["auth_provider"] == "google"]
+    cfg = get_google_oauth_config()
+    client_id = cfg["client_id"]
+    client_secret = cfg["client_secret"]
+    redirect_uri = GOOGLE_REDIRECT_URI
+
+    if not client_id or not client_secret:
+        return {
+            "ok": False,
+            "needs_credentials": True,
+            "error": (
+                "Chưa cấu hình GOOGLE_CLIENT_ID và GOOGLE_CLIENT_SECRET trong file .env. "
+                "Hãy nhập Client ID & Client Secret để mở xác thực Google OAuth 2.0."
+            ),
+        }
+
+    state_token = secrets.token_urlsafe(16)
+    callback_data: dict[str, str] = {}
+    done_event = threading.Event()
+
+    class _OAuthCallbackHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args) -> None:
+            return
+
+        def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path not in ("/callback", "/"):
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            qs = parse_qs(parsed.query)
+            if "error" in qs:
+                callback_data["error"] = qs["error"][0]
+            if "code" in qs:
+                callback_data["code"] = qs["code"][0]
+            if "state" in qs:
+                callback_data["state"] = qs["state"][0]
+
+            ok = "code" in callback_data and "error" not in callback_data
+            title = "Đăng nhập Google thành công!" if ok else "Đăng nhập Google thất bại"
+            msg = (
+                "Đã nhận Authorization Code & xác thực tài khoản thành công. Bạn có thể đóng tab trình duyệt này và quay lại ứng dụng PigSkinTech AI."
+                if ok
+                else f"Lỗi xác thực từ Google: {callback_data.get('error', 'Không nhận được Authorization Code.')}"
+            )
+            color = "#10B981" if ok else "#EF4444"
+            html_resp = f"""<!DOCTYPE html>
+<html lang="vi"><head><meta charset="utf-8"><title>{title}</title>
+<style>
+  body {{ font-family: 'Segoe UI', sans-serif; background: #0F172A; color: #F8FAFC; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+  .card {{ background: #1E293B; border: 1px solid #334155; border-radius: 16px; padding: 32px; max-width: 440px; text-align: center; box-shadow: 0 12px 30px rgba(0,0,0,0.4); }}
+  .badge {{ width: 52px; height: 52px; border-radius: 99px; background: {color}; color: white; font-size: 26px; line-height: 52px; margin: 0 auto 14px auto; font-weight: bold; }}
+</style></head>
+<body><div class="card"><div class="badge">{'✓' if ok else '!'}</div><h2>{title}</h2><p style="color:#CBD5E1;font-size:14px;">{msg}</p></div>
+<script>setTimeout(function(){{ window.close(); }}, 2500);</script></body></html>"""
+            body_bytes = html_resp.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body_bytes)))
+            self.end_headers()
+            self.wfile.write(body_bytes)
+            done_event.set()
+
+    try:
+        server = _ReusableHTTPServer((GOOGLE_CALLBACK_HOST, GOOGLE_CALLBACK_PORT), _OAuthCallbackHandler)
+    except OSError as exc:
+        return {"ok": False, "error": f"Không thể mở cổng callback {redirect_uri}: {exc}"}
+
+    server.timeout = 1.0
+
+    def _serve():
+        deadline = time.time() + timeout
+        while not done_event.is_set() and time.time() < deadline:
+            server.handle_request()
+        try:
+            server.server_close()
+        except Exception:
+            pass
+
+    threading.Thread(target=_serve, daemon=True).start()
+    auth_url = build_google_auth_url(client_id=client_id, redirect_uri=redirect_uri, state=state_token)
+    webbrowser.open(auth_url)
+
+    finished = done_event.wait(timeout=timeout)
+    try:
+        server.server_close()
+    except Exception:
+        pass
+
+    if not finished:
+        return {"ok": False, "error": "Hết thời gian chờ đăng nhập Google trên trình duyệt (120 giây)."}
+    if "error" in callback_data:
+        return {"ok": False, "error": f"Google OAuth trả về lỗi: {callback_data['error']}"}
+
+    code = callback_data.get("code", "").strip()
+    if not code:
+        return {"ok": False, "error": "Không nhận được Authorization Code (?code=...) tại cổng callback."}
+
+    try:
+        tokens = exchange_code_for_tokens(code, client_id, client_secret, redirect_uri)
+        access_token = tokens.get("access_token", "")
+        if not access_token:
+            return {"ok": False, "error": "Google Token API không trả về access_token hợp lệ."}
+        userinfo = fetch_google_userinfo(access_token)
+        email = (userinfo.get("email") or "").strip().lower()
+        if not email:
+            return {"ok": False, "error": "Tài khoản Google không cung cấp địa chỉ email."}
+        user_record = authenticate_google(
+            email=email,
+            full_name=userinfo.get("name") or "",
+            avatar_url=userinfo.get("picture") or "",
+            google_sub=userinfo.get("sub") or "",
+        )
+        return {"ok": True, "user": user_record, "profile": userinfo}
+    except Exception as exc:
+        return {"ok": False, "error": f"Lỗi xác thực Google OAuth 2.0: {exc}"}
 
 
 # --- Shared Flet UI compatibility helpers ---
@@ -1358,21 +1631,39 @@ def build_role_shell(
             item_container.gradient = None
             item_container.bgcolor = t["SIDEBAR_HOVER"] if is_hovered else "transparent"
 
+    from services.chat_widget import build_chat_overlay
+    from services.chatbot_service import refresh_all_chat_views
+
+    chat_overlay_ctrl = build_chat_overlay(page=page, user=user)
+
     def switch_tab(idx: int):
         active_state["index"] = idx
         session_set(page, route_key, idx)
         set_theme_page_context(page)
         for i, ctrl in enumerate(menu_items_controls):
             style_menu_item(ctrl, i, is_hovered=False)
+
+        dest_label = destinations[idx][0] if 0 <= idx < len(destinations) else ""
+        is_chatbot_tab = any(k in dest_label.lower() for k in ("chatbot", "trợ lý ai"))
+
         controls = tab_builders[idx]()
         body_host.bgcolor = theme_tokens(page)["BG"]
         tab_anim_wrapper.opacity = 1.0
+        raw_controls = controls if isinstance(controls, list) else [controls]
         tab_anim_wrapper.content = ft.Column(
-            controls=controls if isinstance(controls, list) else [controls],
+            controls=[*raw_controls, ft.Container(padding=ft.padding.only(bottom=90))],
             expand=True,
             scroll=ft.ScrollMode.AUTO,
             spacing=20,
         )
+
+        # Ẩn nút Floating Chat & đóng Popup khi đang mở Tab Chatbot chính; hiện lại ở các tab khác
+        if isinstance(getattr(page, "data", None), dict):
+            vis_fn = page.data.get("set_floating_chat_visible")
+            if callable(vis_fn):
+                vis_fn(not is_chatbot_tab)
+        if is_chatbot_tab:
+            refresh_all_chat_views(page)
         page.update()
 
     if external_nav_ref is not None:
@@ -1390,7 +1681,7 @@ def build_role_shell(
 
     switch_tab(start_index)
 
-    return ft.Row(
+    main_row = ft.Row(
         [
             custom_sidebar,
             body_host,
@@ -1398,6 +1689,13 @@ def build_role_shell(
         expand=True,
         spacing=0,
         vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+    )
+    return ft.Stack(
+        expand=True,
+        controls=[
+            main_row,
+            chat_overlay_ctrl,
+        ],
     )
 
 

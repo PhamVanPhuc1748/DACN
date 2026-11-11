@@ -15,20 +15,26 @@ from services.auth_service import (
     tech_card,
     theme_tokens,
 )
+from services.clinical_widgets import (
+    build_clinical_charts_section,
+    build_disease_catalog_crud_card,
+    open_disease_editor_modal,
+)
+from services.config_store import read_settings, save_settings
 from services.project_data import (
     active_run,
-    delete_class_info,
     display_class,
     list_model_runs,
     load_classes_config,
     set_active_checkpoint,
-    upsert_class_info,
 )
 from services.store import (
     create_user_account,
+    get_db_status,
     get_system_stats,
     list_users,
     recent,
+    test_sqlserver_connection,
     toggle_user_lock,
     update_user_role,
 )
@@ -45,46 +51,51 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
         total_ins = max(1, stats["total_inspections"])
         dist = stats["distribution"]
 
-        kpi_cards = ft.Row(
+        kpi_cards = ft.ResponsiveRow(
             [
                 kpi_stat_card(
                     "Tổng số người dùng",
                     str(stats["total_users"]),
-                    "Tài khoản Google OAuth & Local",
+                    "Google OAuth & Local",
                     ft.Icons.PEOPLE_ALT_ROUNDED,
                     accent="#0284C7",
                     soft_bg=t["CYAN_SOFT"],
                     page=page,
+                    col={"xs": 12, "sm": 6, "lg": 3},
                 ),
                 kpi_stat_card(
                     "Tổng số lượt chẩn đoán",
                     str(stats["total_inspections"]),
-                    f"{stats['pending_count']} ca đang chờ thẩm định",
+                    f"{stats['pending_count']} ca chờ duyệt",
                     ft.Icons.ANALYTICS_ROUNDED,
                     accent="#059669",
                     soft_bg=t["EMERALD_SOFT"],
                     page=page,
+                    col={"xs": 12, "sm": 6, "lg": 3},
                 ),
                 kpi_stat_card(
                     "Tỷ lệ chính xác AI vs Chuyên gia",
                     f"{stats['ai_accuracy_vs_expert']:.1f}%",
-                    f"Đồng thuận {stats['agreed_count']}/{stats['reviewed_count']} ca đã duyệt",
+                    f"Đồng thuận {stats['agreed_count']}/{stats['reviewed_count']} ca",
                     ft.Icons.VERIFIED_ROUNDED,
                     accent="#7C3AED",
                     soft_bg=t["PURPLE_SOFT"],
                     page=page,
+                    col={"xs": 12, "sm": 6, "lg": 3},
                 ),
                 kpi_stat_card(
                     "Ảnh Dataset chuẩn hóa",
                     str(stats["curated_count"]),
-                    "Sẵn sàng huấn luyện nâng cao",
+                    "Sẵn sàng huấn luyện",
                     ft.Icons.DATASET_LINKED_ROUNDED,
                     accent="#D97706",
                     soft_bg=t["AMBER_SOFT"],
                     page=page,
+                    col={"xs": 12, "sm": 6, "lg": 3},
                 ),
             ],
-            spacing=14,
+            run_spacing=16,
+            spacing=16,
         )
 
         dist_rows = []
@@ -133,10 +144,16 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
         cur_run = active_run() or {}
         metrics = cur_run.get("metrics") or {}
         per_class_f1 = metrics.get("per_class_f1") or {}
+        test_per_class = (metrics.get("test_metrics") or {}).get("per_class") or {}
         classes_cfg = load_classes_config()
         f1_rows = []
         for cls_code, cls_meta in classes_cfg.items():
-            f1_val = float(per_class_f1.get(cls_code, 0.88))
+            raw_cls_m = test_per_class.get(cls_code) or {}
+            f1_val = float(
+                per_class_f1.get(cls_code)
+                if cls_code in per_class_f1
+                else (raw_cls_m.get("f1", 0.0) if isinstance(raw_cls_m, dict) else 0.0)
+            )
             f1_rows.append(
                 ft.Column(
                     [
@@ -158,6 +175,10 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 )
             )
 
+        real_acc = float(metrics.get("accuracy") or (metrics.get("test_metrics") or {}).get("accuracy") or 0.0)
+        real_f1 = float(metrics.get("best_val_macro_f1") or metrics.get("macro_f1") or 0.0)
+        arch_title = f"{cur_run.get('model_label', 'MobileNetV2')} ({cur_run.get('name', '')})"
+
         benchmark_card = tech_card(
             page=page,
             expand=1,
@@ -168,8 +189,8 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                         [
                             ft.Icon(ft.Icons.MEMORY_ROUNDED, color=t["CYAN"], size=22),
                             ft.Text(
-                                f"Hiệu năng Trí tuệ nhân tạo PigSkin AI ({len(classes_cfg)} nhóm bệnh lý)",
-                                size=18,
+                                f"Hiệu năng Thực tế: {arch_title} ({len(classes_cfg)} lớp)",
+                                size=17,
                                 weight=ft.FontWeight.BOLD,
                                 color=t["TEXT"],
                                 expand=True,
@@ -179,7 +200,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                                 padding=ft.padding.symmetric(horizontal=12, vertical=5),
                                 border_radius=10,
                                 content=ft.Text(
-                                    f"Độ chính xác: {float(metrics.get('accuracy', 0.914))*100:.1f}% • F1: {float(metrics.get('macro_f1', 0.902))*100:.1f}%",
+                                    f"Test Acc: {real_acc*100:.1f}% • Val F1: {real_f1*100:.1f}%",
                                     size=12.5,
                                     weight=ft.FontWeight.W_600,
                                     color=t["CYAN"],
@@ -195,10 +216,11 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             ),
         )
 
+        db_info = stats.get("db_status", {})
         admin_pills = [
-            header_stat_pill("Người dùng", str(stats["total_users"]), ft.Icons.PEOPLE_ALT_ROUNDED, "#0284C7", t["CYAN_SOFT"], "Hoạt động tốt", page=page),
-            header_stat_pill("Lượt khám", str(stats["total_inspections"]), ft.Icons.ANALYTICS_ROUNDED, "#059669", t["EMERALD_SOFT"], "+12% hôm nay", page=page),
-            header_stat_pill("Đồng thuận AI", f"{stats['ai_accuracy_vs_expert']:.1f}%", ft.Icons.VERIFIED_ROUNDED, "#D97706", t["AMBER_SOFT"], "Ổn định", page=page),
+            header_stat_pill("Người dùng", str(stats["total_users"]), ft.Icons.PEOPLE_ALT_ROUNDED, "#0284C7", t["CYAN_SOFT"], db_info.get("engine", "SQL DB"), page=page),
+            header_stat_pill("Lượt khám", f"{stats['total_inspections']} ca", ft.Icons.ANALYTICS_ROUNDED, "#059669", t["EMERALD_SOFT"], "Truy vấn SQL thật", page=page),
+            header_stat_pill("Đồng thuận AI", f"{stats['ai_accuracy_vs_expert']:.1f}%", ft.Icons.VERIFIED_ROUNDED, "#D97706", t["AMBER_SOFT"], f"{stats['agreed_count']}/{stats['reviewed_count']} ca duyệt", page=page),
         ]
 
         return [
@@ -209,7 +231,15 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 page=page,
             ),
             kpi_cards,
-            ft.Row([dist_card, benchmark_card], spacing=20, vertical_alignment=ft.CrossAxisAlignment.START),
+            build_clinical_charts_section(page, stats),
+            ft.ResponsiveRow(
+                [
+                    ft.Container(col={"xs": 12, "lg": 6}, content=dist_card),
+                    ft.Container(col={"xs": 12, "lg": 6}, content=benchmark_card),
+                ],
+                run_spacing=16,
+                spacing=16,
+            ),
         ]
 
     # Tab 2: User Management (Full-width DataTable + Search + Role Filter + Add User Modal)
@@ -522,65 +552,6 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             except Exception as err:
                 show_snack(page, str(err), "#DC2626")
 
-        # CRUD Form for disease catalog
-        cfg_data = load_classes_config()
-        first_key = next(iter(cfg_data.keys()), "Healthy")
-        first_item = cfg_data.get(first_key, {})
-        selected_class = {"code": first_key}
-
-        code_field = css_input(
-            label="Mã lớp bệnh (Class Key)",
-            value=first_item.get("code", first_key),
-            prefix_icon=ft.Icons.CODE_ROUNDED,
-            expand=True,
-            page=page,
-        )
-        name_vi_field = css_input(
-            label="Tên bệnh hiển thị (Tiếng Việt)",
-            value=first_item.get("name_vi", ""),
-            prefix_icon=ft.Icons.LABEL_OUTLINE_ROUNDED,
-            expand=True,
-            page=page,
-        )
-        danger_dropdown = make_dropdown(
-            "Mức độ nguy hiểm",
-            first_item.get("danger_level", "Trung bình"),
-            [
-                ("An toàn", "An toàn"),
-                ("Thấp", "Thấp"),
-                ("Trung bình", "Trung bình"),
-                ("Cao", "Cao"),
-                ("Khẩn cấp", "Khẩn cấp"),
-            ],
-            width=220,
-            page=page,
-        )
-        symptoms_field = css_input(
-            label="Triệu chứng nhận diện",
-            value=first_item.get("symptoms", ""),
-            multiline=True,
-            min_lines=2,
-            max_lines=3,
-            page=page,
-        )
-        prevention_field = css_input(
-            label="Biện pháp phòng ngừa",
-            value=first_item.get("prevention", ""),
-            multiline=True,
-            min_lines=2,
-            max_lines=3,
-            page=page,
-        )
-        treatment_field = css_input(
-            label="Phác đồ điều trị mặc định",
-            value=first_item.get("treatment", ""),
-            multiline=True,
-            min_lines=2,
-            max_lines=3,
-            page=page,
-        )
-
-        classes_list_col = ft.Column(spacing=10)
         config_header_host = ft.Container()
 
         def refresh_config_header():
@@ -599,99 +570,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 page=page,
             )
 
-        def load_class_into_form(code: str):
-            selected_class["code"] = code
-            latest = load_classes_config()
-            item = latest.get(code, {})
-            code_field.value = code
-            name_vi_field.value = item.get("name_vi", "")
-            danger_dropdown.value = item.get("danger_level", "Trung bình")
-            symptoms_field.value = item.get("symptoms", "")
-            prevention_field.value = item.get("prevention", "")
-            treatment_field.value = item.get("treatment", "")
-            refresh_classes_list()
-
-        def refresh_classes_list():
-            cur_t = theme_tokens(page)
-            refresh_config_header()
-            latest = load_classes_config()
-            classes_list_col.controls.clear()
-            for code, item in latest.items():
-                is_selected = selected_class.get("code") == code
-                classes_list_col.controls.append(
-                    ft.Container(
-                        padding=16,
-                        bgcolor=cur_t["EMERALD_SOFT"] if is_selected else cur_t["SUB_SURFACE"],
-                        border_radius=12,
-                        border=ft.border.all(2, PRIMARY) if is_selected else ft.border.all(1, cur_t["BORDER"]),
-                        animate=make_smooth_animation(180),
-                        ink=True,
-                        on_click=lambda e, c=code: load_class_into_form(c),
-                        content=ft.Row(
-                            [
-                                ft.Column(
-                                    [
-                                        ft.Text(
-                                            f"{item.get('name_vi')} ({code}) • Mức độ: {item.get('danger_level')}",
-                                            size=15,
-                                            weight=ft.FontWeight.BOLD,
-                                            color=cur_t["TEXT"],
-                                        ),
-                                        ft.Text(f"Phác đồ mặc định: {item.get('treatment')}", size=13.5, color=cur_t["EMERALD"]),
-                                    ],
-                                    spacing=4,
-                                    expand=True,
-                                ),
-                                ft.OutlinedButton(
-                                    "Đang chọn" if is_selected else "Sửa",
-                                    icon=ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED if is_selected else ft.Icons.EDIT_OUTLINED,
-                                    on_click=lambda e, c=code: load_class_into_form(c),
-                                ),
-                                ft.IconButton(
-                                    icon=ft.Icons.DELETE_OUTLINE_ROUNDED,
-                                    icon_color="#DC2626",
-                                    tooltip="Xóa lớp bệnh",
-                                    on_click=lambda e, c=code: handle_delete_class(c),
-                                ),
-                            ],
-                            spacing=10,
-                        ),
-                    )
-                )
-            page.update()
-
-        def handle_save_class(e):
-            try:
-                saved = upsert_class_info(
-                    code=code_field.value or "",
-                    name_vi=name_vi_field.value or "",
-                    danger_level=danger_dropdown.value or "Trung bình",
-                    symptoms=symptoms_field.value or "",
-                    prevention=prevention_field.value or "",
-                    treatment=treatment_field.value or "",
-                )
-                selected_class["code"] = saved["code"]
-                refresh_classes_list()
-                show_snack(page, f"Đã lưu cập nhật danh mục bệnh lý '{saved['name_vi']}'!", "#059669")
-            except ValueError as err:
-                show_snack(page, str(err), "#DC2626")
-
-        def handle_delete_class(code: str):
-            if delete_class_info(code):
-                refresh_classes_list()
-                show_snack(page, f"Đã xóa lớp bệnh '{code}' khỏi danh mục.", "#DC2626")
-
-        def handle_clear_form(e):
-            selected_class["code"] = ""
-            code_field.value = ""
-            name_vi_field.value = ""
-            danger_dropdown.value = "Trung bình"
-            symptoms_field.value = ""
-            prevention_field.value = ""
-            treatment_field.value = ""
-            refresh_classes_list()
-
-        refresh_classes_list()
+        refresh_config_header()
 
         model_card = tech_card(
             page=page,
@@ -722,44 +601,10 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             ),
         )
 
-        crud_card = tech_card(
+        crud_card = build_disease_catalog_crud_card(
             page=page,
-            padding=24,
-            content=ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.TUNE_ROUNDED, color=t["CYAN"], size=22),
-                            ft.Text(
-                                "2. Quản lý Danh mục Bệnh lý & Phác đồ Điều trị Mặc định",
-                                size=18,
-                                weight=ft.FontWeight.BOLD,
-                                color=t["TEXT"],
-                                expand=True,
-                            ),
-                            ft.OutlinedButton("Tạo lớp bệnh mới", icon=ft.Icons.ADD_ROUNDED, on_click=handle_clear_form),
-                        ],
-                        spacing=8,
-                    ),
-                    ft.Row([code_field, name_vi_field, danger_dropdown], spacing=10),
-                    symptoms_field,
-                    prevention_field,
-                    treatment_field,
-                    ft.Row(
-                        [
-                            ft.FilledButton(
-                                "Lưu cập nhật Danh mục Bệnh lý",
-                                icon=ft.Icons.SAVE_ROUNDED,
-                                on_click=handle_save_class,
-                            )
-                        ]
-                    ),
-                    ft.Divider(height=14, color=t["BORDER"]),
-                    ft.Text("Danh sách các nhóm bệnh lý hiện có (nhấn vào dòng bất kỳ để nạp lên biểu mẫu):", size=14, weight=ft.FontWeight.BOLD, color=t["SECONDARY"]),
-                    classes_list_col,
-                ],
-                spacing=12,
-            ),
+            title_text="2. Quản lý Danh mục Bệnh lý & Phác đồ Điều trị Mặc định",
+            on_changed=refresh_config_header,
         )
 
         return [
@@ -768,10 +613,252 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             crud_card,
         ]
 
+    # Tab 4: System Settings (SQL Server, Google OAuth 2.0 & AI Chatbot)
+    def build_system_settings_tab():
+        t = theme_tokens(page)
+        cfg = read_settings()
+        db_stat = get_db_status()
+
+        db_engine_dd = make_dropdown(
+            "Database Engine",
+            cfg.get("DATABASE_ENGINE", "sqlserver"),
+            [
+                ("sqlserver", "SQL Server (pyodbc / SQLAlchemy)"),
+                ("sqlite", "Local SQL Engine (pigskin_history.db)"),
+            ],
+            expand=True,
+            page=page,
+        )
+        db_server_field = css_input(
+            label="DB_SERVER (Máy chủ SQL Server)",
+            value=cfg.get("DB_SERVER") or cfg.get("SQLSERVER_HOST", "localhost"),
+            prefix_icon=ft.Icons.DNS_ROUNDED,
+            expand=True,
+            page=page,
+        )
+        db_name_field = css_input(
+            label="DB_NAME (Tên Database)",
+            value=cfg.get("DB_NAME") or cfg.get("SQLSERVER_DATABASE", "PigSkinTechDB"),
+            prefix_icon=ft.Icons.STORAGE_ROUNDED,
+            expand=True,
+            page=page,
+        )
+        db_user_field = css_input(
+            label="DB_USER (Tài khoản SQL)",
+            value=cfg.get("DB_USER") or cfg.get("SQLSERVER_USERNAME", ""),
+            prefix_icon=ft.Icons.PERSON_OUTLINE_ROUNDED,
+            expand=True,
+            page=page,
+        )
+        db_pw_field = css_input(
+            label="DB_PASSWORD (Mật khẩu SQL)",
+            value=cfg.get("DB_PASSWORD") or cfg.get("SQLSERVER_PASSWORD", ""),
+            password=True,
+            can_reveal_password=True,
+            prefix_icon=ft.Icons.LOCK_OUTLINE_ROUNDED,
+            expand=True,
+            page=page,
+        )
+        trusted_chk = ft.Checkbox(
+            label="Trusted_Connection=yes (Xác thực Windows Integrated)",
+            value=str(cfg.get("Trusted_Connection", "yes")).lower() in ("yes", "true", "1"),
+            active_color=PRIMARY,
+        )
+
+        google_cid_field = css_input(
+            label="GOOGLE_CLIENT_ID",
+            value=cfg.get("GOOGLE_CLIENT_ID", ""),
+            hint_text="xxxx-yyyy.apps.googleusercontent.com",
+            prefix_icon=ft.Icons.KEY_ROUNDED,
+            expand=True,
+            page=page,
+        )
+        google_csec_field = css_input(
+            label="GOOGLE_CLIENT_SECRET",
+            value=cfg.get("GOOGLE_CLIENT_SECRET", ""),
+            hint_text="GOCSPX-...",
+            password=True,
+            can_reveal_password=True,
+            prefix_icon=ft.Icons.LOCK_PERSON_ROUNDED,
+            expand=True,
+            page=page,
+        )
+
+        gemini_key_field = css_input(
+            label="GEMINI_API_KEY (Google AI Studio — gemini-2.5-flash)",
+            value=cfg.get("GEMINI_API_KEY", ""),
+            hint_text="AIzaSy...",
+            password=True,
+            can_reveal_password=True,
+            prefix_icon=ft.Icons.AUTO_AWESOME_ROUNDED,
+            expand=True,
+            page=page,
+        )
+        gemini_model_field = css_input(
+            label="GEMINI_MODEL",
+            value=cfg.get("GEMINI_MODEL", "gemini-2.5-flash"),
+            prefix_icon=ft.Icons.PSYCHOLOGY_ROUNDED,
+            expand=True,
+            page=page,
+        )
+        ai_provider_dd = make_dropdown(
+            "AI Provider (Chatbot)",
+            cfg.get("AI_PROVIDER", "gemini"),
+            [
+                ("gemini", "Google Gemini API (gemini-2.5-flash)"),
+                ("openai_compatible", "OpenAI / DeepSeek / Groq Compatible"),
+                ("ollama", "Ollama Local (http://localhost:11434/v1)"),
+            ],
+            expand=True,
+            page=page,
+        )
+        ai_base_field = css_input(
+            label="AI_BASE_URL",
+            value=cfg.get("AI_BASE_URL", "https://api.openai.com/v1"),
+            prefix_icon=ft.Icons.LINK_ROUNDED,
+            expand=True,
+            page=page,
+        )
+        ai_key_field = css_input(
+            label="AI_API_KEY",
+            value=cfg.get("AI_API_KEY", ""),
+            password=True,
+            can_reveal_password=True,
+            prefix_icon=ft.Icons.VPN_KEY_ROUNDED,
+            expand=True,
+            page=page,
+        )
+        ai_model_field = css_input(
+            label="AI_MODEL",
+            value=cfg.get("AI_MODEL", "gpt-4o-mini"),
+            prefix_icon=ft.Icons.SMART_TOY_ROUNDED,
+            expand=True,
+            page=page,
+        )
+        ai_prompt_field = css_input(
+            label="AI_SYSTEM_PROMPT",
+            value=cfg.get("AI_SYSTEM_PROMPT", ""),
+            multiline=True,
+            min_lines=2,
+            max_lines=3,
+            expand=True,
+            page=page,
+        )
+
+        status_text = ft.Text(
+            f"Trạng thái hiện tại: {db_stat.get('engine')} — {db_stat.get('status')}",
+            size=13,
+            weight=ft.FontWeight.W_600,
+            color=t["EMERALD"],
+        )
+
+        def handle_test_sql(e):
+            res = test_sqlserver_connection({
+                "DB_SERVER": db_server_field.value or "localhost",
+                "DB_NAME": db_name_field.value or "PigSkinTechDB",
+                "DB_USER": db_user_field.value or "",
+                "DB_PASSWORD": db_pw_field.value or "",
+                "Trusted_Connection": "yes" if trusted_chk.value else "no",
+            })
+            status_text.value = res["message"]
+            status_text.color = "#059669" if res["ok"] else "#DC2626"
+            show_snack(page, res["message"], "#059669" if res["ok"] else "#DC2626")
+            page.update()
+
+        def handle_save_all_settings(e):
+            save_settings({
+                "DATABASE_ENGINE": db_engine_dd.value or "sqlserver",
+                "DB_SERVER": db_server_field.value or "localhost",
+                "DB_NAME": db_name_field.value or "PigSkinTechDB",
+                "DB_USER": db_user_field.value or "",
+                "DB_PASSWORD": db_pw_field.value or "",
+                "Trusted_Connection": "yes" if trusted_chk.value else "no",
+                "GOOGLE_CLIENT_ID": google_cid_field.value or "",
+                "GOOGLE_CLIENT_SECRET": google_csec_field.value or "",
+                "GEMINI_API_KEY": gemini_key_field.value or "",
+                "GEMINI_MODEL": gemini_model_field.value or "gemini-2.5-flash",
+                "AI_PROVIDER": ai_provider_dd.value or "gemini",
+                "AI_BASE_URL": ai_base_field.value or "",
+                "AI_API_KEY": ai_key_field.value or "",
+                "AI_MODEL": ai_model_field.value or "gpt-4o-mini",
+                "AI_SYSTEM_PROMPT": ai_prompt_field.value or "",
+            })
+            new_stat = get_db_status()
+            status_text.value = f"Đã lưu cấu hình vào .env! {new_stat.get('engine')} — {new_stat.get('status')}"
+            status_text.color = "#059669"
+            show_snack(page, "Đã lưu cấu hình SQL Server, Google OAuth 2.0 và Gemini AI Chatbot vào file .env!", "#059669")
+            page.update()
+
+        sql_card = tech_card(
+            page=page,
+            padding=24,
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.STORAGE_ROUNDED, color=t["EMERALD"], size=22),
+                            ft.Text("1. Kết nối Cơ sở dữ liệu SQL Server (.env)", size=18, weight=ft.FontWeight.BOLD, color=t["TEXT"], expand=True),
+                            ft.OutlinedButton("🔌 Kiểm tra kết nối SQL Server", icon=ft.Icons. CABLE_ROUNDED, on_click=handle_test_sql),
+                        ],
+                        spacing=8,
+                    ),
+                    status_text,
+                    ft.Row([db_engine_dd, db_server_field, db_name_field], spacing=12),
+                    ft.Row([db_user_field, db_pw_field], spacing=12),
+                    trusted_chk,
+                ],
+                spacing=12,
+            ),
+        )
+
+        oauth_ai_card = tech_card(
+            page=page,
+            padding=24,
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.SECURITY_ROUNDED, color=t["CYAN"], size=22),
+                            ft.Text("2. Google OAuth 2.0 (127.0.0.1:8765/callback) & Trợ lý AI Thú y (Gemini / LLM)", size=18, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Row([google_cid_field, google_csec_field], spacing=12),
+                    ft.Divider(height=10, color=t["BORDER"]),
+                    ft.Row([gemini_key_field, gemini_model_field], spacing=12),
+                    ft.Row([ai_provider_dd, ai_base_field, ai_model_field], spacing=12),
+                    ft.Row([ai_key_field]),
+                    ft.Row([ai_prompt_field]),
+                    ft.Row(
+                        [
+                            ft.FilledButton(
+                                "💾 Lưu Toàn Bộ Cấu Hình Hệ Thống (.env)",
+                                icon=ft.Icons.SAVE_ROUNDED,
+                                on_click=handle_save_all_settings,
+                            )
+                        ]
+                    ),
+                ],
+                spacing=12,
+            ),
+        )
+
+        return [
+            tech_banner(
+                "Cấu hình Hệ thống & Kết nối Thực tế",
+                "Quản lý kết nối SQL Server (PigSkinTechDB), Google OAuth 2.0 Authorization Code và Chatbot AI Thú y",
+                badge_text="SQL Server • OAuth 2.0 • AI API",
+                page=page,
+            ),
+            sql_card,
+            oauth_ai_card,
+        ]
+
     destinations = [
         ("Tổng quan hệ thống", ft.Icons.DASHBOARD_OUTLINED, ft.Icons.DASHBOARD_ROUNDED),
         ("Người dùng & RBAC", ft.Icons.MANAGE_ACCOUNTS_OUTLINED, ft.Icons.MANAGE_ACCOUNTS_ROUNDED),
         ("Mô hình & Danh mục bệnh", ft.Icons.TUNE_OUTLINED, ft.Icons.TUNE_ROUNDED),
+        ("Cấu hình hệ thống", ft.Icons.SETTINGS_APPLICATIONS_OUTLINED, ft.Icons.SETTINGS_APPLICATIONS_ROUNDED),
     ]
 
     return build_role_shell(
@@ -779,5 +866,5 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
         user=user,
         title="Không gian Quản Trị Hệ Thống (Admin)",
         destinations=destinations,
-        tab_builders=[build_dashboard_tab, build_users_tab, build_config_tab],
+        tab_builders=[build_dashboard_tab, build_users_tab, build_config_tab, build_system_settings_tab],
     )

@@ -18,8 +18,17 @@ from services.auth_service import (
     show_snack,
     tech_banner,
 )
+from services.chat_widget import build_chat_panel
 from services.inference import inspect_image, predict
-from services.project_data import display_class, get_class_info, list_class_keys, load_classes_config
+from services.project_data import (
+    active_run,
+    display_class,
+    get_class_info,
+    list_class_keys,
+    list_model_runs,
+    load_classes_config,
+    set_active_checkpoint,
+)
 from services.store import (
     get_sample_gallery,
     list_user_inspections,
@@ -77,6 +86,9 @@ def _confidence_color(conf: float, dark: bool = False) -> str:
 def build_user_view(page: ft.Page, user: dict) -> ft.Control:
     ensure_flet_compat(page)
     picker = create_file_picker(page)
+    cur_run = active_run() or {}
+    model_runs = list_model_runs()
+    default_run_name = cur_run.get("name") or (model_runs[0]["name"] if model_runs else "")
     state = {
         "image_path": None,
         "heatmap_path": None,
@@ -88,7 +100,40 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         "record_id": None,
         "sent_to_expert": False,
         "wiki_triage": "all",
+        "selected_run": default_run_name,
     }
+
+    def on_model_run_change(e):
+        chosen = getattr(e.control, "value", None) or default_run_name
+        state["selected_run"] = chosen
+        for r in model_runs:
+            if r["name"] == chosen:
+                try:
+                    set_active_checkpoint(r["checkpoint"])
+                except Exception:
+                    pass
+                show_snack(
+                    page,
+                    f"Đã chuyển sang mô hình {r.get('model_label', r['model'])} ({r['name']})",
+                    "#059669",
+                )
+                break
+
+    model_run_dropdown = make_dropdown(
+        label="Mô hình AI suy luận (Checkpoint thực tế)",
+        value=default_run_name,
+        options=[
+            (
+                r["name"],
+                f"{r.get('model_label', r['model'])} ({r['name']}) • Val F1: {(r.get('val_f1') or 0)*100:.1f}%",
+            )
+            for r in model_runs
+        ]
+        or [("default", "MobileNetV2 (best_model.pt)")],
+        on_change=on_model_run_change,
+        expand=True,
+        page=page,
+    )
 
     animal_field = css_input(
         label="Mã đàn / cá thể",
@@ -134,15 +179,17 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         sent_expert = sum(
             1 for r in records if int(r.get("requested_review") or 0) == 1 or r.get("review_status") == "reviewed"
         )
+        reviewed_by_expert = sum(1 for r in records if r.get("review_status") == "reviewed")
         pills = [
             header_stat_pill(
                 "Tổng lượt khám",
-                str(total_scans),
+                f"{total_scans} ca",
                 ft.Icons.QR_CODE_SCANNER_ROUNDED,
                 accent="#10B981" if p["IS_DARK"] else PRIMARY_DARK,
                 soft_bg=p["SOFT_EMERALD"],
-                badge_text="+12% hôm nay",
+                badge_text="Dữ liệu SQL thật" if total_scans > 0 else "Chưa có ca khám",
                 page=page,
+                col={"xs": 12, "sm": 6, "lg": 3},
             ),
             header_stat_pill(
                 "Độ tin cậy AI",
@@ -150,17 +197,29 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 ft.Icons.AUTO_GRAPH_ROUNDED,
                 accent="#38BDF8" if p["IS_DARK"] else "#0284C7",
                 soft_bg=p["SOFT_BLUE"],
-                badge_text="Hoạt động tốt",
+                badge_text="Softmax trung bình" if total_scans > 0 else "0 ca",
                 page=page,
+                col={"xs": 12, "sm": 6, "lg": 3},
             ),
             header_stat_pill(
                 "Gửi Bác sĩ Thú y",
-                str(sent_expert),
+                f"{sent_expert} ca",
                 ft.Icons.MEDICAL_SERVICES_ROUNDED,
                 accent="#F59E0B" if p["IS_DARK"] else "#D97706",
                 soft_bg=p["SOFT_AMBER"],
-                badge_text="Hội chẩn nhanh",
+                badge_text="Hội chẩn chuyên gia",
                 page=page,
+                col={"xs": 12, "sm": 6, "lg": 3},
+            ),
+            header_stat_pill(
+                "Đã có phác đồ BS",
+                f"{reviewed_by_expert} ca",
+                ft.Icons.VERIFIED_ROUNDED,
+                accent="#7C3AED",
+                soft_bg=p["SOFT_BLUE"],
+                badge_text="Chuyên gia đã duyệt",
+                page=page,
+                col={"xs": 12, "sm": 6, "lg": 3},
             ),
         ]
         header_host.content = tech_banner(
@@ -844,7 +903,49 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             ),
         )
 
-        actions_row = ft.Row([expert_btn, print_report_btn], spacing=10)
+        def handle_ask_chatbot(e=None):
+            if not isinstance(getattr(page, "data", None), dict):
+                page.data = {}
+            page.data["active_scan_result"] = res
+            opener = page.data.get("open_vet_chat")
+            prompt = (
+                f"Mô hình {res.get('architecture', 'AI')} vừa chẩn đoán '{disease_name}' "
+                f"(độ tin cậy Softmax {main_conf*100:.1f}%). "
+                "Hãy tư vấn chi tiết triệu chứng, liều lượng thuốc điều trị và cách ly cho ca này?"
+            )
+            if callable(opener):
+                opener(prompt)
+
+        ask_ai_btn = ft.Container(
+            expand=1,
+            height=52,
+            border_radius=12,
+            bgcolor=PRIMARY_DARK,
+            alignment=ft.alignment.center,
+            ink=True,
+            on_click=handle_ask_chatbot,
+            tooltip="Hỏi trực tiếp Trợ lý AI Thú y (Chatbot) về triệu chứng, liều lượng thuốc và cách ly của ca vừa quét",
+            content=ft.Row(
+                [
+                    ft.Icon(ft.Icons.SMART_TOY_ROUNDED, size=18, color="#FFFFFF"),
+                    ft.Text(
+                        "💬 Hỏi AI Thú y",
+                        size=14,
+                        weight=ft.FontWeight.BOLD,
+                        color="#FFFFFF",
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=6,
+                tight=True,
+            ),
+        )
+
+        actions_row = ft.Row([expert_btn, ask_ai_btn, print_report_btn], spacing=10)
+
+        arch_txt = res.get("architecture") or res.get("model_label") or "MobileNetV2"
+        run_txt = res.get("run_name") or ""
+        ms_txt = res.get("inference_ms", "-")
 
         right_card_host.content = css_card(
             padding=24,
@@ -867,7 +968,12 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     ),
                     ft.Column(
                         [
-                            ft.Text("Kết luận chẩn đoán từ Trí tuệ nhân tạo PigSkin AI:", size=13.5, color=p["TEXT_SECONDARY"]),
+                            ft.Text(
+                                f"Kết luận từ Tensor Softmax ({arch_txt} • {run_txt} • {ms_txt} ms):",
+                                size=13,
+                                weight=ft.FontWeight.W_600,
+                                color=p["TEXT_SECONDARY"],
+                            ),
                             ft.Row(
                                 [
                                     ft.Text(disease_name, size=22, weight=ft.FontWeight.BOLD, color=badge_fg, expand=True),
@@ -989,7 +1095,9 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
 
         try:
             # Start AI inference in background thread while running the 0.9s AI Laser Scanner sequence
-            pred_task = asyncio.create_task(asyncio.to_thread(predict, state["image_path"]))
+            pred_task = asyncio.create_task(
+                asyncio.to_thread(predict, state["image_path"], state.get("selected_run"))
+            )
             for msg in scan_steps:
                 state["scan_status"] = msg
                 render_dropzone()
@@ -997,6 +1105,9 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 await asyncio.sleep(0.3)
 
             res = await pred_task
+            if not isinstance(getattr(page, "data", None), dict):
+                page.data = {}
+            page.data["active_scan_result"] = res
             info = state["image_info"] or inspect_image(state["image_path"])
             auto_review = 1 if float(res.get("confidence") or 0.0) < 0.75 else 0
             rid = save(
@@ -1124,6 +1235,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     ),
                     dropzone_host,
                     sample_gallery_host,
+                    ft.Row([model_run_dropdown]),
                     ft.Row([animal_field, farm_field], spacing=12),
                     ft.Column(
                         [
@@ -1133,7 +1245,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                         spacing=6,
                         tight=True,
                     ),
-                    symptoms_field,
+                    ft.Row([symptoms_field]),
                     loading_bar,
                     cta_analyze_btn,
                 ],
@@ -1143,13 +1255,13 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
 
         return [
             header_host,
-            ft.Row(
+            ft.ResponsiveRow(
                 [
-                    left_card,
-                    right_card_host,
+                    ft.Container(col={"xs": 12, "lg": 6}, content=left_card),
+                    ft.Container(col={"xs": 12, "lg": 6}, content=right_card_host),
                 ],
+                run_spacing=20,
                 spacing=20,
-                vertical_alignment=ft.CrossAxisAlignment.START,
             ),
         ]
 
@@ -1323,7 +1435,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     spacing=12,
                 ),
             ),
-            list_host,
+            ft.Container(padding=ft.padding.only(bottom=90), content=list_host),
         ]
 
     # Tab 3: Wiki (3-Column Structured Sub-cards per Disease Card)
@@ -1484,13 +1596,36 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 page=page,
                 content=ft.Row([search_box, triage_chips_row], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ),
-            cards_col,
+            ft.Container(padding=ft.padding.only(bottom=90), content=cards_col),
+        ]
+
+    # Tab 4: Trợ lý AI Thú y (Chatbot) — khởi tạo sẵn để đồng bộ 100% với Popup Chat góc phải
+    main_chat_card, _ = build_chat_panel(
+        page=page,
+        user=user,
+        get_diagnosis_context=lambda: state.get("result"),
+        compact=False,
+    )
+
+    def build_chatbot_tab():
+        from services.chatbot_service import refresh_all_chat_views
+
+        refresh_all_chat_views(page)
+        return [
+            tech_banner(
+                "Trợ lý AI Thú y (Chatbot)",
+                "Chỉ giải đáp chuyên môn: Bệnh ngoài da ở heo, kết quả chẩn đoán mô hình Deep Learning (MobileNetV2, EfficientNet-B0) & hướng dẫn sử dụng PigSkinTech",
+                badge_text="Domain Guardrail Active",
+                page=page,
+            ),
+            main_chat_card,
         ]
 
     destinations = [
         ("Chẩn đoán bệnh", ft.Icons.IMAGE_SEARCH_OUTLINED, ft.Icons.IMAGE_SEARCH_ROUNDED),
         ("Lịch sử khám", ft.Icons.HISTORY_OUTLINED, ft.Icons.HISTORY_ROUNDED),
         ("Cẩm nang bệnh lý", ft.Icons.MENU_BOOK_OUTLINED, ft.Icons.MENU_BOOK_ROUNDED),
+        ("Trợ lý AI Thú y (Chatbot)", ft.Icons.SMART_TOY_OUTLINED, ft.Icons.SMART_TOY_ROUNDED),
     ]
 
     return build_role_shell(
@@ -1498,5 +1633,5 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         user=user,
         title="Không gian Người Chăn Nuôi",
         destinations=destinations,
-        tab_builders=[build_predict_tab, build_history_tab, build_wiki_tab],
+        tab_builders=[build_predict_tab, build_history_tab, build_wiki_tab, build_chatbot_tab],
     )

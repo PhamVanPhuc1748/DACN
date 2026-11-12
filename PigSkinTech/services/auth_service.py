@@ -223,18 +223,181 @@ def theme_tokens(page: ft.Page | None = None) -> dict:
     return THEMES["dark" if is_dark_mode(page) else "light"]
 
 
+def _rgb_color(value, inherited=None):
+    """Resolve a Flet color (including #AARRGGBB) against its parent."""
+    if not isinstance(value, str):
+        return inherited
+    color = value.strip().lower()
+    if color in ("transparent", "none"):
+        return inherited
+    color = {"white": "#ffffff", "black": "#000000"}.get(color, color)
+    if not color.startswith("#"):
+        return inherited
+    raw = color[1:]
+    if len(raw) == 3:
+        raw = "".join(char * 2 for char in raw)
+    try:
+        if len(raw) == 8:
+            alpha = int(raw[:2], 16) / 255
+            rgb = tuple(int(raw[index:index + 2], 16) for index in (2, 4, 6))
+            if inherited is not None:
+                return tuple(round(alpha * channel + (1 - alpha) * base) for channel, base in zip(rgb, inherited))
+            return rgb
+        if len(raw) == 6:
+            return tuple(int(raw[index:index + 2], 16) for index in (0, 2, 4))
+    except ValueError:
+        pass
+    return inherited
+
+
+def _luminance(rgb):
+    channels = [channel / 255 for channel in rgb]
+    linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def apply_theme_text_contrast(root, background=None, palette=None):
+    """Repair unreadable text after an in-place theme change or tab rebuild."""
+    seen = set()
+
+    def visit(control, parent_bg):
+        if id(control) in seen:
+            return
+        seen.add(id(control))
+        surface = getattr(control, "data", None)
+        if palette is not None and surface in ("theme_chat_card", "theme_chat_messages"):
+            control.bgcolor = palette["BG_CARD" if surface == "theme_chat_card" else "BG_MAIN"]
+        if isinstance(control, (ft.TextField, ft.Dropdown)) and palette is not None:
+            current_fill = getattr(control, "fill_color", None)
+            theme_fills = {THEMES["light"]["SUB_SURFACE"], THEMES["dark"]["SUB_SURFACE"]}
+            if current_fill in theme_fills:
+                control.fill_color = palette["BG_SUB"]
+        own_bg = _rgb_color(getattr(control, "bgcolor", None), parent_bg)
+        if isinstance(control, (ft.TextField, ft.Dropdown)) and getattr(control, "filled", False):
+            own_bg = _rgb_color(getattr(control, "fill_color", None), own_bg)
+        gradient = getattr(control, "gradient", None)
+        if gradient is not None and getattr(gradient, "colors", None):
+            colors = [_rgb_color(color, own_bg) for color in gradient.colors]
+            colors = [color for color in colors if color is not None]
+            if colors:
+                own_bg = tuple(round(sum(color[i] for color in colors) / len(colors)) for i in range(3))
+        if own_bg is None:
+            own_bg = (255, 255, 255)
+        foreground = "#FFFFFF" if _luminance(own_bg) < 0.18 else "#0F172A"
+
+        def fix_color(value):
+            rgb = _rgb_color(value)
+            if rgb is None:
+                return foreground
+            light, dark = sorted((_luminance(rgb), _luminance(own_bg)))
+            return foreground if (dark + 0.05) / (light + 0.05) < 4.5 else value
+
+        if isinstance(control, (ft.Text, ft.TextField, ft.Dropdown, ft.Markdown)):
+            if isinstance(control, ft.Markdown):
+                sheet = getattr(control, "md_style_sheet", None)
+                if sheet is not None:
+                    for name in ("p_text_style", "strong_text_style", "list_bullet_text_style", "em_text_style", "h1_text_style", "h2_text_style", "h3_text_style", "blockquote_text_style", "code_text_style"):
+                        style = getattr(sheet, name, None)
+                        if style is not None:
+                            style.color = fix_color(getattr(style, "color", None))
+            else:
+                control.color = fix_color(getattr(control, "color", None))
+                if isinstance(control, (ft.TextField, ft.Dropdown)):
+                    for name in ("label_style", "hint_style"):
+                        style = getattr(control, name, None)
+                        if style is not None:
+                            style.color = fix_color(getattr(style, "color", None))
+        for child in control._get_children():
+            child_bg = own_bg
+            if isinstance(control, ft.DataTable) and isinstance(child, ft.DataColumn):
+                child_bg = _rgb_color(getattr(control, "heading_row_color", None), own_bg)
+            visit(child, child_bg)
+
+    visit(root, background)
+
+
 def toggle_theme_mode(page: ft.Page):
+    old_theme = theme_tokens(page)
+    old_palette = get_theme_palette(page)
     new_mode = "light" if is_dark_mode(page) else "dark"
     session_set(page, "theme_mode", new_mode)
     page.theme_mode = ft.ThemeMode.DARK if new_mode == "dark" else ft.ThemeMode.LIGHT
     set_theme_page_context(page)
-    t = theme_tokens(page)
-    page.bgcolor = t["BG"]
-    current_route = getattr(page, "route", "/login") or "/login"
-    if hasattr(page, "go"):
-        page.go(current_route)
-    else:
-        page.update()
+    new_theme = theme_tokens(page)
+    new_palette = get_theme_palette(page)
+
+    background_keys = (
+        "BG", "SURFACE", "SUB_SURFACE", "SIDEBAR_BG", "SIDEBAR_HOVER",
+        "EMERALD_SOFT", "CYAN_SOFT", "AMBER_SOFT", "RED_SOFT", "PURPLE_SOFT",
+        "BG_MAIN", "BG_CARD", "BG_SUB", "BG_SIDEBAR", "SOFT_EMERALD",
+        "SOFT_BLUE", "SOFT_AMBER", "SOFT_RED", "SOFT_PURPLE",
+    )
+    foreground_keys = (
+        "TEXT", "SECONDARY", "MUTED", "SIDEBAR_TEXT", "SIDEBAR_ACTIVE_TEXT",
+        "TEXT_PRIMARY", "TEXT_SECONDARY", "TEXT_MUTED", "PROTOCOL_HEAD", "PROTOCOL_TEXT",
+        "EMERALD", "EMERALD_LIGHT", "CYAN", "AMBER", "RED", "PURPLE",
+    )
+
+    def color_map(keys):
+        result = {}
+        for before, after in ((old_theme, new_theme), (old_palette, new_palette)):
+            for key in keys:
+                source, target = before.get(key), after.get(key)
+                if isinstance(source, str) and isinstance(target, str) and source != target:
+                    result[source.lower()] = target
+        return result
+
+    backgrounds = color_map(background_keys)
+    foregrounds = color_map(foreground_keys)
+    borders = color_map(("BORDER", "BORDER_LIGHT", "DROPZONE_BORDER", "PROTOCOL_BORDER"))
+
+    def mapped(value, palette):
+        return palette.get(value.lower(), value) if isinstance(value, str) else value
+
+    visited = set()
+
+    def recolor(control):
+        if id(control) in visited:
+            return
+        visited.add(id(control))
+        for attr, palette in (
+            ("bgcolor", backgrounds), ("fill_color", backgrounds),
+            ("heading_row_color", backgrounds), ("color", foregrounds),
+            ("icon_color", foregrounds), ("border_color", borders),
+            ("focused_border_color", borders),
+        ):
+            if attr == "bgcolor" and getattr(control, "data", None) == "fixed_dark_sidebar_card":
+                continue
+            value = getattr(control, attr, None)
+            changed = mapped(value, palette)
+            if changed != value:
+                setattr(control, attr, changed)
+        border = getattr(control, "border", None)
+        if border is not None:
+            for side_name in ("top", "right", "bottom", "left"):
+                side = getattr(border, side_name, None)
+                if side is not None:
+                    side.color = mapped(side.color, borders)
+        gradient = getattr(control, "gradient", None)
+        if gradient is not None and getattr(gradient, "colors", None):
+            gradient.colors = [mapped(color, backgrounds) for color in gradient.colors]
+        if getattr(control, "data", None) == "theme_toggle":
+            control.icon = ft.Icons.LIGHT_MODE_ROUNDED if new_mode == "dark" else ft.Icons.DARK_MODE_ROUNDED
+            control.icon_color = "#FBBF24" if new_mode == "dark" else "#CBD5E1"
+        for child in control._get_children():
+            recolor(child)
+
+    roots = [*page.controls, *getattr(page, "overlay", [])]
+    for extra in (getattr(page, "dialog", None), getattr(page, "appbar", None)):
+        if extra is not None:
+            roots.append(extra)
+    for root in roots:
+        recolor(root)
+    page.bgcolor = new_theme["BG"]
+    page_bg = _rgb_color(page.bgcolor)
+    for root in roots:
+        apply_theme_text_contrast(root, page_bg, new_palette)
+    page.update()
 
 
 def card_shadow() -> ft.BoxShadow:
@@ -1635,6 +1798,7 @@ def build_role_shell(
     menu_items_controls: list[ft.Container] = []
 
     def style_menu_item(item_container: ft.Container, idx: int, is_hovered: bool = False):
+        t = theme_tokens(page)
         is_active = idx == active_state["index"]
         indicator: ft.Container = item_container.data["indicator"]
         icon_ctrl: ft.Icon = item_container.data["icon_ctrl"]
@@ -1683,6 +1847,7 @@ def build_role_shell(
             scroll=ft.ScrollMode.AUTO,
             spacing=20,
         )
+        apply_theme_text_contrast(body_host, _rgb_color(page.bgcolor), get_theme_palette(page))
 
         # Ẩn nút Floating Chat & đóng Popup khi đang mở Tab Chatbot chính; hiện lại ở các tab khác
         if isinstance(getattr(page, "data", None), dict):
@@ -1717,13 +1882,15 @@ def build_role_shell(
         spacing=0,
         vertical_alignment=ft.CrossAxisAlignment.STRETCH,
     )
-    return ft.Stack(
+    shell = ft.Stack(
         expand=True,
         controls=[
             main_row,
             chat_overlay_ctrl,
         ],
     )
+    apply_theme_text_contrast(shell, _rgb_color(page.bgcolor), get_theme_palette(page))
+    return shell
 
 
 def build_sidebar(
@@ -1843,6 +2010,7 @@ def build_sidebar(
         e.control.update()
 
     profile_and_footer = ft.Container(
+        data="fixed_dark_sidebar_card",
         padding=14,
         border_radius=14,
         bgcolor="#1E293B",
@@ -1870,6 +2038,7 @@ def build_sidebar(
                                             icon_color="#FBBF24" if dark else "#CBD5E1",
                                             tooltip="Đổi giao diện Sáng / Tối",
                                             on_click=lambda e: toggle_theme_mode(page),
+                                            data="theme_toggle",
                                         ),
                                     ],
                                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,

@@ -45,6 +45,15 @@ __all__ = [
 ]
 
 
+def _overlay_width(page: ft.Page) -> int:
+    return min(560, max(420, int((page.width or 1440) * 0.43)))
+
+
+def _overlay_height(page: ft.Page) -> int:
+    # Reserve room for the floating button and margins, including at 720px window height.
+    return max(480, min(740, int(page.height or 900) - 120))
+
+
 def build_chat_panel(
     page: ft.Page,
     user: dict,
@@ -71,6 +80,8 @@ def build_chat_panel(
         "Gemini AI • Đồng bộ trực tiếp với bảng ChatMessages (SQL Database)",
         size=11.5,
         color=pal["TEXT_MUTED"],
+        no_wrap=True,
+        overflow=ft.TextOverflow.ELLIPSIS,
     )
 
     chat_input = css_input(
@@ -101,12 +112,12 @@ def build_chat_panel(
 
         body_ctrl: ft.Control
         if is_user:
-            body_ctrl = ft.Text(final_text, size=13.5, color=text_col, selectable=True)
+            body_ctrl = ft.Text(final_text, size=14.5, color=text_col, selectable=True)
         else:
             md_style = ft.MarkdownStyleSheet(
-                p_text_style=ft.TextStyle(size=13.5, color=text_col),
-                strong_text_style=ft.TextStyle(size=13.5, weight=ft.FontWeight.BOLD, color=text_col),
-                list_bullet_text_style=ft.TextStyle(size=13.5, color=text_col),
+                p_text_style=ft.TextStyle(size=14.5, color=text_col),
+                strong_text_style=ft.TextStyle(size=14.5, weight=ft.FontWeight.BOLD, color=text_col),
+                list_bullet_text_style=ft.TextStyle(size=14.5, color=text_col),
             )
             body_ctrl = ft.Markdown(
                 value=final_text,
@@ -119,7 +130,8 @@ def build_chat_panel(
             alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START,
             controls=[
                 ft.Container(
-                    width=345 if compact else 680,
+                    width=None if compact else 680,
+                    expand=compact,
                     bgcolor=bubble_bg,
                     border=None if is_user else ft.border.all(1, cur_pal["BORDER_LIGHT"]),
                     border_radius=14,
@@ -313,6 +325,7 @@ def build_chat_panel(
                     controls=[
                         ft.Row(
                             spacing=10,
+                            expand=True,
                             controls=[
                                 ft.Container(
                                     width=40,
@@ -325,6 +338,7 @@ def build_chat_panel(
                                 ft.Column(
                                     spacing=2,
                                     tight=True,
+                                    expand=True,
                                     controls=[
                                         ft.Text(
                                             "Trợ lý AI Thú y (Chatbot)",
@@ -348,7 +362,9 @@ def build_chat_panel(
                 context_banner_box,
                 chips_row,
                 ft.Container(
-                    height=210 if compact else 410,
+                    height=None if compact else 410,
+                    expand=compact,
+                    data="theme_chat_messages",
                     bgcolor=pal["BG_MAIN"],
                     border=ft.border.all(1, pal["BORDER_LIGHT"]),
                     border_radius=12,
@@ -375,6 +391,7 @@ def build_chat_panel(
             ],
         ),
     )
+    card.data = "theme_chat_card"
     return card, send_message
 
 
@@ -397,8 +414,8 @@ def build_chat_overlay(
 
     drawer_container = ft.Container(
         visible=False,
-        width=420,
-        height=560,
+        width=_overlay_width(page),
+        height=_overlay_height(page),
         shadow=css_shadow(0.28 if pal["IS_DARK"] else 0.14, 32, 10),
         animate=make_smooth_animation(200),
         content=panel_ctrl,
@@ -463,6 +480,8 @@ def build_chat_overlay(
         drawer_container.visible = not drawer_container.visible
         _set_fab_icon(ft.Icons.CLOSE_ROUNDED if drawer_container.visible else ft.Icons.SMART_TOY_ROUNDED)
         if drawer_container.visible:
+            drawer_container.width = _overlay_width(page)
+            drawer_container.height = _overlay_height(page)
             refresh_all_chat_views(page)
         else:
             page.update()
@@ -471,6 +490,8 @@ def build_chat_overlay(
         overlay_root.visible = True
         floating_chat_btn.visible = True
         drawer_container.visible = True
+        drawer_container.width = _overlay_width(page)
+        drawer_container.height = _overlay_height(page)
         _set_fab_icon(ft.Icons.CLOSE_ROUNDED)
         refresh_all_chat_views(page)
         if prefill:

@@ -1,0 +1,48 @@
+{
+  "root": "E:\\code\\DACN\\data\\raw\\Pig Skin Disease Single Label v4.v1-class-test.folder",
+  "images": 2017,
+  "class_counts": {
+    "train": {
+      "Healthy": 202,
+      "Infected_Bacterial_Erysipelas": 151,
+      "Infected_Bacterial_Greasy_Pig_Disease": 159,
+      "Infected_Environmental_Dermatitis": 136,
+      "Infected_Environmental_Sunburn": 154,
+      "Infected_Fungal_Pityriasis_Rosea": 168,
+      "Infected_Fungal_Ringworm": 146,
+      "Infected_Parasitic_Mange": 189,
+      "Infected_Viral_Foot_and_Mouth_Disease": 132,
+      "Infected_Viral_Swinepox": 139
+    },
+    "val": {
+      "Healthy": 31,
+      "Infected_Bacterial_Erysipelas": 30,
+      "Infected_Bacterial_Greasy_Pig_Disease": 17,
+      "Infected_Environmental_Dermatitis": 25,
+      "Infected_Environmental_Sunburn": 24,
+      "Infected_Fungal_Pityriasis_Rosea": 17,
+      "Infected_Fungal_Ringworm": 24,
+      "Infected_Parasitic_Mange": 24,
+      "Infected_Viral_Foot_and_Mouth_Disease": 27,
+      "Infected_Viral_Swinepox": 21
+    },
+    "test": {
+      "Healthy": 26,
+      "Infected_Bacterial_Erysipelas": 14,
+      "Infected_Bacterial_Greasy_Pig_Disease": 31,
+      "Infected_Environmental_Dermatitis": 21,
+      "Infected_Environmental_Sunburn": 13,
+      "Infected_Fungal_Pityriasis_Rosea": 26,
+      "Infected_Fungal_Ringworm": 13,
+      "Infected_Parasitic_Mange": 20,
+      "Infected_Viral_Foot_and_Mouth_Disease": 21,
+      "Infected_Viral_Swinepox": 16
+    }
+  },
+  "exact_duplicate_rows_excluded": 18,
+  "notes": [
+    "Draft generated from existing class folders; review labels and split assignments before training.",
+    "Existing train/valid/test split was preserved; duplicate exact copies were omitted from the manifest and listed in excluded_exact_duplicates.csv.",
+    "group_id is a path identifier because pig/session source metadata is unavailable."
+  ]
+}

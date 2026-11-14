@@ -2,6 +2,9 @@
 import asyncio
 import inspect
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import flet as ft
 
@@ -624,6 +627,28 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             page=page,
         )
 
+        def refresh_model_runs(e):
+            nonlocal runs
+            runs = list_model_runs()
+            run_dropdown.options = [
+                ft.dropdown.Option(
+                    key=r["checkpoint"],
+                    text=(f"{r['name']}  ·  {model_names.get(r['model'], r['model'])}  ·  "
+                          f"Val macro-F1 {r['val_f1']:.1%}  ·  {r['classes_count']} lớp")
+                    if isinstance(r.get("val_f1"), (int, float))
+                    else f"{r['name']}  ·  {model_names.get(r['model'], r['model'])}  ·  {r['classes_count']} lớp",
+                )
+                for r in runs
+            ]
+            if runs:
+                run_dropdown.value = runs[0]["checkpoint"]
+                update_checkpoint_info(runs[0]["checkpoint"])
+                show_snack(page, f"Đã tải lại {len(runs)} phiên bản model.", "#059669")
+            else:
+                show_snack(page, "Chưa có run hoàn tất để chọn.", "#D97706")
+            refresh_config_header()
+            page.update()
+
         def on_checkpoint_picked(e):
             files = getattr(e, "files", None) or []
             if files and getattr(files[0], "path", None):
@@ -688,6 +713,14 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 show_snack(page, f"Đã lưu và kích hoạt {model_label} cho toàn ứng dụng.", "#059669")
             except Exception as err:
                 show_snack(page, str(err), "#DC2626")
+
+        def open_training_window(e):
+            script = Path(__file__).resolve().parents[1] / "training_window.py"
+            try:
+                subprocess.Popen([sys.executable, str(script)], cwd=str(script.parent))
+                show_snack(page, "Đã mở cửa sổ huấn luyện AI.", "#059669")
+            except OSError as err:
+                show_snack(page, f"Không mở được cửa sổ huấn luyện: {err}", "#DC2626")
 
         config_header_host = ft.Container()
 
@@ -770,7 +803,10 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                         color=t["SECONDARY"],
                     ),
                     active_model_status,
-                    ft.Row([run_dropdown]),
+                    ft.Row([
+                        run_dropdown,
+                        ft.OutlinedButton("Làm mới danh sách", icon=ft.Icons.REFRESH_ROUNDED, on_click=refresh_model_runs),
+                    ]),
                     ft.Row(
                         [
                             custom_ckpt_field,
@@ -792,6 +828,11 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                                 "Lưu & dùng model",
                                 icon=ft.Icons.CHECK_CIRCLE_ROUNDED,
                                 on_click=handle_activate_model,
+                            ),
+                            ft.OutlinedButton(
+                                "Mở phòng huấn luyện AI",
+                                icon=ft.Icons.SCIENCE_OUTLINED,
+                                on_click=open_training_window,
                             ),
                         ],
                         spacing=10,

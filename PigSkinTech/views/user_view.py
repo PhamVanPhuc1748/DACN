@@ -25,9 +25,7 @@ from services.project_data import (
     display_class,
     get_class_info,
     list_class_keys,
-    list_model_runs,
     load_classes_config,
-    set_active_checkpoint,
 )
 from services.store import (
     get_sample_gallery,
@@ -87,8 +85,6 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
     ensure_flet_compat(page)
     picker = create_file_picker(page)
     cur_run = active_run() or {}
-    model_runs = list_model_runs()
-    default_run_name = cur_run.get("name") or (model_runs[0]["name"] if model_runs else "")
     state = {
         "image_path": None,
         "heatmap_path": None,
@@ -100,39 +96,13 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         "record_id": None,
         "sent_to_expert": False,
         "wiki_triage": "all",
-        "selected_run": default_run_name,
     }
 
-    def on_model_run_change(e):
-        chosen = getattr(e.control, "value", None) or default_run_name
-        state["selected_run"] = chosen
-        for r in model_runs:
-            if r["name"] == chosen:
-                try:
-                    set_active_checkpoint(r["checkpoint"])
-                except Exception:
-                    pass
-                show_snack(
-                    page,
-                    f"Đã chuyển sang mô hình {r.get('model_label', r['model'])} ({r['name']})",
-                    "#059669",
-                )
-                break
-
-    model_run_dropdown = make_dropdown(
-        label="Mô hình AI suy luận (Checkpoint thực tế)",
-        value=default_run_name,
-        options=[
-            (
-                r["name"],
-                f"{r.get('model_label', r['model'])} ({r['name']}) • Val F1: {(r.get('val_f1') or 0)*100:.1f}%",
-            )
-            for r in model_runs
-        ]
-        or [("default", "MobileNetV2 (best_model.pt)")],
-        on_change=on_model_run_change,
-        expand=True,
-        page=page,
+    model_status_text = ft.Text(
+        f"Model đang dùng: {cur_run['model_label']} ({cur_run['name']})"
+        if cur_run else "Admin chưa kích hoạt model AI.",
+        size=13,
+        color=PRIMARY_DARK if cur_run else "#DC2626",
     )
 
     animal_field = css_input(
@@ -280,16 +250,22 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 if (state["heatmap_mode"] and state["heatmap_path"])
                 else state["image_path"]
             )
+            preview_image = make_image(
+                display_img_path,
+                width=None,
+                height=None,
+                border_radius=12,
+                fit=getattr(ft.ImageFit, "CONTAIN", None),
+            )
+            preview_image.expand = True
             stack_children: list[ft.Control] = [
                 ft.Container(
+                    left=0,
+                    right=0,
+                    top=0,
+                    bottom=0,
                     alignment=ft.alignment.center,
-                    content=make_image(
-                        display_img_path,
-                        width=480,
-                        height=204,
-                        border_radius=12,
-                        fit=getattr(ft.ImageFit, "COVER", None),
-                    ),
+                    content=preview_image,
                 ),
                 ft.Container(
                     right=10,
@@ -423,7 +399,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 )
 
             dropzone_host.content = ft.Container(
-                height=220,
+                height=340,
                 gradient=ft.LinearGradient(
                     begin=ft.alignment.top_left,
                     end=ft.alignment.bottom_right,
@@ -617,6 +593,9 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             conf = float(rec.get("confidence") or 0.0)
             final_cls = rec.get("expert_label") or rec.get("predicted_class")
             is_rev = rec.get("review_status") == "reviewed"
+            is_requested = int(rec.get("requested_review") or 0) == 1
+            review_label = ("Đã thẩm định" if is_rev else "Chờ duyệt" if is_requested
+                            else "Nên gửi bác sĩ" if conf < 0.75 else "Chưa gửi thẩm định")
             rows.append(
                 ft.Container(
                     padding=12,
@@ -657,7 +636,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                                 padding=ft.padding.symmetric(horizontal=10, vertical=5),
                                 border_radius=10,
                                 content=ft.Text(
-                                    "Đã thẩm định" if is_rev else "Chờ duyệt",
+                                    review_label,
                                     size=12.5,
                                     color=("#34D399" if p["IS_DARK"] else PRIMARY_DARK) if is_rev else ("#FBBF24" if p["IS_DARK"] else "#D97706"),
                                     weight=ft.FontWeight.W_600,
@@ -1025,6 +1004,12 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                             spacing=6,
                         ),
                     ),
+                    ft.Text(
+                        "Điểm AI còn thấp. Bạn nên gửi ca này để Bác sĩ Thú y thẩm định.",
+                        size=13.5,
+                        color="#FBBF24" if p["IS_DARK"] else "#92400E",
+                        visible=main_conf < 0.75 and not state["sent_to_expert"],
+                    ),
                     actions_row,
                     ft.Divider(height=12, color=p["BORDER_LIGHT"]),
                     ft.Text("3 lần khám gần nhất", size=15, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
@@ -1085,6 +1070,17 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             show_snack(page, "Vui lòng tải ảnh da heo hoặc chọn 1 mẫu thử bên dưới.", "#DC2626")
             return
 
+        configured_run = active_run()
+        model_status_text.value = (
+            f"Model đang dùng: {configured_run['model_label']} ({configured_run['name']})"
+            if configured_run else "Admin chưa kích hoạt model AI."
+        )
+        model_status_text.color = PRIMARY_DARK if configured_run else "#DC2626"
+        if not configured_run:
+            page.update()
+            show_snack(page, "Admin chưa kích hoạt model AI để phân tích ảnh.", "#DC2626")
+            return
+
         loading_bar.visible = True
         state["scanning"] = True
         scan_steps = [
@@ -1096,7 +1092,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         try:
             # Start AI inference in background thread while running the 0.9s AI Laser Scanner sequence
             pred_task = asyncio.create_task(
-                asyncio.to_thread(predict, state["image_path"], state.get("selected_run"))
+                asyncio.to_thread(predict, state["image_path"])
             )
             for msg in scan_steps:
                 state["scan_status"] = msg
@@ -1105,11 +1101,12 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 await asyncio.sleep(0.3)
 
             res = await pred_task
+            if res.get("mode") != "ai":
+                raise RuntimeError(res.get("message") or "Admin chưa kích hoạt model AI.")
             if not isinstance(getattr(page, "data", None), dict):
                 page.data = {}
             page.data["active_scan_result"] = res
             info = state["image_info"] or inspect_image(state["image_path"])
-            auto_review = 1 if float(res.get("confidence") or 0.0) < 0.75 else 0
             rid = save(
                 info,
                 res,
@@ -1120,11 +1117,11 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     "user_id": user.get("user_id", 1),
                     "user_email": user.get("email", ""),
                     "user_name": user.get("full_name", ""),
-                    "requested_review": auto_review,
+                    "requested_review": 0,
                 },
                 source_image=state["image_path"],
             )
-            state.update(result=res, record_id=rid, sent_to_expert=bool(auto_review), scanning=False)
+            state.update(result=res, record_id=rid, sent_to_expert=False, scanning=False)
             refresh_page_header()
             render_dropzone()
 
@@ -1235,7 +1232,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     ),
                     dropzone_host,
                     sample_gallery_host,
-                    ft.Row([model_run_dropdown]),
+                    ft.Row([model_status_text]),
                     ft.Row([animal_field, farm_field], spacing=12),
                     ft.Column(
                         [
@@ -1294,10 +1291,13 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 )
             for rec in records:
                 is_reviewed = rec.get("review_status") == "reviewed"
-                status_text = "Đã được Bác sĩ Thú y xác nhận" if is_reviewed else "Đang chờ duyệt"
-                status_color = PRIMARY_DARK if is_reviewed else "#D97706"
-                final_code = rec.get("expert_label") or rec.get("predicted_class")
+                is_requested = int(rec.get("requested_review") or 0) == 1
                 conf = float(rec.get("confidence") or 0.0)
+                status_text = ("Đã được Bác sĩ Thú y xác nhận" if is_reviewed else
+                               "Đang chờ duyệt" if is_requested else
+                               "Nên gửi Bác sĩ Thú y" if conf < 0.75 else "Chưa gửi thẩm định")
+                status_color = PRIMARY_DARK if is_reviewed else "#D97706" if is_requested or conf < 0.75 else "#64748B"
+                final_code = rec.get("expert_label") or rec.get("predicted_class")
                 conf_col = _confidence_color(conf, cur_p["IS_DARK"])
 
                 expert_feedback = (

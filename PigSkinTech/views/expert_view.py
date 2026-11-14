@@ -34,7 +34,6 @@ from services.project_data import (
     display_class,
     get_class_info,
     list_class_keys,
-    list_model_runs,
     load_classes_config,
 )
 from services.store import (
@@ -175,13 +174,16 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
     # Tab 1: Review Queue
     def build_queue_tab():
         t = theme_tokens(page)
-        all_items = list_review_queue(confidence_threshold=0.75)
+        all_items = list_review_queue(include_reviewed=True)
         all_records = recent("")
         if state["selected_case"] is None and all_items:
             state["selected_case"] = all_items[0]
 
         pending_count = sum(1 for r in all_items if r.get("review_status") != "reviewed")
-        low_conf_count = sum(1 for r in all_items if float(r.get("confidence") or 0.0) < 0.75)
+        low_conf_count = sum(
+            1 for r in all_items
+            if r.get("review_status") != "reviewed" and float(r.get("confidence") or 0.0) < 0.75
+        )
         reviewed_total = sum(1 for r in all_records if r.get("review_status") == "reviewed")
         agreed_total = sum(
             1
@@ -252,7 +254,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             if cur_f == "pending":
                 filtered = [r for r in all_items if r.get("review_status") != "reviewed"]
             elif cur_f == "low_conf":
-                filtered = [r for r in all_items if float(r.get("confidence") or 0.0) < 0.75]
+                filtered = [r for r in all_items if r.get("review_status") != "reviewed" and float(r.get("confidence") or 0.0) < 0.75]
             elif cur_f == "reviewed":
                 filtered = [r for r in all_items if r.get("review_status") == "reviewed"]
             if q_str:
@@ -474,8 +476,10 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
     # Tab 2: Diagnosis & Relabeling
     def build_relabel_tab():
         t = theme_tokens(page)
-        queue_items = list_review_queue(confidence_threshold=0.75)
-        rec = state["selected_case"] or (queue_items[0] if queue_items else None)
+        queue_items = list_review_queue()
+        selected_id = (state["selected_case"] or {}).get("id")
+        rec = next((item for item in queue_items if item["id"] == selected_id), None)
+        rec = rec or (queue_items[0] if queue_items else None)
         if not rec:
             empty_pills = [
                 header_stat_pill(
@@ -615,8 +619,8 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                 expert_note=treatment_note.value or "",
                 expert_email=user.get("email", "bs.thuy.pigskin@gmail.com"),
             )
-            refreshed = list_review_queue(confidence_threshold=0.75)
-            state["selected_case"] = next((x for x in refreshed if int(x["id"]) == int(rec["id"])), rec)
+            refreshed = list_review_queue()
+            state["selected_case"] = refreshed[0] if refreshed else None
             show_snack(
                 page,
                 f"Đã lưu kết quả thẩm định hồ sơ {case_code} và gửi phác đồ về cho User!",
@@ -1123,22 +1127,12 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
     # Tab 4: Batch Inference
     def build_batch_tab():
         t = theme_tokens(page)
-        runs = list_model_runs()
         cur_r = active_run() or {}
-        default_run = state.get("batch_run") or cur_r.get("name") or (runs[0]["name"] if runs else "")
-        state["batch_run"] = default_run
-
-        batch_model_dd = make_dropdown(
-            label="Kiến trúc mô hình kiểm thử",
-            value=default_run,
-            options=[
-                (r["name"], f"{r.get('model_label', r['model'])} ({r['name']})")
-                for r in runs
-            ]
-            or [("default", "MobileNetV2")],
-            on_change=lambda e: state.update({"batch_run": e.control.value}),
-            width=290,
-            page=page,
+        batch_model_label = ft.Text(
+            f"Model Admin đã kích hoạt: {cur_r['model_label']} ({cur_r['name']})"
+            if cur_r else "Admin chưa kích hoạt model AI.",
+            size=13,
+            color=t["EMERALD"] if cur_r else t["RED"],
         )
 
         status_text = ft.Text(
@@ -1311,7 +1305,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             status_text.value = "Đang phân tích hàng loạt bằng Trí tuệ nhân tạo PigSkin AI..."
             page.update()
             try:
-                res = await asyncio.to_thread(predict_batch, state["batch_paths"], state.get("batch_run"))
+                res = await asyncio.to_thread(predict_batch, state["batch_paths"])
                 state["batch_results"] = res
                 status_text.value = f"Hoàn tất kiểm thử {len(res)} ảnh!"
                 render_batch_results()
@@ -1330,7 +1324,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                     [
                         ft.Row(
                             [
-                                batch_model_dd,
+                                batch_model_label,
                                 ft.OutlinedButton("Chọn nhiều ảnh (Batch)", icon=ft.Icons.COLLECTIONS_ROUNDED, on_click=handle_pick_batch),
                                 ft.OutlinedButton("Nạp bộ 5 ảnh mẫu lâm sàng", icon=ft.Icons.AUTO_AWESOME_MOTION_ROUNDED, on_click=handle_load_sample_batch),
                                 ft.FilledButton("Chạy Phân tích Hàng loạt", icon=ft.Icons.BOLT_ROUNDED, on_click=handle_run_batch),

@@ -1735,7 +1735,10 @@ def export_inspections_csv(
                     "Triệu Chứng": r.get("symptoms") or "",
                     "AI Dự Đoán": f"{display_class(pred_cls)} ({pred_cls})" if pred_cls else "",
                     "Độ Tin Cậy AI (%)": f"{conf_pct:.1f}",
-                    "Trạng Thái Thẩm Định": "Đã thẩm định" if r.get("review_status") == "reviewed" else "Chờ duyệt",
+                    "Trạng Thái Thẩm Định": (
+                        "Đã thẩm định" if r.get("review_status") == "reviewed"
+                        else "Chờ duyệt" if r.get("requested_review") else "Chưa gửi"
+                    ),
                     "Nhãn Chuẩn Chuyên Gia": f"{display_class(exp_cls)} ({exp_cls})" if exp_cls else "",
                     "Bác Sĩ Thú Y Duyệt": r.get("reviewed_by") or "",
                     "Phác Đồ / Ghi Chú Chuyên Gia": r.get("expert_note") or r.get("recommendation") or "",

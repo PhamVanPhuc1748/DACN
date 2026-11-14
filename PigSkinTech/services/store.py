@@ -45,7 +45,7 @@ CASE_COLUMNS = {
     "onset_date": "TEXT NOT NULL DEFAULT ''",
     "entered_at": "TEXT NOT NULL DEFAULT ''",
     "image_path": "TEXT NOT NULL DEFAULT ''",
-    "review_status": "TEXT NOT NULL DEFAULT 'needs_review'",
+    "review_status": "TEXT NOT NULL DEFAULT 'not_requested'",
     "review_note": "TEXT NOT NULL DEFAULT ''",
     "scores_json": "TEXT NOT NULL DEFAULT '[]'",
     "model_info": "TEXT NOT NULL DEFAULT ''",
@@ -535,7 +535,7 @@ def initialize():
                     onset_date NVARCHAR(64) NOT NULL DEFAULT '',
                     entered_at NVARCHAR(64) NOT NULL DEFAULT '',
                     image_path NVARCHAR(1000) NOT NULL DEFAULT '',
-                    review_status NVARCHAR(64) NOT NULL DEFAULT 'needs_review',
+                    review_status NVARCHAR(64) NOT NULL DEFAULT 'not_requested',
                     review_note NVARCHAR(MAX) NOT NULL DEFAULT '',
                     scores_json NVARCHAR(MAX) NOT NULL DEFAULT '[]',
                     model_info NVARCHAR(255) NOT NULL DEFAULT '',
@@ -823,7 +823,7 @@ def save(info, result, case=None, source_image=None):
                     case.get("symptoms", "").strip(),
                     case.get("onset_date", "").strip(),
                     case.get("entered_at", "").strip(),
-                    case.get("review_status", "needs_review"),
+                    case.get("review_status", "not_requested"),
                     case.get("review_note", "").strip(),
                     json.dumps(result.get("scores", []), ensure_ascii=False),
                     str(result.get("model_info", "")),
@@ -914,22 +914,22 @@ def request_expert_review(record_id: int) -> None:
     initialize()
     with conn() as c:
         c.execute(
-            "UPDATE inspections SET requested_review=1, review_status='needs_review' WHERE id=?",
+            """UPDATE inspections SET requested_review=1, review_status='needs_review'
+            WHERE id=? AND requested_review=0 AND review_status!='reviewed'""",
             (record_id,),
         )
 
 
-def list_review_queue(confidence_threshold: float = 0.75) -> list[dict]:
-    """Return cases sent by User for review OR where AI confidence < 75% via direct SQL SELECT."""
+def list_review_queue(include_reviewed: bool = False) -> list[dict]:
+    """Return user-requested pending cases; optionally include completed reviews for expert history."""
     initialize()
     with conn() as c:
         rows = c.execute(
             """SELECT * FROM inspections
-            WHERE requested_review = 1
-               OR (confidence IS NOT NULL AND confidence < ?)
-               OR review_status = 'needs_review'
+            WHERE (requested_review = 1 AND review_status = 'needs_review')
+               OR (? = 1 AND review_status = 'reviewed')
             ORDER BY CASE WHEN review_status='needs_review' THEN 0 ELSE 1 END, id DESC""",
-            (confidence_threshold,),
+            (1 if include_reviewed else 0,),
         ).fetchall()
     return [ensure_case_code(dict(r)) for r in rows]
 
@@ -1035,7 +1035,7 @@ def get_system_stats() -> dict:
             pending_count = int(
                 kpi_row.get("pending_reviews")
                 if kpi_row.get("pending_reviews") is not None
-                else (kpi_row.get("pending_count") or max(0, total_inspections - reviewed_count))
+                else (kpi_row.get("pending_count") if kpi_row.get("pending_count") is not None else 0)
             )
             curated_count = int(kpi_row.get("dataset_count") or kpi_row.get("curated_count") or 0)
             ai_accuracy_vs_expert = float(
@@ -1056,7 +1056,7 @@ def get_system_stats() -> dict:
                 (SELECT COUNT(1) FROM {i_tbl}) AS total_inspections,
                 (SELECT COUNT(1) FROM {i_tbl} WHERE review_status='reviewed' AND agreed_with_ai IS NOT NULL) AS reviewed_count,
                 (SELECT COUNT(1) FROM {i_tbl} WHERE review_status='reviewed' AND agreed_with_ai=1) AS agreed_count,
-                (SELECT COUNT(1) FROM {i_tbl} WHERE review_status != 'reviewed') AS pending_count,
+                (SELECT COUNT(1) FROM {i_tbl} WHERE requested_review=1 AND review_status='needs_review') AS pending_count,
                 (SELECT COUNT(1) FROM {i_tbl} WHERE in_dataset=1) AS curated_count,
                 (SELECT COALESCE(AVG(confidence), 0.0) FROM {i_tbl}) AS avg_confidence,
                 (SELECT COUNT(1) FROM {c_tbl}) AS total_chats

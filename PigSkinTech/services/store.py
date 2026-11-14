@@ -5,6 +5,7 @@ from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import threading
@@ -62,6 +63,58 @@ CASE_COLUMNS = {
     "danger_level": "TEXT NOT NULL DEFAULT ''",
     "recommendation": "TEXT NOT NULL DEFAULT ''",
 }
+
+
+def _migrate_sqlite_review_default(c) -> None:
+    """Replace the legacy SQLite default without changing case IDs or review history."""
+    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='inspections'").fetchone()
+    if not row:
+        return
+    create_sql = row["sql"]
+    if not re.search(r"review_status\s+TEXT\s+NOT NULL\s+DEFAULT\s+'needs_review'", create_sql, re.I):
+        return
+    for table in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+        table_name = table["name"].replace('"', '""')
+        if any(
+            table_name.lower() == "inspections" or fk["table"].lower() == "inspections"
+            for fk in c.execute(f'PRAGMA foreign_key_list("{table_name}")')
+        ):
+            raise RuntimeError("Cannot migrate inspections referenced by foreign keys automatically")
+    related = c.execute(
+        "SELECT type, sql FROM sqlite_master WHERE tbl_name='inspections' "
+        "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
+    ).fetchall()
+    views = c.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='view' AND sql LIKE '%inspections%'"
+    ).fetchall()
+    migrated_sql = re.sub(
+        r"\bCREATE\s+TABLE\s+inspections\b",
+        "CREATE TABLE inspections_review_migration",
+        create_sql,
+        count=1,
+        flags=re.I,
+    )
+    migrated_sql = re.sub(
+        r"(review_status\s+TEXT\s+NOT NULL\s+DEFAULT\s+)'needs_review'",
+        r"\1'not_requested'",
+        migrated_sql,
+        count=1,
+        flags=re.I,
+    )
+    if migrated_sql == create_sql or "inspections_review_migration" not in migrated_sql:
+        raise RuntimeError("Cannot safely migrate the inspections table definition")
+    c.execute(migrated_sql)
+    columns = [col["name"] for col in c.execute("PRAGMA table_info(inspections)").fetchall()]
+    names = ", ".join('"' + name.replace('"', '""') + '"' for name in columns)
+    c.execute(f"INSERT INTO inspections_review_migration ({names}) SELECT {names} FROM inspections")
+    for view in views:
+        c.execute('DROP VIEW "' + view["name"].replace('"', '""') + '"')
+    c.execute("DROP TABLE inspections")
+    c.execute("ALTER TABLE inspections_review_migration RENAME TO inspections")
+    for item in related:
+        c.execute(item["sql"])
+    for view in views:
+        c.execute(view["sql"])
 
 DEFAULT_RBAC_USERS = [
     {
@@ -561,6 +614,28 @@ def initialize():
             c.execute("IF COL_LENGTH('dbo.inspections', 'expert_display_name') IS NULL ALTER TABLE dbo.inspections ADD expert_display_name NVARCHAR(255) NULL;")
             c.execute("IF COL_LENGTH('dbo.inspections', 'inference_ms') IS NULL ALTER TABLE dbo.inspections ADD inference_ms FLOAT NULL;")
             c.execute("IF COL_LENGTH('dbo.inspections', 'case_id') IS NULL ALTER TABLE dbo.inspections ADD case_id NVARCHAR(64) NOT NULL DEFAULT '';")
+            c.execute("IF COL_LENGTH('dbo.inspections', 'requested_review') IS NULL ALTER TABLE dbo.inspections ADD requested_review INT NOT NULL DEFAULT 0;")
+            c.execute("IF COL_LENGTH('dbo.inspections', 'review_status') IS NULL ALTER TABLE dbo.inspections ADD review_status NVARCHAR(64) NOT NULL DEFAULT 'not_requested';")
+            c.execute("IF COL_LENGTH('dbo.inspections', 'expert_label') IS NULL ALTER TABLE dbo.inspections ADD expert_label NVARCHAR(255) NOT NULL DEFAULT '';")
+            c.execute("IF COL_LENGTH('dbo.inspections', 'reviewed_at') IS NULL ALTER TABLE dbo.inspections ADD reviewed_at NVARCHAR(64) NOT NULL DEFAULT '';")
+            c.execute("IF COL_LENGTH('dbo.inspections', 'in_dataset') IS NULL ALTER TABLE dbo.inspections ADD in_dataset INT NOT NULL DEFAULT 0;")
+            c.execute("""
+                DECLARE @default_name sysname, @default_sql nvarchar(max), @drop_sql nvarchar(max);
+                SELECT @default_name = dc.name, @default_sql = dc.definition
+                FROM sys.default_constraints dc
+                JOIN sys.columns col ON col.object_id = dc.parent_object_id AND col.column_id = dc.parent_column_id
+                WHERE dc.parent_object_id = OBJECT_ID(N'dbo.inspections') AND col.name = N'review_status';
+                IF @default_sql IS NULL OR @default_sql NOT LIKE '%not_requested%'
+                BEGIN
+                    IF @default_name IS NOT NULL
+                    BEGIN
+                        SET @drop_sql = N'ALTER TABLE dbo.inspections DROP CONSTRAINT ' + QUOTENAME(@default_name);
+                        EXEC(@drop_sql);
+                    END;
+                    ALTER TABLE dbo.inspections ADD CONSTRAINT DF_inspections_review_status_current
+                        DEFAULT 'not_requested' FOR review_status;
+                END;
+            """)
 
             c.execute(
                 """
@@ -595,12 +670,13 @@ def initialize():
             c.execute(
                 """
                 IF OBJECT_ID(N'dbo.vw_DashboardKPIs', N'V') IS NULL
+                   OR COALESCE(OBJECT_DEFINITION(OBJECT_ID(N'dbo.vw_DashboardKPIs')), N'') NOT LIKE N'%needs_review%'
                 EXEC(N'
-                CREATE VIEW dbo.vw_DashboardKPIs AS
+                CREATE OR ALTER VIEW dbo.vw_DashboardKPIs AS
                 SELECT
                     (SELECT COUNT(1) FROM dbo.users WHERE is_active = 1) AS total_users,
                     COUNT(1) AS total_inspections,
-                    ISNULL(SUM(CASE WHEN requested_review = 1 AND review_status != ''reviewed'' THEN 1 ELSE 0 END), 0) AS pending_reviews,
+                    ISNULL(SUM(CASE WHEN requested_review = 1 AND review_status = ''needs_review'' THEN 1 ELSE 0 END), 0) AS pending_reviews,
                     ISNULL(SUM(CASE WHEN review_status = ''reviewed'' THEN 1 ELSE 0 END), 0) AS reviewed_count,
                     ISNULL(SUM(CASE WHEN review_status = ''reviewed'' AND agreed_with_ai = 1 THEN 1 ELSE 0 END), 0) AS agreed_count,
                     CAST(
@@ -656,6 +732,7 @@ def initialize():
             for name, definition in CASE_COLUMNS.items():
                 if name not in existing:
                     c.execute(f"ALTER TABLE inspections ADD COLUMN {name} {definition}")
+            _migrate_sqlite_review_default(c)
 
             c.execute(
                 """CREATE TABLE IF NOT EXISTS ChatMessages (
@@ -680,13 +757,18 @@ def initialize():
                     updated_at TEXT NOT NULL DEFAULT ''
                 )"""
             )
+            view_row = c.execute(
+                "SELECT sql FROM sqlite_master WHERE type='view' AND name='vw_DashboardKPIs'"
+            ).fetchone()
+            if view_row and "needs_review" not in view_row["sql"]:
+                c.execute("DROP VIEW vw_DashboardKPIs")
             c.execute(
                 """
                 CREATE VIEW IF NOT EXISTS vw_DashboardKPIs AS
                 SELECT
                     (SELECT COUNT(1) FROM users WHERE is_active = 1) AS total_users,
                     COUNT(1) AS total_inspections,
-                    COALESCE(SUM(CASE WHEN requested_review = 1 AND review_status != 'reviewed' THEN 1 ELSE 0 END), 0) AS pending_reviews,
+                    COALESCE(SUM(CASE WHEN requested_review = 1 AND review_status = 'needs_review' THEN 1 ELSE 0 END), 0) AS pending_reviews,
                     COALESCE(SUM(CASE WHEN review_status = 'reviewed' THEN 1 ELSE 0 END), 0) AS reviewed_count,
                     COALESCE(SUM(CASE WHEN review_status = 'reviewed' AND agreed_with_ai = 1 THEN 1 ELSE 0 END), 0) AS agreed_count,
                     CASE 
@@ -701,6 +783,15 @@ def initialize():
                 FROM inspections;
                 """
             )
+
+        c.execute("""UPDATE inspections SET review_status='needs_review'
+            WHERE requested_review=1 AND review_status IN ('pending', 'not_requested')
+            AND (reviewed_at IS NULL OR reviewed_at='')
+            AND (expert_label IS NULL OR expert_label='')""")
+        c.execute("""UPDATE inspections SET review_status='not_requested'
+            WHERE requested_review=0 AND review_status IN ('pending', 'needs_review')
+            AND (reviewed_at IS NULL OR reviewed_at='')
+            AND (expert_label IS NULL OR expert_label='')""")
 
         # Backfill case_id nếu có bản ghi cũ bị thiếu mã
         if c.is_sqlserver:
@@ -992,9 +1083,14 @@ def approve_for_dataset(record_id: int, approved: bool = True) -> str:
         row = c.execute("SELECT * FROM inspections WHERE id=?", (record_id,)).fetchone()
         if not row:
             raise ValueError("Không tìm thấy bản ghi chẩn đoán.")
+        if approved:
+            if row["review_status"] != "reviewed" or not (row["expert_label"] or "").strip():
+                raise ValueError("Hồ sơ cần được chuyên gia duyệt và gắn nhãn trước khi đưa vào dataset.")
+            if not row["image_path"] or not Path(row["image_path"]).is_file():
+                raise ValueError("Không tìm thấy ảnh gốc của hồ sơ để đưa vào dataset.")
         c.execute("UPDATE inspections SET in_dataset=? WHERE id=?", (1 if approved else 0, record_id))
-        if approved and row["image_path"] and Path(row["image_path"]).is_file():
-            label_dir = CURATED_DIR / (row["expert_label"] or row["predicted_class"] or "Unlabeled")
+        if approved:
+            label_dir = CURATED_DIR / row["expert_label"]
             label_dir.mkdir(parents=True, exist_ok=True)
             dest = label_dir / f"{row['case_id']}_{Path(row['image_path']).name}"
             shutil.copy2(row["image_path"], dest)
@@ -1361,18 +1457,6 @@ def delete(record_id):
                 image_file.unlink(missing_ok=True)
             except OSError:
                 pass
-
-
-def update_review(record_id, status, note=""):
-    allowed = {"needs_review", "reviewed", "lab_requested", "closed"}
-    if status not in allowed:
-        raise ValueError("Trạng thái rà soát không hợp lệ.")
-    initialize()
-    with conn() as c:
-        c.execute(
-            "UPDATE inspections SET review_status=?,review_note=? WHERE id=?",
-            (status, note.strip(), record_id),
-        )
 
 
 def update_case(record_id, case):

@@ -153,7 +153,7 @@ BEGIN
         danger_level        NVARCHAR(30)      NULL,
         recommendation      NVARCHAR(MAX)     NULL,
         requested_review    BIT               NOT NULL CONSTRAINT DF_Inspections_ReqRev DEFAULT (0),
-        review_status       VARCHAR(30)       NOT NULL CONSTRAINT DF_Inspections_RevStatus DEFAULT ('pending'),
+        review_status       VARCHAR(30)       NOT NULL CONSTRAINT DF_Inspections_RevStatus DEFAULT ('not_requested'),
         agreed_with_ai      BIT               NULL,
         expert_label        VARCHAR(120)      NULL,
         expert_display_name NVARCHAR(255)     NULL,
@@ -209,7 +209,7 @@ BEGIN
     IF COL_LENGTH(N'dbo.Inspections', N'requested_review') IS NULL
         ALTER TABLE dbo.Inspections ADD requested_review BIT NOT NULL CONSTRAINT DF_Insp_Req_Mig DEFAULT (0);
     IF COL_LENGTH(N'dbo.Inspections', N'review_status') IS NULL
-        ALTER TABLE dbo.Inspections ADD review_status VARCHAR(30) NOT NULL CONSTRAINT DF_Insp_Stat_Mig DEFAULT ('pending');
+        ALTER TABLE dbo.Inspections ADD review_status VARCHAR(30) NOT NULL CONSTRAINT DF_Insp_Stat_Mig DEFAULT ('not_requested');
     IF COL_LENGTH(N'dbo.Inspections', N'agreed_with_ai') IS NULL
         ALTER TABLE dbo.Inspections ADD agreed_with_ai BIT NULL;
     IF COL_LENGTH(N'dbo.Inspections', N'expert_label') IS NULL
@@ -227,6 +227,32 @@ BEGIN
     IF COL_LENGTH(N'dbo.Inspections', N'created_at') IS NULL
         ALTER TABLE dbo.Inspections ADD created_at DATETIME2(0) NOT NULL CONSTRAINT DF_Insp_Cat_Mig DEFAULT (SYSDATETIME());
 END
+GO
+
+-- Preserve completed reviews; map only unresolved legacy cases to the current flow.
+UPDATE dbo.Inspections SET review_status = 'needs_review'
+WHERE requested_review = 1 AND review_status IN ('pending', 'not_requested')
+  AND reviewed_at IS NULL AND (expert_label IS NULL OR expert_label = '');
+UPDATE dbo.Inspections SET review_status = 'not_requested'
+WHERE requested_review = 0 AND review_status IN ('pending', 'needs_review')
+  AND reviewed_at IS NULL AND (expert_label IS NULL OR expert_label = '');
+GO
+
+DECLARE @review_default sysname, @review_definition nvarchar(max), @drop_review_default nvarchar(max);
+SELECT @review_default = dc.name, @review_definition = dc.definition
+FROM sys.default_constraints dc
+JOIN sys.columns col ON col.object_id = dc.parent_object_id AND col.column_id = dc.parent_column_id
+WHERE dc.parent_object_id = OBJECT_ID(N'dbo.Inspections') AND col.name = N'review_status';
+IF @review_definition IS NULL OR @review_definition NOT LIKE '%not_requested%'
+BEGIN
+    IF @review_default IS NOT NULL
+    BEGIN
+        SET @drop_review_default = N'ALTER TABLE dbo.Inspections DROP CONSTRAINT ' + QUOTENAME(@review_default);
+        EXEC(@drop_review_default);
+    END;
+    ALTER TABLE dbo.Inspections ADD CONSTRAINT DF_Inspections_ReviewStatus_Current
+        DEFAULT ('not_requested') FOR review_status;
+END;
 GO
 
 -- =====================================================================================
@@ -336,7 +362,7 @@ AS
 SELECT
     (SELECT COUNT(1) FROM dbo.Users WHERE is_active = 1) AS total_users,
     COUNT(1) AS total_inspections,
-    ISNULL(SUM(CASE WHEN requested_review = 1 AND review_status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_reviews,
+    ISNULL(SUM(CASE WHEN requested_review = 1 AND review_status = 'needs_review' THEN 1 ELSE 0 END), 0) AS pending_reviews,
     ISNULL(SUM(CASE WHEN review_status = 'reviewed' THEN 1 ELSE 0 END), 0) AS reviewed_count,
     ISNULL(SUM(CASE WHEN review_status = 'reviewed' AND agreed_with_ai = 1 THEN 1 ELSE 0 END), 0) AS agreed_count,
     CAST(

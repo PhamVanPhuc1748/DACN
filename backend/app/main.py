@@ -1,27 +1,34 @@
 from __future__ import annotations
 
 from datetime import datetime
-import json
 import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
-from urllib.error import HTTPError, URLError
-from urllib.request import Request as UrlRequest, urlopen
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy.orm import Session
 
 from .config import get_settings, save_env_settings
-from .database import Base, ChatHistory, Disease, PredictionHistory, User, engine, get_db, get_engine
-from .diseases_data import DISEASES_SEED
+from .database import init_db, save_record
 
-# Allow importing PigSkinTech real inference pipeline
+# Allow importing PigSkinTech real inference, chatbot and store pipelines
 PIGSKIN_DIR = Path(__file__).resolve().parents[2] / "PigSkinTech"
 if str(PIGSKIN_DIR) not in sys.path:
     sys.path.insert(0, str(PIGSKIN_DIR))
+
+from services.auth_service import authenticate_local
+from services.chatbot_service import ask_vet_ai
+from services.inference import predict as run_real_predict
+from services.project_data import load_classes_config
+from services.store import (
+    create_user_account,
+    initialize as init_store,
+    list_users,
+    save as save_inspection,
+    save_chat_message,
+)
 
 app = FastAPI(title="PigSkinTech API", version="2.0.0")
 
@@ -34,29 +41,16 @@ app.add_middleware(
 )
 
 
-def seed_initial_data(db: Session) -> None:
-    if db.query(Disease).count() > 0:
-        return
-    for item in DISEASES_SEED:
-        db.add(Disease(**item))
-    db.commit()
-
-
 @app.on_event("startup")
 def on_startup() -> None:
-    active_engine = get_engine()
-    Base.metadata.create_all(bind=active_engine)
-    db = next(get_db())
-    try:
-        seed_initial_data(db)
-    finally:
-        db.close()
+    init_db()
+    init_store()
 
 
 class AuthRequest(BaseModel):
     username: str
     password: str
-    role: Optional[str] = "farmer"
+    role: Optional[str] = "user"
 
 
 class ChatMessageItem(BaseModel):
@@ -68,7 +62,8 @@ class ChatRequest(BaseModel):
     message: str
     history: list[ChatMessageItem] = []
     user_id: Optional[int] = None
-    context: Optional[str] = None
+    user_email: Optional[str] = "nongdan.pigskin@gmail.com"
+    context: Optional[dict] = None
 
 
 class AdminSettingsPayload(BaseModel):
@@ -91,14 +86,14 @@ class AdminSettingsPayload(BaseModel):
     )
 
 
-def _require_admin(request: Request, db: Session) -> User:
-    username = (request.headers.get("X-Admin-Username") or "").strip()
+def _require_admin(request: Request) -> dict:
+    username = (request.headers.get("X-Admin-Username") or "").strip().lower()
     if not username:
         raise HTTPException(status_code=403, detail="Thiếu thông tin xác thực quản trị viên")
-    user = db.query(User).filter(User.username == username).first()
-    if not user or user.role != "admin":
-        raise HTTPException(status_code=403, detail="Chỉ quản trị viên mới có quyền truy cập mục này")
-    return user
+    for u in list_users("admin", username):
+        if username in (str(u.get("username") or "").lower(), str(u.get("email") or "").lower()):
+            return u
+    raise HTTPException(status_code=403, detail="Chỉ quản trị viên mới có quyền truy cập mục này")
 
 
 @app.get("/health")
@@ -107,52 +102,46 @@ def health_check():
 
 
 @app.post("/auth/register")
-def register(payload: AuthRequest, db: Session = Depends(get_db)):
-    exists = db.query(User).filter(User.username == payload.username).first()
-    if exists:
-        raise HTTPException(status_code=400, detail="Username already exists")
-
-    role = payload.role if payload.role in {"farmer", "admin", "expert"} else "farmer"
-    user = User(username=payload.username, password=payload.password, role=role)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return {"id": user.id, "username": user.username, "role": user.role}
+def register(payload: AuthRequest):
+    email = payload.username if "@" in payload.username else f"{payload.username}@pigskintech.com"
+    role = payload.role if payload.role in {"user", "admin", "expert"} else "user"
+    try:
+        user = create_user_account(email=email, full_name=payload.username, role=role, password=payload.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": user["id"], "username": user["username"], "email": user["email"], "role": user["role"]}
 
 
 @app.post("/auth/login")
-def login(payload: AuthRequest, db: Session = Depends(get_db)):
-    user = (
-        db.query(User)
-        .filter(User.username == payload.username, User.password == payload.password)
-        .first()
-    )
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    return {"id": user.id, "username": user.username, "role": user.role}
+def login(payload: AuthRequest):
+    try:
+        user = authenticate_local(payload.username, payload.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    return {"id": user["id"], "username": user["username"], "email": user["email"], "role": user["role"]}
 
 
 @app.get("/diseases")
-def list_diseases(search: Optional[str] = None, db: Session = Depends(get_db)):
-    query = db.query(Disease)
-    if search:
-        pattern = f"%{search.strip()}%"
-        query = query.filter((Disease.name_vi.ilike(pattern)) | (Disease.code.ilike(pattern)))
-
-    items = query.order_by(Disease.name_vi.asc()).all()
-    return [
-        {
-            "id": d.id,
-            "code": d.code,
-            "name_vi": d.name_vi,
-            "symptoms": d.symptoms,
-            "treatment": d.treatment,
-            "prevention": d.prevention,
-            "reference_image": d.reference_image,
-        }
-        for d in items
-    ]
+def list_diseases(search: Optional[str] = None):
+    catalog = load_classes_config()
+    q = (search or "").strip().lower()
+    items = []
+    for idx, (code, info) in enumerate(catalog.items(), start=1):
+        name_vi = info.get("name_vi", code)
+        if q and q not in code.lower() and q not in name_vi.lower():
+            continue
+        items.append(
+            {
+                "id": idx,
+                "code": code,
+                "name_vi": name_vi,
+                "danger_level": info.get("danger_level", "Trung bình"),
+                "symptoms": info.get("symptoms", ""),
+                "treatment": info.get("treatment", ""),
+                "prevention": info.get("prevention", ""),
+            }
+        )
+    return items
 
 
 @app.post("/predict")
@@ -160,7 +149,6 @@ async def predict_disease(
     file: UploadFile = File(...),
     user_id: Optional[int] = Form(default=None),
     model_run: Optional[str] = Form(default=None),
-    db: Session = Depends(get_db),
 ):
     content = await file.read()
     if not content:
@@ -172,34 +160,39 @@ async def predict_disease(
         tmp_path = Path(tmp.name)
 
     try:
-        from services.inference import predict as run_real_predict
-
         pred = run_real_predict(tmp_path, run_name=model_run)
+        if not pred.get("ok"):
+            raise HTTPException(status_code=400, detail=pred.get("message", "Inference error"))
+        row_id = save_inspection(
+            pred["info"],
+            pred,
+            case={"user_id": user_id or 1},
+            source_image=tmp_path,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-    if not pred.get("ok"):
-        raise HTTPException(status_code=400, detail=pred.get("error", "Inference error"))
+        tmp_path.unlink(missing_ok=True)
 
     predicted_code = pred["label"]
     confidence = float(pred["confidence"])
     disease_info = pred.get("disease", {})
-
-    record = PredictionHistory(
-        user_id=user_id,
-        image_name=file.filename or "uploaded_image.jpg",
-        predicted_code=predicted_code,
-        confidence=confidence,
+    save_record(
+        {
+            "id": f"PS-{row_id:06d}",
+            "filename": file.filename or "uploaded_image.jpg",
+            "disease_code": predicted_code,
+            "disease_name": disease_info.get("name_vi", predicted_code),
+            "confidence": confidence,
+            "treatment_summary": disease_info.get("drugs", ""),
+        }
     )
-    db.add(record)
-    db.commit()
-    db.refresh(record)
 
     return {
-        "prediction_id": record.id,
+        "prediction_id": row_id,
+        "case_id": f"PS-{row_id:06d}",
         "predicted_code": predicted_code,
         "confidence": confidence,
         "inference_ms": pred.get("inference_ms", 0.0),
@@ -213,16 +206,16 @@ async def predict_disease(
             "treatment": disease_info.get("drugs", ""),
             "prevention": disease_info.get("isolation", ""),
         },
-        "created_at": record.created_at.isoformat(),
+        "created_at": datetime.now().isoformat(),
     }
 
 
 @app.get("/admin/settings")
-def get_admin_settings(request: Request, db: Session = Depends(get_db)):
-    _require_admin(request, db)
+def get_admin_settings(request: Request):
+    _require_admin(request)
     cfg = get_settings()
     return {
-        "database_engine": cfg.database_engine,
+        "database_engine": cfg.database_backend,
         "sqlserver_host": cfg.sqlserver_host,
         "sqlserver_port": cfg.sqlserver_port,
         "sqlserver_database": cfg.sqlserver_database,
@@ -239,8 +232,8 @@ def get_admin_settings(request: Request, db: Session = Depends(get_db)):
 
 
 @app.put("/admin/settings")
-def update_admin_settings(payload: AdminSettingsPayload, request: Request, db: Session = Depends(get_db)):
-    _require_admin(request, db)
+def update_admin_settings(payload: AdminSettingsPayload, request: Request):
+    _require_admin(request)
     save_env_settings(
         {
             "DATABASE_ENGINE": payload.database_engine,
@@ -258,83 +251,18 @@ def update_admin_settings(payload: AdminSettingsPayload, request: Request, db: S
             "AI_SYSTEM_PROMPT": payload.ai_system_prompt,
         }
     )
-    active_engine = get_engine()
-    Base.metadata.create_all(bind=active_engine)
     return {"status": "saved"}
 
 
 @app.post("/chat")
-def chat_with_ai(payload: ChatRequest, db: Session = Depends(get_db)):
-    from services.chatbot_service import (
-        STRICT_DOMAIN_SYSTEM_PROMPT,
-        build_refusal_response,
-        ensure_disclaimer,
-        is_in_domain,
-    )
-
+def chat_with_ai(payload: ChatRequest):
     user_msg = (payload.message or "").strip()
     if not user_msg:
         raise HTTPException(status_code=400, detail="Tin nhắn không được để trống")
 
-    # Kiểm soát nội dung nghiêm ngặt (Strict Domain Guardrail)
-    if not is_in_domain(user_msg):
-        refusal = build_refusal_response()
-        db.add(ChatHistory(user_id=payload.user_id, role="user", message=user_msg))
-        db.add(ChatHistory(user_id=payload.user_id, role="assistant", message=refusal))
-        db.commit()
-        return {"reply": refusal, "model": "PigSkinTech Domain Guardrail"}
-
-    cfg = get_settings()
-    base_url = cfg.ai_base_url.rstrip("/")
-    endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
-
-    system_prompt = f"{STRICT_DOMAIN_SYSTEM_PROMPT}\n\n{cfg.ai_system_prompt}"
-    if payload.context:
-        system_prompt += f"\n\nNgữ cảnh ca chẩn đoán hiện tại:\n{payload.context}"
-
-    messages = [{"role": "system", "content": system_prompt}]
-    for item in payload.history[-10:]:
-        if item.role in {"user", "assistant"} and item.content.strip():
-            messages.append({"role": item.role, "content": item.content.strip()})
-    messages.append({"role": "user", "content": user_msg})
-
-    headers = {"Content-Type": "application/json"}
-    if cfg.ai_api_key:
-        headers["Authorization"] = f"Bearer {cfg.ai_api_key}"
-
-    req_body = json.dumps(
-        {
-            "model": cfg.ai_model,
-            "messages": messages,
-            "temperature": 0.25,
-        }
-    ).encode("utf-8")
-
-    try:
-        req = UrlRequest(endpoint, data=req_body, headers=headers, method="POST")
-        with urlopen(req, timeout=45) as resp:
-            resp_data = json.loads(resp.read().decode("utf-8"))
-    except HTTPError as exc:
-        err_text = exc.read().decode("utf-8", errors="ignore")
-        raise HTTPException(status_code=502, detail=f"AI API trả lỗi ({exc.code}): {err_text[:240]}") from exc
-    except URLError as exc:
-        raise HTTPException(status_code=502, detail=f"Không kết nối được tới AI server ({endpoint}): {exc.reason}") from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Lỗi gọi AI: {exc}") from exc
-
-    reply = ""
-    choices = resp_data.get("choices") or []
-    if choices:
-        reply = (choices[0].get("message") or {}).get("content") or ""
-    if not reply and isinstance(resp_data.get("message"), dict):
-        reply = resp_data["message"].get("content") or ""
-    if not reply:
-        reply = "Không nhận được phản hồi văn bản từ mô hình AI."
-
-    reply = ensure_disclaimer(reply)
-
-    db.add(ChatHistory(user_id=payload.user_id, role="user", message=user_msg))
-    db.add(ChatHistory(user_id=payload.user_id, role="assistant", message=reply))
-    db.commit()
-
-    return {"reply": reply, "model": cfg.ai_model}
+    email = (payload.user_email or "nongdan.pigskin@gmail.com").strip().lower()
+    history_dicts = [{"role": m.role, "content": m.content} for m in payload.history]
+    save_chat_message(user_email=email, role="user", content=user_msg, user_id=payload.user_id, model_name="user")
+    reply, used_model = ask_vet_ai(user_msg, history_dicts, payload.context)
+    save_chat_message(user_email=email, role="assistant", content=reply, user_id=payload.user_id, model_name=used_model)
+    return {"reply": reply, "model": used_model}

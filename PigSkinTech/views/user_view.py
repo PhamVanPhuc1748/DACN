@@ -4,6 +4,7 @@ import asyncio
 import flet as ft
 
 from services.auth_service import (
+    build_outbreak_alert_banner,
     build_role_shell,
     create_file_picker,
     ensure_flet_compat,
@@ -222,12 +223,14 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 col={"xs": 12, "sm": 6, "lg": 3},
             ),
         ]
-        header_host.content = tech_banner(
+        banner = tech_banner(
             "Chẩn đoán Bệnh Da Heo",
             "Phân tích hình ảnh tổn thương da bằng Trí tuệ nhân tạo PigSkin AI & nhận phác đồ thú y",
             pills=pills,
             page=page,
         )
+        outbreak = build_outbreak_alert_banner(records, page=page)
+        header_host.content = ft.Column([banner, outbreak], spacing=12, tight=True) if outbreak else banner
 
     def append_symptom_chip(symptom_text: str):
         current = (symptoms_field.value or "").strip()
@@ -611,7 +614,26 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         p = get_theme_palette(page)
         records = list_user_inspections(user.get("email", ""))[:3]
         if not records:
-            return [ft.Text("Chưa có lịch sử khám gần đây.", size=13.5, color=p["TEXT_MUTED"])]
+            return [
+                ft.Container(
+                    width=float("inf"),
+                    padding=ft.padding.symmetric(vertical=20, horizontal=16),
+                    bgcolor=p["BG_SUB"],
+                    border_radius=12,
+                    border=ft.border.all(1, p["BORDER_LIGHT"]),
+                    alignment=ft.alignment.center,
+                    content=ft.Column(
+                        [
+                            ft.Icon(ft.Icons.HISTORY_ROUNDED, size=28, color=p["TEXT_MUTED"]),
+                            ft.Text("Chưa có lịch sử khám gần đây", size=13.5, weight=ft.FontWeight.W_600, color=p["TEXT_MUTED"], text_align=ft.TextAlign.CENTER),
+                        ],
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=6,
+                        tight=True,
+                    ),
+                )
+            ]
         rows = []
         for rec in records:
             conf = float(rec.get("confidence") or 0.0)
@@ -1287,9 +1309,23 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             if not records:
                 list_host.controls.append(
                     css_card(
-                        padding=24,
+                        padding=36,
                         page=page,
-                        content=ft.Text("Không có lịch sử khám nào khớp bộ lọc.", size=14, color=cur_p["TEXT_MUTED"]),
+                        content=ft.Container(
+                            width=float("inf"),
+                            alignment=ft.alignment.center,
+                            content=ft.Column(
+                                [
+                                    ft.Icon(ft.Icons.MANAGE_SEARCH_ROUNDED, size=38, color=cur_p["TEXT_MUTED"]),
+                                    ft.Text("Không có lịch sử khám nào khớp bộ lọc", size=15, weight=ft.FontWeight.BOLD, color=cur_p["TEXT_PRIMARY"], text_align=ft.TextAlign.CENTER),
+                                    ft.Text("Thử xóa bộ lọc ngày khám hoặc chọn 'Tất cả nhóm bệnh lý' để xem toàn bộ hồ sơ.", size=13, color=cur_p["TEXT_MUTED"], text_align=ft.TextAlign.CENTER),
+                                ],
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                spacing=8,
+                                tight=True,
+                            ),
+                        ),
                     )
                 )
             for rec in records:
@@ -1576,6 +1612,28 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                                 ),
                             ],
                             spacing=14,
+                        ),
+                    )
+                )
+            if not cards_col.controls:
+                cards_col.controls.append(
+                    css_card(
+                        padding=36,
+                        page=page,
+                        content=ft.Container(
+                            width=float("inf"),
+                            alignment=ft.alignment.center,
+                            content=ft.Column(
+                                [
+                                    ft.Icon(ft.Icons.SEARCH_OFF_ROUNDED, size=38, color=cur_p["TEXT_MUTED"]),
+                                    ft.Text("Không tìm thấy bệnh lý phù hợp", size=15, weight=ft.FontWeight.BOLD, color=cur_p["TEXT_PRIMARY"], text_align=ft.TextAlign.CENTER),
+                                    ft.Text("Thử nhập từ khóa khác hoặc chọn bộ lọc 'Tất cả bệnh lý'.", size=13, color=cur_p["TEXT_MUTED"], text_align=ft.TextAlign.CENTER),
+                                ],
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                spacing=8,
+                                tight=True,
+                            ),
                         ),
                     )
                 )

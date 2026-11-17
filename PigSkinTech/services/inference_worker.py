@@ -37,7 +37,11 @@ def run_checkpoint_inference(image_path, checkpoint_path, config_path=None):
     model.load_state_dict(state_dict, strict=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device).eval()
+    try:
+        model.to(device).eval()
+    except RuntimeError:
+        device = torch.device("cpu")
+        model.to(device).eval()
     image_size = int(checkpoint.get("image_size", config.get("image_size", 224)))
     normalization = checkpoint.get("normalization", config.get("normalization", {}))
     mean = normalization.get("mean", [0.485, 0.456, 0.406])
@@ -48,11 +52,17 @@ def run_checkpoint_inference(image_path, checkpoint_path, config_path=None):
         transforms.Normalize(mean, std),
     ])
     with Image.open(image_path) as source:
-        tensor = transform(source.convert("RGB")).unsqueeze(0).to(device)
+        cpu_tensor = transform(source.convert("RGB")).unsqueeze(0)
 
     t0 = time.perf_counter()
     with torch.inference_mode():
-        probabilities = torch.softmax(model(tensor)[0], dim=0).cpu().tolist()
+        try:
+            tensor = cpu_tensor.to(device)
+            probabilities = torch.softmax(model(tensor)[0], dim=0).cpu().tolist()
+        except RuntimeError:
+            device = torch.device("cpu")
+            model.to(device).eval()
+            probabilities = torch.softmax(model(cpu_tensor)[0], dim=0).cpu().tolist()
     inference_ms = round((time.perf_counter() - t0) * 1000.0, 2)
 
     indices = sorted(range(len(classes)), key=lambda index: probabilities[index], reverse=True)

@@ -11,7 +11,7 @@ import urllib.parse
 import webbrowser
 
 import flet as ft
-from PIL import Image, ImageDraw, ImageEnhance, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageOps
 
 try:
     from flet.auth.providers import GoogleOAuthProvider
@@ -223,18 +223,181 @@ def theme_tokens(page: ft.Page | None = None) -> dict:
     return THEMES["dark" if is_dark_mode(page) else "light"]
 
 
+def _rgb_color(value, inherited=None):
+    """Resolve a Flet color (including #AARRGGBB) against its parent."""
+    if not isinstance(value, str):
+        return inherited
+    color = value.strip().lower()
+    if color in ("transparent", "none"):
+        return inherited
+    color = {"white": "#ffffff", "black": "#000000"}.get(color, color)
+    if not color.startswith("#"):
+        return inherited
+    raw = color[1:]
+    if len(raw) == 3:
+        raw = "".join(char * 2 for char in raw)
+    try:
+        if len(raw) == 8:
+            alpha = int(raw[:2], 16) / 255
+            rgb = tuple(int(raw[index:index + 2], 16) for index in (2, 4, 6))
+            if inherited is not None:
+                return tuple(round(alpha * channel + (1 - alpha) * base) for channel, base in zip(rgb, inherited))
+            return rgb
+        if len(raw) == 6:
+            return tuple(int(raw[index:index + 2], 16) for index in (0, 2, 4))
+    except ValueError:
+        pass
+    return inherited
+
+
+def _luminance(rgb):
+    channels = [channel / 255 for channel in rgb]
+    linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def apply_theme_text_contrast(root, background=None, palette=None):
+    """Repair unreadable text after an in-place theme change or tab rebuild."""
+    seen = set()
+
+    def visit(control, parent_bg):
+        if id(control) in seen:
+            return
+        seen.add(id(control))
+        surface = getattr(control, "data", None)
+        if palette is not None and surface in ("theme_chat_card", "theme_chat_messages"):
+            control.bgcolor = palette["BG_CARD" if surface == "theme_chat_card" else "BG_MAIN"]
+        if isinstance(control, (ft.TextField, ft.Dropdown)) and palette is not None:
+            current_fill = getattr(control, "fill_color", None)
+            theme_fills = {THEMES["light"]["SUB_SURFACE"], THEMES["dark"]["SUB_SURFACE"]}
+            if current_fill in theme_fills:
+                control.fill_color = palette["BG_SUB"]
+        own_bg = _rgb_color(getattr(control, "bgcolor", None), parent_bg)
+        if isinstance(control, (ft.TextField, ft.Dropdown)) and getattr(control, "filled", False):
+            own_bg = _rgb_color(getattr(control, "fill_color", None), own_bg)
+        gradient = getattr(control, "gradient", None)
+        if gradient is not None and getattr(gradient, "colors", None):
+            colors = [_rgb_color(color, own_bg) for color in gradient.colors]
+            colors = [color for color in colors if color is not None]
+            if colors:
+                own_bg = tuple(round(sum(color[i] for color in colors) / len(colors)) for i in range(3))
+        if own_bg is None:
+            own_bg = (255, 255, 255)
+        foreground = "#FFFFFF" if _luminance(own_bg) < 0.18 else "#0F172A"
+
+        def fix_color(value):
+            rgb = _rgb_color(value)
+            if rgb is None:
+                return foreground
+            light, dark = sorted((_luminance(rgb), _luminance(own_bg)))
+            return foreground if (dark + 0.05) / (light + 0.05) < 4.5 else value
+
+        if isinstance(control, (ft.Text, ft.TextField, ft.Dropdown, ft.Markdown)):
+            if isinstance(control, ft.Markdown):
+                sheet = getattr(control, "md_style_sheet", None)
+                if sheet is not None:
+                    for name in ("p_text_style", "strong_text_style", "list_bullet_text_style", "em_text_style", "h1_text_style", "h2_text_style", "h3_text_style", "blockquote_text_style", "code_text_style"):
+                        style = getattr(sheet, name, None)
+                        if style is not None:
+                            style.color = fix_color(getattr(style, "color", None))
+            else:
+                control.color = fix_color(getattr(control, "color", None))
+                if isinstance(control, (ft.TextField, ft.Dropdown)):
+                    for name in ("label_style", "hint_style"):
+                        style = getattr(control, name, None)
+                        if style is not None:
+                            style.color = fix_color(getattr(style, "color", None))
+        for child in control._get_children():
+            child_bg = own_bg
+            if isinstance(control, ft.DataTable) and isinstance(child, ft.DataColumn):
+                child_bg = _rgb_color(getattr(control, "heading_row_color", None), own_bg)
+            visit(child, child_bg)
+
+    visit(root, background)
+
+
 def toggle_theme_mode(page: ft.Page):
+    old_theme = theme_tokens(page)
+    old_palette = get_theme_palette(page)
     new_mode = "light" if is_dark_mode(page) else "dark"
     session_set(page, "theme_mode", new_mode)
     page.theme_mode = ft.ThemeMode.DARK if new_mode == "dark" else ft.ThemeMode.LIGHT
     set_theme_page_context(page)
-    t = theme_tokens(page)
-    page.bgcolor = t["BG"]
-    current_route = getattr(page, "route", "/login") or "/login"
-    if hasattr(page, "go"):
-        page.go(current_route)
-    else:
-        page.update()
+    new_theme = theme_tokens(page)
+    new_palette = get_theme_palette(page)
+
+    background_keys = (
+        "BG", "SURFACE", "SUB_SURFACE", "SIDEBAR_BG", "SIDEBAR_HOVER",
+        "EMERALD_SOFT", "CYAN_SOFT", "AMBER_SOFT", "RED_SOFT", "PURPLE_SOFT",
+        "BG_MAIN", "BG_CARD", "BG_SUB", "BG_SIDEBAR", "SOFT_EMERALD",
+        "SOFT_BLUE", "SOFT_AMBER", "SOFT_RED", "SOFT_PURPLE",
+    )
+    foreground_keys = (
+        "TEXT", "SECONDARY", "MUTED", "SIDEBAR_TEXT", "SIDEBAR_ACTIVE_TEXT",
+        "TEXT_PRIMARY", "TEXT_SECONDARY", "TEXT_MUTED", "PROTOCOL_HEAD", "PROTOCOL_TEXT",
+        "EMERALD", "EMERALD_LIGHT", "CYAN", "AMBER", "RED", "PURPLE",
+    )
+
+    def color_map(keys):
+        result = {}
+        for before, after in ((old_theme, new_theme), (old_palette, new_palette)):
+            for key in keys:
+                source, target = before.get(key), after.get(key)
+                if isinstance(source, str) and isinstance(target, str) and source != target:
+                    result[source.lower()] = target
+        return result
+
+    backgrounds = color_map(background_keys)
+    foregrounds = color_map(foreground_keys)
+    borders = color_map(("BORDER", "BORDER_LIGHT", "DROPZONE_BORDER", "PROTOCOL_BORDER"))
+
+    def mapped(value, palette):
+        return palette.get(value.lower(), value) if isinstance(value, str) else value
+
+    visited = set()
+
+    def recolor(control):
+        if id(control) in visited:
+            return
+        visited.add(id(control))
+        for attr, palette in (
+            ("bgcolor", backgrounds), ("fill_color", backgrounds),
+            ("heading_row_color", backgrounds), ("color", foregrounds),
+            ("icon_color", foregrounds), ("border_color", borders),
+            ("focused_border_color", borders),
+        ):
+            if attr == "bgcolor" and getattr(control, "data", None) == "fixed_dark_sidebar_card":
+                continue
+            value = getattr(control, attr, None)
+            changed = mapped(value, palette)
+            if changed != value:
+                setattr(control, attr, changed)
+        border = getattr(control, "border", None)
+        if border is not None:
+            for side_name in ("top", "right", "bottom", "left"):
+                side = getattr(border, side_name, None)
+                if side is not None:
+                    side.color = mapped(side.color, borders)
+        gradient = getattr(control, "gradient", None)
+        if gradient is not None and getattr(gradient, "colors", None):
+            gradient.colors = [mapped(color, backgrounds) for color in gradient.colors]
+        if getattr(control, "data", None) == "theme_toggle":
+            control.icon = ft.Icons.LIGHT_MODE_ROUNDED if new_mode == "dark" else ft.Icons.DARK_MODE_ROUNDED
+            control.icon_color = "#FBBF24" if new_mode == "dark" else "#CBD5E1"
+        for child in control._get_children():
+            recolor(child)
+
+    roots = [*page.controls, *getattr(page, "overlay", [])]
+    for extra in (getattr(page, "dialog", None), getattr(page, "appbar", None)):
+        if extra is not None:
+            roots.append(extra)
+    for root in roots:
+        recolor(root)
+    page.bgcolor = new_theme["BG"]
+    page_bg = _rgb_color(page.bgcolor)
+    for root in roots:
+        apply_theme_text_contrast(root, page_bg, new_palette)
+    page.update()
 
 
 def card_shadow() -> ft.BoxShadow:
@@ -301,16 +464,22 @@ def header_stat_pill(
                             alignment=ft.alignment.center,
                             content=ft.Icon(icon, color=accent, size=22),
                         ),
-                        ft.Container(
-                            bgcolor=box_bg,
-                            padding=ft.padding.symmetric(horizontal=10, vertical=4),
-                            border_radius=12,
-                            content=ft.Text(
-                                str(badge_text),
-                                size=12,
-                                color=accent,
-                                weight=ft.FontWeight.W_600,
-                            ),
+                        *(
+                            [
+                                ft.Container(
+                                    bgcolor=box_bg,
+                                    padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                                    border_radius=12,
+                                    content=ft.Text(
+                                        str(badge_text),
+                                        size=12,
+                                        color=accent,
+                                        weight=ft.FontWeight.W_600,
+                                    ),
+                                )
+                            ]
+                            if badge_text
+                            else []
                         ),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -500,6 +669,7 @@ def save_session_user(page: ft.Page, user: dict):
         "avatar_url": user.get("avatar_url", ""),
         "role": user["role"],
         "auth_provider": user.get("auth_provider", "google"),
+        "google_sub": user.get("google_sub", ""),
     }
     for k, v in payload.items():
         session_set(page, k, v)
@@ -523,6 +693,7 @@ def get_session_user(page: ft.Page) -> dict | None:
             "avatar_url": row["avatar_url"],
             "role": row["role"],
             "auth_provider": row["auth_provider"],
+            "google_sub": row["google_sub"],
         }
         session_set(page, "current_user", updated)
         session_set(page, "role", row["role"])
@@ -655,7 +826,12 @@ def authenticate_google(
     if not clean_email or "@" not in clean_email:
         raise ValueError("Vui lòng nhập địa chỉ email Google hợp lệ (ví dụ: tenban@gmail.com).")
     with conn() as c:
-        row = c.execute("SELECT * FROM users WHERE LOWER(email)=?", (clean_email,)).fetchone()
+        clean_sub = (google_sub or "").strip()
+        row = None
+        if clean_sub:
+            row = c.execute("SELECT * FROM users WHERE google_sub=?", (clean_sub,)).fetchone()
+        if not row:
+            row = c.execute("SELECT * FROM users WHERE LOWER(email)=?", (clean_email,)).fetchone()
         if not row:
             local_part = clean_email.split("@")[0]
             derived_name = (full_name or "").strip() or local_part.replace(".", " ").replace("_", " ").title()
@@ -672,15 +848,20 @@ def authenticate_google(
                     _hash_password("123456"),
                     derived_name,
                     derived_avatar,
-                    (google_sub or "").strip(),
+                    clean_sub,
                     now_str,
                 ),
             )
             row = c.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
         else:
             new_name = (full_name or "").strip() or row["full_name"]
-            new_avatar = (avatar_url or "").strip() or row["avatar_url"]
-            new_sub = (google_sub or "").strip() or row.get("google_sub", "")
+            stored_avatar = str(row["avatar_url"] or "").replace("\\", "/")
+            new_avatar = (
+                row["avatar_url"]
+                if stored_avatar.startswith("profile_avatars/")
+                else ((avatar_url or "").strip() or row["avatar_url"])
+            )
+            new_sub = clean_sub or row.get("google_sub", "")
             c.execute(
                 """UPDATE users
                 SET full_name=?, avatar_url=?, google_sub=?, auth_provider='google'
@@ -1032,26 +1213,11 @@ def generate_lesion_heatmap(image_path: str) -> str:
             contrast_img = ImageEnhance.Sharpness(contrast_img).enhance(1.85)
 
             r_ch, g_ch, b_ch = rgb.split()
-            # Erythema / inflammation index emphasizing reddish & warm skin lesions
-            erythema = Image.eval(
-                Image.merge(
-                    "RGB",
-                    (
-                        r_ch,
-                        g_ch,
-                        b_ch,
-                    ),
-                ).convert("L"),
-                lambda x: x,
-            )
-            r_bytes = r_ch.tobytes()
-            g_bytes = g_ch.tobytes()
-            b_bytes = b_ch.tobytes()
-            heat_vals = bytearray(len(r_bytes))
-            for i in range(len(r_bytes)):
-                score = int(r_bytes[i] * 1.45 - 0.55 * g_bytes[i] - 0.45 * b_bytes[i]) + 60
-                heat_vals[i] = 255 if score > 255 else (0 if score < 0 else score)
-            erythema = Image.frombytes("L", (w, h), bytes(heat_vals))
+            # Erythema / inflammation index emphasizing reddish & warm skin lesions (C-level PIL LUTs)
+            r_lut = r_ch.point(lambda v: min(255, int(v * 1.45) + 60))
+            g_lut = g_ch.point(lambda v: int(v * 0.55))
+            b_lut = b_ch.point(lambda v: int(v * 0.45))
+            erythema = ImageChops.subtract(ImageChops.subtract(r_lut, g_lut), b_lut)
             erythema = ImageOps.autocontrast(erythema, cutoff=2)
 
             thermal = ImageOps.colorize(
@@ -1586,6 +1752,15 @@ def build_role_shell(
     page.bgcolor = t["BG"]
     page.appbar = None
 
+    # Profile and account security are shared across all three role workspaces.
+    from views.profile_view import build_profile_view
+
+    destinations = [
+        *destinations,
+        ("Hồ sơ cá nhân", ft.Icons.ACCOUNT_CIRCLE_OUTLINED, ft.Icons.ACCOUNT_CIRCLE_ROUNDED),
+    ]
+    tab_builders = [*tab_builders, lambda: build_profile_view(page, user)]
+
     route_key = f"active_tab_{getattr(page, 'route', '') or title}"
     saved_idx = session_get(page, route_key)
     start_index = saved_idx if isinstance(saved_idx, int) and 0 <= saved_idx < len(tab_builders) else initial_index
@@ -1608,6 +1783,7 @@ def build_role_shell(
     menu_items_controls: list[ft.Container] = []
 
     def style_menu_item(item_container: ft.Container, idx: int, is_hovered: bool = False):
+        t = theme_tokens(page)
         is_active = idx == active_state["index"]
         indicator: ft.Container = item_container.data["indicator"]
         icon_ctrl: ft.Icon = item_container.data["icon_ctrl"]
@@ -1656,6 +1832,7 @@ def build_role_shell(
             scroll=ft.ScrollMode.AUTO,
             spacing=20,
         )
+        apply_theme_text_contrast(body_host, _rgb_color(page.bgcolor), get_theme_palette(page))
 
         # Ẩn nút Floating Chat & đóng Popup khi đang mở Tab Chatbot chính; hiện lại ở các tab khác
         if isinstance(getattr(page, "data", None), dict):
@@ -1690,13 +1867,15 @@ def build_role_shell(
         spacing=0,
         vertical_alignment=ft.CrossAxisAlignment.STRETCH,
     )
-    return ft.Stack(
+    shell = ft.Stack(
         expand=True,
         controls=[
             main_row,
             chat_overlay_ctrl,
         ],
     )
+    apply_theme_text_contrast(shell, _rgb_color(page.bgcolor), get_theme_palette(page))
+    return shell
 
 
 def build_sidebar(
@@ -1769,11 +1948,28 @@ def build_sidebar(
     role_color = ROLE_COLORS.get(role, "#059669")
     initials = "".join(part[0].upper() for part in (user.get("full_name") or "U").split()[:2]) or "U"
 
-    avatar = ft.CircleAvatar(
-        bgcolor=role_color,
-        radius=18,
-        content=ft.Text(initials, color="#FFFFFF", size=12.5, weight=ft.FontWeight.BOLD),
-    )
+    avatar_source = (user.get("avatar_url") or "").strip()
+    if avatar_source and not avatar_source.startswith(("https://", "http://")):
+        local_avatar = Path(avatar_source)
+        if not local_avatar.is_absolute():
+            local_avatar = Path(__file__).resolve().parent.parent / local_avatar
+        avatar_source = str(local_avatar.resolve()) if local_avatar.is_file() else ""
+
+    if avatar_source and Path(avatar_source).is_file():
+        avatar = ft.Container(
+            width=36,
+            height=36,
+            border_radius=18,
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            content=make_image(Path(avatar_source), width=36, height=36, border_radius=18),
+        )
+    else:
+        avatar = ft.CircleAvatar(
+            bgcolor=role_color,
+            radius=18,
+            foreground_image_src=avatar_source or None,
+            content=ft.Text(initials, color="#FFFFFF", size=12.5, weight=ft.FontWeight.BOLD),
+        )
 
     role_badge_pill = ft.Container(
         padding=ft.padding.symmetric(horizontal=9, vertical=3),
@@ -1799,6 +1995,7 @@ def build_sidebar(
         e.control.update()
 
     profile_and_footer = ft.Container(
+        data="fixed_dark_sidebar_card",
         padding=14,
         border_radius=14,
         bgcolor="#1E293B",
@@ -1826,6 +2023,7 @@ def build_sidebar(
                                             icon_color="#FBBF24" if dark else "#CBD5E1",
                                             tooltip="Đổi giao diện Sáng / Tối",
                                             on_click=lambda e: toggle_theme_mode(page),
+                                            data="theme_toggle",
                                         ),
                                     ],
                                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,

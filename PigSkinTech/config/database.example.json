@@ -1,0 +1,11 @@
+{
+  "DATABASE_ENGINE": "sqlserver",
+  "DB_SERVER": "localhost",
+  "DB_NAME": "PigSkinTechDB",
+  "SQLSERVER_HOST": "localhost",
+  "SQLSERVER_PORT": "1433",
+  "SQLSERVER_DATABASE": "PigSkinTechDB",
+  "SQLSERVER_DRIVER": "ODBC Driver 17 for SQL Server",
+  "Trusted_Connection": "yes",
+  "SQLSERVER_TRUSTED_CONNECTION": "true"
+}

@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import threading
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -160,21 +161,66 @@ def _build_sqlserver_conn_str(settings: dict[str, str], database: str | None = N
     if port and port != "1433" and "," not in server and "\\" not in server:
         server = f"{server},{port}"
     db_name = (database or settings.get("DB_NAME") or settings.get("SQLSERVER_DATABASE") or "PigSkinTechDB").strip()
-    user = (settings.get("DB_USER") or settings.get("SQLSERVER_USERNAME") or "").strip()
-    password = (settings.get("DB_PASSWORD") or settings.get("SQLSERVER_PASSWORD") or "").strip()
-    tc_raw = (settings.get("Trusted_Connection") or settings.get("SQLSERVER_TRUSTED_CONNECTION") or "yes").strip().lower()
-    trusted = tc_raw in ("yes", "true", "1", "sspi")
     driver = _pick_odbc_driver(settings.get("SQLSERVER_DRIVER", "ODBC Driver 17 for SQL Server"))
 
-    parts = [f"DRIVER={{{driver}}}", f"SERVER={server}", f"DATABASE={db_name}"]
-    if trusted and not user:
+    parts = [
+        f"DRIVER={{{driver}}}",
+        f"SERVER={server}",
+        f"DATABASE={db_name}",
+    ]
+    user = (settings.get("DB_USER") or settings.get("SQLSERVER_USERNAME") or "").strip()
+    password = (settings.get("DB_PASSWORD") or settings.get("SQLSERVER_PASSWORD") or "").strip()
+    trusted_raw = (settings.get("Trusted_Connection") or settings.get("SQLSERVER_TRUSTED_CONNECTION") or "yes").strip().lower()
+    use_trusted = trusted_raw in ("yes", "true", "1") or not user
+    if use_trusted:
         parts.append("Trusted_Connection=yes")
     else:
-        parts.append(f"UID={user}")
-        parts.append(f"PWD={password}")
+        parts.extend([f"UID={user}", f"PWD={password}"])
     if "Driver 18" in driver:
         parts.append("TrustServerCertificate=yes")
     return ";".join(parts)
+
+
+def _ensure_sqlserver_database(settings: dict[str, str]) -> bool:
+    """Create the configured database on SQL Server when it does not exist.
+
+    Returns True only when this call created the database. Windows integrated
+    authentication is used by _build_sqlserver_conn_str; creation requires the
+    current Windows login to have CREATE DATABASE permission.
+    """
+    if pyodbc is None:
+        raise RuntimeError("Chưa cài thư viện pyodbc.")
+
+    db_name = (
+        settings.get("DB_NAME")
+        or settings.get("SQLSERVER_DATABASE")
+        or "PigSkinTechDB"
+    ).strip()
+    if not db_name or len(db_name) > 128:
+        raise ValueError("Tên database SQL Server phải có từ 1 đến 128 ký tự.")
+
+    quoted_name = f"[{db_name.replace(']', ']]')}]"
+    master = pyodbc.connect(
+        _build_sqlserver_conn_str(settings, database="master"),
+        timeout=3,
+        autocommit=True,
+    )
+    try:
+        cursor = master.cursor()
+        cursor.execute("SELECT DB_ID(?)", (db_name,))
+        if cursor.fetchone()[0] is not None:
+            return False
+        try:
+            cursor.execute(f"CREATE DATABASE {quoted_name}")
+            return True
+        except Exception:
+            # A second app instance may have created it between DB_ID and CREATE.
+            cursor.execute("SELECT DB_ID(?)", (db_name,))
+            if cursor.fetchone()[0] is not None:
+                return False
+            raise
+    finally:
+        master.close()
 
 
 class _DictRow(dict):
@@ -226,6 +272,9 @@ _SHARED_CONN_LOCK = threading.RLock()
 _SHARED_RAW_CONN: Any = None
 _SHARED_ENGINE_TYPE: str | None = None
 _SHARED_CONN_STR: str = ""
+_SQLSERVER_RETRY_AFTER = 0.0
+_SQLSERVER_FAILED_CONN_STR = ""
+_SCHEMA_INITIALIZED_KEY: str = ""
 
 
 def _get_shared_connection(force_reconnect: bool = False) -> tuple[Any, bool]:
@@ -234,6 +283,7 @@ def _get_shared_connection(force_reconnect: bool = False) -> tuple[Any, bool]:
     Tự động tái sử dụng kết nối đang mở và tự động kết nối lại (auto-reconnect) nếu bị ngắt.
     """
     global _SHARED_RAW_CONN, _SHARED_ENGINE_TYPE, _SHARED_CONN_STR
+    global _SQLSERVER_RETRY_AFTER, _SQLSERVER_FAILED_CONN_STR
     with _SHARED_CONN_LOCK:
         settings = read_settings()
         engine_pref = (settings.get("DATABASE_ENGINE") or "sqlserver").strip().lower()
@@ -244,9 +294,20 @@ def _get_shared_connection(force_reconnect: bool = False) -> tuple[Any, bool]:
             except Exception:
                 pass
             _SHARED_RAW_CONN = None
+            _SQLSERVER_RETRY_AFTER = 0.0
+            _SQLSERVER_FAILED_CONN_STR = ""
 
         if pyodbc is not None and engine_pref == "sqlserver":
             conn_str = _build_sqlserver_conn_str(settings)
+            # Don't block every DB operation by retrying an unavailable SQL Server.
+            # Retry after a short cooldown, or immediately when settings change.
+            if (
+                _SHARED_RAW_CONN is not None
+                and _SHARED_ENGINE_TYPE == "sqlite"
+                and _SQLSERVER_FAILED_CONN_STR == conn_str
+                and time.monotonic() < _SQLSERVER_RETRY_AFTER
+            ):
+                return _SHARED_RAW_CONN, False
             # Kiểm tra kết nối SQL Server hiện tại
             if _SHARED_RAW_CONN is not None and _SHARED_ENGINE_TYPE == "sqlserver" and _SHARED_CONN_STR == conn_str:
                 try:
@@ -262,41 +323,39 @@ def _get_shared_connection(force_reconnect: bool = False) -> tuple[Any, bool]:
                         pass
                     _SHARED_RAW_CONN = None
 
-            # Tạo kết nối SQL Server mới
+            # Ensure the configured database exists, then connect to that
+            # database (not merely to master) before reporting SQL as active.
             try:
+                database_created = _ensure_sqlserver_database(settings)
                 _SHARED_RAW_CONN = pyodbc.connect(conn_str, timeout=3)
                 _SHARED_ENGINE_TYPE = "sqlserver"
                 _SHARED_CONN_STR = conn_str
+                _SQLSERVER_FAILED_CONN_STR = ""
+                _SQLSERVER_RETRY_AFTER = 0.0
                 _ACTIVE_DB_INFO.update({
                     "engine": "SQL Server (pyodbc)",
                     "server": settings.get("DB_SERVER") or settings.get("SQLSERVER_HOST") or "localhost",
                     "database": settings.get("DB_NAME") or "PigSkinTechDB",
-                    "status": "Đã kết nối SQL Server thực tế (Connection Pooling Active)",
+                    "status": (
+                        f"Đã tạo database {settings.get('DB_NAME') or 'PigSkinTechDB'} và kết nối SQL Server."
+                        if database_created
+                        else "Đã kết nối đúng database trên SQL Server (Connection Pooling Active)."
+                    ),
                 })
                 return _SHARED_RAW_CONN, True
-            except Exception:
-                try:
-                    master_str = _build_sqlserver_conn_str(settings, database="master")
-                    m_conn = pyodbc.connect(master_str, timeout=3, autocommit=True)
-                    db_name = (settings.get("DB_NAME") or "PigSkinTechDB").replace("]", "")
-                    m_conn.execute(f"IF DB_ID(N'{db_name}') IS NULL CREATE DATABASE [{db_name}];")
-                    m_conn.close()
-                    _SHARED_RAW_CONN = pyodbc.connect(_build_sqlserver_conn_str(settings), timeout=3)
-                    _SHARED_ENGINE_TYPE = "sqlserver"
-                    _SHARED_CONN_STR = conn_str
-                    _ACTIVE_DB_INFO.update({
-                        "engine": "SQL Server (pyodbc)",
-                        "server": settings.get("DB_SERVER") or settings.get("SQLSERVER_HOST") or "localhost",
-                        "database": db_name,
-                        "status": f"Đã tự động khởi tạo & kết nối SQL Server ({db_name})",
-                    })
-                    return _SHARED_RAW_CONN, True
-                except Exception as exc:
-                    _ACTIVE_DB_INFO["last_error"] = str(exc)
+            except Exception as exc:
+                _ACTIVE_DB_INFO["last_error"] = str(exc)
+                _SQLSERVER_FAILED_CONN_STR = conn_str
+                _SQLSERVER_RETRY_AFTER = time.monotonic() + 30.0
 
         # Fallback SQLite
-        if _SHARED_RAW_CONN is not None and _SHARED_ENGINE_TYPE == "sqlite":
+        if _SHARED_RAW_CONN is not None and _SHARED_ENGINE_TYPE == "sqlite" and _SHARED_CONN_STR == str(DB):
             return _SHARED_RAW_CONN, False
+        if _SHARED_RAW_CONN is not None:
+            try:
+                _SHARED_RAW_CONN.close()
+            except Exception:
+                pass
 
         _SHARED_RAW_CONN = sqlite3.connect(DB, check_same_thread=False)
         _SHARED_RAW_CONN.row_factory = sqlite3.Row
@@ -319,16 +378,27 @@ class _UnifiedConnection:
     """
 
     def __init__(self):
-        raw_conn, is_sqlserver = _get_shared_connection()
-        self._raw = raw_conn
-        self.is_sqlserver = is_sqlserver
+        self._raw = None
+        self.is_sqlserver = False
+        self._cursors: list[Any] = []
 
     def __enter__(self) -> "_UnifiedConnection":
         _SHARED_CONN_LOCK.acquire()
-        return self
+        try:
+            self._raw, self.is_sqlserver = _get_shared_connection()
+            return self
+        except Exception:
+            _SHARED_CONN_LOCK.release()
+            raise
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
+            for cur in self._cursors:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+            self._cursors.clear()
             if self._raw is not None:
                 if exc_type is None:
                     self._raw.commit()
@@ -340,6 +410,8 @@ class _UnifiedConnection:
             _SHARED_CONN_LOCK.release()
 
     def execute(self, sql: str, params: tuple | list = ()) -> _CursorWrapper:
+        if self._raw is None:
+            self._raw, self.is_sqlserver = _get_shared_connection()
         query = sql.strip()
         if self.is_sqlserver:
             # Dịch SQLite LIMIT 300 sang TOP 300 của T-SQL nếu có
@@ -348,6 +420,7 @@ class _UnifiedConnection:
 
         try:
             cur = self._raw.cursor()
+            self._cursors.append(cur)
             cur.execute(query, tuple(params))
         except Exception as exc:
             # Tự động reconnect nếu mất kết nối mạng hoặc timeout
@@ -360,6 +433,7 @@ class _UnifiedConnection:
                 self._raw = raw_conn
                 self.is_sqlserver = is_sqlserver
                 cur = self._raw.cursor()
+                self._cursors.append(cur)
                 cur.execute(query, tuple(params))
             else:
                 raise
@@ -386,20 +460,23 @@ def get_db_status() -> dict[str, str]:
 
 
 def test_sqlserver_connection(custom_settings: dict[str, str] | None = None) -> dict[str, Any]:
+    global _SHARED_RAW_CONN, _SQLSERVER_RETRY_AFTER, _SQLSERVER_FAILED_CONN_STR
     if pyodbc is None:
         return {"ok": False, "message": "Chưa cài đặt thư viện pyodbc."}
     cfg = read_settings()
     if custom_settings:
         cfg.update(custom_settings)
     try:
-        conn_str = _build_sqlserver_conn_str(cfg, database="master")
+        created = _ensure_sqlserver_database(cfg)
+        conn_str = _build_sqlserver_conn_str(cfg)
         c = pyodbc.connect(conn_str, timeout=3)
         cur = c.cursor()
-        cur.execute("SELECT @@VERSION")
-        ver = cur.fetchone()[0].splitlines()[0]
+        cur.execute("SELECT @@VERSION, DB_NAME()")
+        row = cur.fetchone()
+        ver = row[0].splitlines()[0]
+        database = row[1]
         c.close()
         # Reset shared connection để cập nhật cấu hình mới nếu có
-        global _SHARED_RAW_CONN
         with _SHARED_CONN_LOCK:
             if _SHARED_RAW_CONN is not None:
                 try:
@@ -407,18 +484,50 @@ def test_sqlserver_connection(custom_settings: dict[str, str] | None = None) -> 
                 except Exception:
                     pass
                 _SHARED_RAW_CONN = None
-        return {"ok": True, "message": f"Kết nối SQL Server thành công: {ver}"}
+            _SQLSERVER_RETRY_AFTER = 0.0
+            _SQLSERVER_FAILED_CONN_STR = ""
+            global _SCHEMA_INITIALIZED_KEY
+            _SCHEMA_INITIALIZED_KEY = ""
+        state = "đã được tạo và kết nối" if created else "đã tồn tại và kết nối"
+        return {
+            "ok": True,
+            "message": f"SQL Server kết nối thành công; database '{database}' {state}. {ver}",
+        }
     except Exception as exc:
-        return {"ok": False, "message": f"Không thể kết nối SQL Server: {exc}"}
+        server = (cfg.get("DB_SERVER") or cfg.get("SQLSERVER_HOST") or "localhost").strip()
+        port = (cfg.get("SQLSERVER_PORT") or "1433").strip()
+        detail = str(exc)
+        if "create database permission denied" in detail.lower():
+            return {
+                "ok": False,
+                "message": (
+                    f"Đã tới được SQL Server '{server}', nhưng tài khoản Windows hiện tại không có quyền tạo database. "
+                    "Cần cấp quyền dbcreator/CREATE DATABASE hoặc nhờ quản trị viên tạo database trước. "
+                    f"Chi tiết: {detail}"
+                ),
+            }
+        return {
+            "ok": False,
+            "message": (
+                f"Không kết nối được SQL Server '{server}' (cổng {port}). "
+                "Hãy kiểm tra tên máy/instance, dịch vụ SQL Server đang chạy, TCP/IP và firewall. "
+                "Nếu dùng SQL Express, nhập dạng TEN-MAY\\SQLEXPRESS. "
+                f"Chi tiết ODBC: {detail}"
+            ),
+        }
 
 
-def initialize():
+def initialize(force: bool = False):
     """
-    Tự động khởi tạo các bảng Users, Inspections, ChatMessages, DiseaseCatalog
+    Tự động khởi tạo các bảng Users, Inspections, ChatMessages, DiseaseCatalog, ModelVersions
     và View dbo.vw_DashboardKPIs nếu chưa tồn tại.
-    Đồng thời đảm bảo tương thích 100% cột case_id và predicted_label.
+    Đồng thời đảm bảo tương thích 100% với kịch bản database_setup.sql.
     """
+    global _SCHEMA_INITIALIZED_KEY
     with conn() as c:
+        target_key = f"{'sqlserver' if c.is_sqlserver else 'sqlite'}:{_SHARED_CONN_STR}"
+        if not force and _SCHEMA_INITIALIZED_KEY == target_key:
+            return
         if c.is_sqlserver:
             c.execute(
                 """
@@ -438,16 +547,17 @@ def initialize():
                 );
                 """
             )
+            c.execute("IF COL_LENGTH('dbo.users', 'username') IS NULL ALTER TABLE dbo.users ADD username NVARCHAR(128) NOT NULL DEFAULT '';")
             c.execute(
                 """
                 IF OBJECT_ID(N'dbo.inspections', N'U') IS NULL
                 CREATE TABLE dbo.inspections (
                     id INT IDENTITY(1,1) PRIMARY KEY,
-                    filename NVARCHAR(500) NOT NULL,
-                    width INT NOT NULL,
-                    height INT NOT NULL,
-                    size_bytes INT NOT NULL,
-                    mode NVARCHAR(64) NOT NULL,
+                    filename NVARCHAR(500) NOT NULL DEFAULT '',
+                    width INT NOT NULL DEFAULT 0,
+                    height INT NOT NULL DEFAULT 0,
+                    size_bytes INT NOT NULL DEFAULT 0,
+                    mode NVARCHAR(64) NOT NULL DEFAULT 'ai',
                     predicted_class NVARCHAR(255) NULL,
                     predicted_label NVARCHAR(255) NULL,
                     confidence FLOAT NULL,
@@ -481,27 +591,52 @@ def initialize():
                 );
                 """
             )
-            # Đảm bảo các cột bắt buộc luôn hiện diện trên SQL Server
-            c.execute("IF COL_LENGTH('dbo.inspections', 'predicted_label') IS NULL ALTER TABLE dbo.inspections ADD predicted_label NVARCHAR(255) NULL;")
-            c.execute("IF COL_LENGTH('dbo.inspections', 'expert_display_name') IS NULL ALTER TABLE dbo.inspections ADD expert_display_name NVARCHAR(255) NULL;")
-            c.execute("IF COL_LENGTH('dbo.inspections', 'inference_ms') IS NULL ALTER TABLE dbo.inspections ADD inference_ms FLOAT NULL;")
-            c.execute("IF COL_LENGTH('dbo.inspections', 'case_id') IS NULL ALTER TABLE dbo.inspections ADD case_id NVARCHAR(64) NOT NULL DEFAULT '';")
+            # Đảm bảo các cột bắt buộc luôn hiện diện trên SQL Server (tương thích 100% với database_setup.sql)
+            for col_name, col_def in (
+                ("filename", "NVARCHAR(500) NOT NULL DEFAULT ''"),
+                ("width", "INT NOT NULL DEFAULT 0"),
+                ("height", "INT NOT NULL DEFAULT 0"),
+                ("size_bytes", "INT NOT NULL DEFAULT 0"),
+                ("mode", "NVARCHAR(64) NOT NULL DEFAULT 'ai'"),
+                ("body_site", "NVARCHAR(255) NOT NULL DEFAULT ''"),
+                ("onset_date", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+                ("entered_at", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+                ("review_note", "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+                ("scores_json", "NVARCHAR(MAX) NOT NULL DEFAULT '[]'"),
+                ("model_info", "NVARCHAR(255) NOT NULL DEFAULT ''"),
+                ("predicted_label", "NVARCHAR(255) NULL"),
+                ("expert_display_name", "NVARCHAR(255) NULL"),
+                ("inference_ms", "FLOAT NULL"),
+                ("case_id", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+            ):
+                c.execute(f"IF COL_LENGTH('dbo.inspections', '{col_name}') IS NULL ALTER TABLE dbo.inspections ADD {col_name} {col_def};")
+            c.execute("IF COL_LENGTH('dbo.inspections', 'model_name') IS NOT NULL ALTER TABLE dbo.inspections ALTER COLUMN model_name VARCHAR(150) NULL;")
 
             c.execute(
                 """
                 IF OBJECT_ID(N'dbo.ChatMessages', N'U') IS NULL
                 CREATE TABLE dbo.ChatMessages (
                     id INT IDENTITY(1,1) PRIMARY KEY,
-                    timestamp NVARCHAR(64) NOT NULL,
+                    timestamp NVARCHAR(64) NOT NULL DEFAULT '',
                     user_id INT NULL,
-                    user_email NVARCHAR(255) NOT NULL,
-                    role NVARCHAR(32) NOT NULL,
-                    content NVARCHAR(MAX) NOT NULL,
+                    user_email NVARCHAR(255) NOT NULL DEFAULT '',
+                    role NVARCHAR(32) NOT NULL DEFAULT 'user',
+                    content NVARCHAR(MAX) NOT NULL DEFAULT '',
                     case_id NVARCHAR(64) NOT NULL DEFAULT '',
                     model_name NVARCHAR(128) NOT NULL DEFAULT ''
                 );
                 """
             )
+            for col_name, col_def in (
+                ("timestamp", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+                ("role", "NVARCHAR(32) NOT NULL DEFAULT 'user'"),
+                ("content", "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+                ("model_name", "NVARCHAR(128) NOT NULL DEFAULT ''"),
+                ("case_id", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+            ):
+                c.execute(f"IF COL_LENGTH('dbo.ChatMessages', '{col_name}') IS NULL ALTER TABLE dbo.ChatMessages ADD [{col_name}] {col_def};")
+            c.execute("IF COL_LENGTH('dbo.ChatMessages', 'message_text') IS NOT NULL ALTER TABLE dbo.ChatMessages ALTER COLUMN message_text NVARCHAR(MAX) NULL;")
+
             c.execute(
                 """
                 IF OBJECT_ID(N'dbo.DiseaseCatalog', N'U') IS NULL
@@ -516,12 +651,36 @@ def initialize():
                 );
                 """
             )
+            for col_name, col_def in (
+                ("code", "NVARCHAR(128) NULL"),
+                ("name_vi", "NVARCHAR(255) NULL"),
+                ("treatment", "NVARCHAR(MAX) NULL"),
+                ("updated_at", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+            ):
+                c.execute(f"IF COL_LENGTH('dbo.DiseaseCatalog', '{col_name}') IS NULL ALTER TABLE dbo.DiseaseCatalog ADD {col_name} {col_def};")
+            c.execute("IF COL_LENGTH('dbo.DiseaseCatalog', 'class_key') IS NOT NULL ALTER TABLE dbo.DiseaseCatalog ALTER COLUMN class_key VARCHAR(120) NULL;")
+            c.execute("IF COL_LENGTH('dbo.DiseaseCatalog', 'display_name') IS NOT NULL ALTER TABLE dbo.DiseaseCatalog ALTER COLUMN display_name NVARCHAR(255) NULL;")
+
+            c.execute(
+                """
+                IF OBJECT_ID(N'dbo.ModelVersions', N'U') IS NULL
+                CREATE TABLE dbo.ModelVersions (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    version_name NVARCHAR(200) NOT NULL,
+                    architecture VARCHAR(100) NOT NULL,
+                    weights_path NVARCHAR(500) NOT NULL UNIQUE,
+                    accuracy FLOAT NULL,
+                    is_active BIT NOT NULL DEFAULT 0,
+                    activated_by NVARCHAR(255) NULL,
+                    activated_at NVARCHAR(64) NOT NULL DEFAULT ''
+                );
+                """
+            )
             # Khởi tạo hoặc cập nhật View dbo.vw_DashboardKPIs
             c.execute(
                 """
-                IF OBJECT_ID(N'dbo.vw_DashboardKPIs', N'V') IS NULL
                 EXEC(N'
-                CREATE VIEW dbo.vw_DashboardKPIs AS
+                CREATE OR ALTER VIEW dbo.vw_DashboardKPIs AS
                 SELECT
                     (SELECT COUNT(1) FROM dbo.users WHERE is_active = 1) AS total_users,
                     COUNT(1) AS total_inspections,
@@ -606,6 +765,18 @@ def initialize():
                 )"""
             )
             c.execute(
+                """CREATE TABLE IF NOT EXISTS ModelVersions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version_name TEXT NOT NULL,
+                    architecture TEXT NOT NULL,
+                    weights_path TEXT NOT NULL UNIQUE,
+                    accuracy REAL,
+                    is_active INTEGER NOT NULL DEFAULT 0,
+                    activated_by TEXT,
+                    activated_at TEXT NOT NULL DEFAULT ''
+                )"""
+            )
+            c.execute(
                 """
                 CREATE VIEW IF NOT EXISTS vw_DashboardKPIs AS
                 SELECT
@@ -680,6 +851,7 @@ def initialize():
                         now_str,
                     ),
                 )
+        _SCHEMA_INITIALIZED_KEY = target_key
 
 
 def get_sample_gallery() -> list[dict]:
@@ -714,14 +886,10 @@ def save(info, result, case=None, source_image=None):
 
     try:
         with conn() as c:
-            # Nếu chưa có case_id, tự động lấy số thứ tự tiếp theo để sinh mã PS-xxxxxx
-            if not case_id:
-                try:
-                    max_row = c.execute("SELECT MAX(id) AS mid FROM inspections").fetchone()
-                    next_id = (int(max_row["mid"] or 0)) + 1
-                    case_id = f"PS-{next_id:06d}"
-                except Exception:
-                    case_id = f"PS-{uuid4().hex[:6].upper()}"
+            # Dùng mã tạm duy nhất khi INSERT để tránh đụng độ UNIQUE constraint (UQ_Inspections_CaseId) nếu có bản ghi cũ từng bị xóa
+            auto_assign_code = not case_id
+            if auto_assign_code:
+                case_id = f"TMP-{uuid4().hex[:8].upper()}"
 
             cur = c.execute(
                 """INSERT INTO inspections
@@ -770,11 +938,16 @@ def save(info, result, case=None, source_image=None):
                 except Exception:
                     pass
 
-            if row_id > 0:
+            if row_id > 0 and (auto_assign_code or case_id.startswith("TMP-")):
                 actual_code = f"PS-{row_id:06d}"
                 if case_id != actual_code:
-                    c.execute("UPDATE inspections SET case_id=? WHERE id=?", (actual_code, row_id))
-                    case_id = actual_code
+                    try:
+                        c.execute("UPDATE inspections SET case_id=? WHERE id=?", (actual_code, row_id))
+                        case_id = actual_code
+                    except Exception:
+                        fallback_code = f"PS-{row_id:06d}-{uuid4().hex[:3].upper()}"
+                        c.execute("UPDATE inspections SET case_id=? WHERE id=?", (fallback_code, row_id))
+                        case_id = fallback_code
 
             return row_id
     except Exception:
@@ -1090,18 +1263,52 @@ def sync_disease_catalog_to_sql(catalog: dict) -> None:
         for code, info in (catalog or {}).items():
             if not isinstance(info, dict):
                 continue
+            c_key = str(code).strip()
+            c_name = str(info.get("name_vi") or code).strip()
+            c_danger = str(info.get("danger_level") or "Trung bình").strip()
+            c_symp = str(info.get("symptoms") or "").strip()
+            c_prev = str(info.get("prevention") or "").strip()
+            c_treat = str(info.get("treatment") or "").strip()
+            if c.is_sqlserver:
+                try:
+                    c.execute(
+                        """INSERT INTO DiseaseCatalog
+                        (code, name_vi, class_key, display_name, danger_level, symptoms, prevention, treatment, treatment_protocol, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (c_key, c_name, c_key, c_name, c_danger, c_symp, c_prev, c_treat, c_treat, now_str),
+                    )
+                    continue
+                except Exception:
+                    pass
             c.execute(
                 """INSERT INTO DiseaseCatalog (code, name_vi, danger_level, symptoms, prevention, treatment, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    str(code).strip(),
-                    str(info.get("name_vi") or code).strip(),
-                    str(info.get("danger_level") or "Trung bình").strip(),
-                    str(info.get("symptoms") or "").strip(),
-                    str(info.get("prevention") or "").strip(),
-                    str(info.get("treatment") or "").strip(),
-                    now_str,
-                ),
+                (c_key, c_name, c_danger, c_symp, c_prev, c_treat, now_str),
+            )
+
+
+def sync_model_version_to_sql(details: dict, activated_by: str = "admin") -> None:
+    """Đồng bộ phiên bản mô hình đang kích hoạt vào bảng ModelVersions trong SQL."""
+    initialize()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    w_path = str(details.get("checkpoint") or "")
+    v_name = str(details.get("run_name") or "")
+    arch = str(details.get("model") or "mobilenet_v2")
+    acc = details.get("test_accuracy")
+    acc_val = float(acc) if isinstance(acc, (int, float)) else None
+    with conn() as c:
+        c.execute("UPDATE ModelVersions SET is_active = 0")
+        existing = c.execute("SELECT id FROM ModelVersions WHERE weights_path = ?", (w_path,)).fetchone()
+        if existing:
+            c.execute(
+                "UPDATE ModelVersions SET is_active = 1, accuracy = ?, activated_by = ?, activated_at = ? WHERE id = ?",
+                (acc_val, activated_by, now_str, existing["id"]),
+            )
+        else:
+            c.execute(
+                """INSERT INTO ModelVersions (version_name, architecture, weights_path, accuracy, is_active, activated_by, activated_at)
+                VALUES (?, ?, ?, ?, 1, ?, ?)""",
+                (v_name, arch, w_path, acc_val, activated_by, now_str),
             )
 
 
@@ -1162,6 +1369,96 @@ def create_user_account(
         )
         row = c.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
         return dict(row)
+
+
+def update_user_profile(
+    user_id: int,
+    full_name: str,
+    avatar_url: str | None = None,
+    email: str | None = None,
+) -> dict:
+    """Update profile fields and keep email-keyed account history in sync."""
+    initialize()
+    clean_name = (full_name or "").strip()
+    if not 2 <= len(clean_name) <= 100:
+        raise ValueError("Tên hiển thị cần từ 2 đến 100 ký tự.")
+    clean_email = (email or "").strip().lower() if email is not None else None
+    if clean_email is not None:
+        local_part, separator, domain = clean_email.partition("@")
+        if (
+            not separator
+            or not local_part
+            or "." not in domain
+            or any(char.isspace() for char in clean_email)
+            or len(clean_email) > 254
+        ):
+            raise ValueError("Vui lòng nhập địa chỉ email hợp lệ.")
+
+    with conn() as c:
+        row = c.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
+        if not row:
+            raise ValueError("Không tìm thấy tài khoản.")
+        old_email = str(row["email"] or "").strip().lower()
+        next_email = clean_email if clean_email is not None else old_email
+        if next_email != old_email:
+            if row["auth_provider"] == "google" and not row["google_sub"]:
+                raise ValueError(
+                    "Tài khoản Google chưa lưu mã định danh liên kết, nên chưa thể đổi email an toàn."
+                )
+            duplicate = c.execute(
+                "SELECT id FROM users WHERE LOWER(email)=LOWER(?) AND id<>?",
+                (next_email, int(user_id)),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("Email này đã được một tài khoản khác sử dụng.")
+        next_avatar = row["avatar_url"] if avatar_url is None else str(avatar_url).strip()
+        c.execute(
+            "UPDATE users SET full_name=?, email=?, avatar_url=? WHERE id=?",
+            (clean_name, next_email, next_avatar, int(user_id)),
+        )
+        if next_email != old_email:
+            c.execute(
+                "UPDATE inspections SET user_email=? WHERE user_id=? OR LOWER(user_email)=LOWER(?)",
+                (next_email, int(user_id), old_email),
+            )
+            c.execute(
+                "UPDATE ChatMessages SET user_email=? WHERE user_id=? OR LOWER(user_email)=LOWER(?)",
+                (next_email, int(user_id), old_email),
+            )
+        updated = c.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
+    return dict(updated)
+
+
+def change_user_password(
+    user_id: int,
+    current_password: str,
+    new_password: str,
+) -> None:
+    """Verify the current password and replace it for a local account."""
+    initialize()
+    current = (current_password or "").strip()
+    replacement = new_password or ""
+    if replacement != replacement.strip():
+        raise ValueError("Mật khẩu mới không được bắt đầu hoặc kết thúc bằng khoảng trắng.")
+    if len(replacement) < 8:
+        raise ValueError("Mật khẩu mới cần có ít nhất 8 ký tự.")
+    if len(replacement) > 128:
+        raise ValueError("Mật khẩu mới không được dài quá 128 ký tự.")
+    if current == replacement:
+        raise ValueError("Mật khẩu mới phải khác mật khẩu hiện tại.")
+
+    with conn() as c:
+        row = c.execute("SELECT password_hash FROM users WHERE id=?", (int(user_id),)).fetchone()
+        if not row:
+            raise ValueError("Không tìm thấy tài khoản.")
+        if not row["password_hash"]:
+            raise ValueError("Tài khoản này dùng đăng nhập Google và chưa có mật khẩu riêng.")
+        if _hash_password(current) != row["password_hash"]:
+            raise ValueError("Mật khẩu hiện tại chưa chính xác.")
+        c.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (_hash_password(replacement), int(user_id)),
+        )
 
 
 def toggle_user_lock(user_id: int) -> bool:
@@ -1285,4 +1582,7 @@ def clear_chat_messages(user_email: str) -> None:
         c.execute("DELETE FROM ChatMessages WHERE LOWER(user_email)=?", (clean_email,))
 
 
-initialize()
+try:
+    initialize()
+except Exception:
+    pass

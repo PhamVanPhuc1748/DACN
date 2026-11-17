@@ -2,10 +2,13 @@
 from datetime import datetime, timezone
 import json
 import subprocess
+import threading
 import time
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageFile, UnidentifiedImageError
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from services.project_data import (
     APP_MODEL_NAMES,
@@ -21,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MAX_BYTES = 10 * 1024 * 1024
 WORKER = ROOT / "services" / "inference_worker.py"
 
+_MODEL_CACHE_LOCK = threading.Lock()
 _MODEL_RUNTIME_CACHE: dict[str, dict] = {}
 
 
@@ -84,55 +88,66 @@ def _predict_inprocess(image_path: str | Path, run: dict) -> dict | None:
 
     ckpt_path = Path(run["checkpoint"]).resolve()
     cache_key = str(ckpt_path)
-    entry = _MODEL_RUNTIME_CACHE.get(cache_key)
 
-    if entry is None:
-        config = run["config"]
-        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-        model_code = checkpoint.get("model", config.get("model", "mobilenet_v2"))
-        classes = checkpoint.get("classes", config.get("classes", []))
-        constructors = {
-            "mobilenet_v2": models.mobilenet_v2,
-            "mobilenet_v3_large": models.mobilenet_v3_large,
-            "efficientnet_b0": models.efficientnet_b0,
-        }
-        if model_code not in constructors:
-            return None
-        model = constructors[model_code](weights=None)
-        final_layer = model.classifier[-1]
-        model.classifier[-1] = nn.Linear(final_layer.in_features, len(classes))
-        state_dict = checkpoint.get("state_dict") or checkpoint.get("model_state_dict") or checkpoint
-        model.load_state_dict(state_dict, strict=True)
+    with _MODEL_CACHE_LOCK:
+        entry = _MODEL_RUNTIME_CACHE.get(cache_key)
+        if entry is None:
+            config = run["config"]
+            checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+            model_code = checkpoint.get("model", config.get("model", "mobilenet_v2"))
+            classes = checkpoint.get("classes", config.get("classes", []))
+            constructors = {
+                "mobilenet_v2": models.mobilenet_v2,
+                "mobilenet_v3_large": models.mobilenet_v3_large,
+                "efficientnet_b0": models.efficientnet_b0,
+            }
+            if model_code not in constructors:
+                return None
+            model = constructors[model_code](weights=None)
+            final_layer = model.classifier[-1]
+            model.classifier[-1] = nn.Linear(final_layer.in_features, len(classes))
+            state_dict = checkpoint.get("state_dict") or checkpoint.get("model_state_dict") or checkpoint
+            model.load_state_dict(state_dict, strict=True)
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model.to(device).eval()
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            try:
+                model.to(device).eval()
+            except RuntimeError:
+                device = torch.device("cpu")
+                model.to(device).eval()
 
-        image_size = int(checkpoint.get("image_size", config.get("image_size", 224)))
-        normalization = checkpoint.get("normalization", config.get("normalization", {}))
-        mean = normalization.get("mean", [0.485, 0.456, 0.406])
-        std = normalization.get("std", [0.229, 0.224, 0.225])
-        transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean, std),
-        ])
-        entry = {
-            "model": model,
-            "device": device,
-            "transform": transform,
-            "classes": list(classes),
-            "model_code": model_code,
-            "image_size": image_size,
-            "best_epoch": checkpoint.get("best_epoch", run.get("metrics", {}).get("best_epoch")),
-        }
-        _MODEL_RUNTIME_CACHE[cache_key] = entry
+            image_size = int(checkpoint.get("image_size", config.get("image_size", 224)))
+            normalization = checkpoint.get("normalization", config.get("normalization", {}))
+            mean = normalization.get("mean", [0.485, 0.456, 0.406])
+            std = normalization.get("std", [0.229, 0.224, 0.225])
+            transform = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std),
+            ])
+            entry = {
+                "model": model,
+                "device": device,
+                "transform": transform,
+                "classes": list(classes),
+                "model_code": model_code,
+                "image_size": image_size,
+                "best_epoch": checkpoint.get("best_epoch", run.get("metrics", {}).get("best_epoch")),
+            }
+            _MODEL_RUNTIME_CACHE[cache_key] = entry
 
     with Image.open(image_path) as source:
-        tensor = entry["transform"](source.convert("RGB")).unsqueeze(0).to(entry["device"])
+        cpu_tensor = entry["transform"](source.convert("RGB")).unsqueeze(0)
 
     t0 = time.perf_counter()
     with torch.inference_mode():
-        probabilities = torch.softmax(entry["model"](tensor)[0], dim=0).cpu().tolist()
+        try:
+            tensor = cpu_tensor.to(entry["device"])
+            probabilities = torch.softmax(entry["model"](tensor)[0], dim=0).cpu().tolist()
+        except RuntimeError:
+            entry["device"] = torch.device("cpu")
+            entry["model"].to(entry["device"]).eval()
+            probabilities = torch.softmax(entry["model"](cpu_tensor)[0], dim=0).cpu().tolist()
     inference_ms = round((time.perf_counter() - t0) * 1000.0, 2)
 
     classes = entry["classes"]
@@ -226,11 +241,20 @@ def predict(path, run_name: str | None = None):
     model_code = run.get("model") or run.get("config", {}).get("model", "mobilenet_v2")
     arch_label = APP_MODEL_NAMES.get(model_code, model_code)
 
+    result["ok"] = True
     result["display_label"] = display_class(result["label"])
     result["danger_level"] = cls_meta.get("danger_level", "Trung bình")
     result["recommendation"] = cls_meta.get("treatment", "")
     result["prevention_ref"] = cls_meta.get("prevention", "")
     result["symptoms_ref"] = cls_meta.get("symptoms", "")
+    result["disease"] = {
+        "code": result["label"],
+        "name_vi": result["display_label"],
+        "danger_level": result["danger_level"],
+        "symptoms": result["symptoms_ref"],
+        "drugs": result["recommendation"],
+        "isolation": result["prevention_ref"],
+    }
     result["info"] = info
     result["run_name"] = run["name"]
     result["model"] = model_code

@@ -18,10 +18,16 @@ from services.project_data import (
 from theme import PRIMARY, css_input, make_smooth_animation
 
 
-def _empty_chart_box(t: dict, icon_name: object) -> ft.Control:
-    """Hiển thị trạng thái Empty State thanh lịch khi SQL Database có 0 ca khám."""
+def _empty_chart_box(
+    t: dict,
+    icon_name: object,
+    title: str = "Chưa có dữ liệu ca khám để hiển thị biểu đồ",
+    subtitle: str = "Dữ liệu thống kê thực tế từ SQL Database sẽ hiển thị tại đây ngay khi có ca khám mới.",
+) -> ft.Control:
+    """Hiển thị trạng thái Empty State thanh lịch căn giữa khi danh sách hoặc biểu đồ trống."""
     return ft.Container(
         height=220,
+        width=float("inf"),
         bgcolor=t["SUB_SURFACE"],
         border=ft.border.all(1, t["BORDER"]),
         border_radius=12,
@@ -35,14 +41,14 @@ def _empty_chart_box(t: dict, icon_name: object) -> ft.Control:
             controls=[
                 ft.Icon(icon_name, size=36, color=t["MUTED"]),
                 ft.Text(
-                    "Chưa có dữ liệu ca khám để hiển thị biểu đồ",
+                    title,
                     size=13.5,
                     weight=ft.FontWeight.W_700,
                     color=t["MUTED"],
                     text_align=ft.TextAlign.CENTER,
                 ),
                 ft.Text(
-                    "Dữ liệu thống kê thực tế từ SQL Database sẽ hiển thị tại đây ngay khi có ca khám mới.",
+                    subtitle,
                     size=12,
                     color=t["SECONDARY"],
                     text_align=ft.TextAlign.CENTER,
@@ -502,7 +508,7 @@ def open_disease_editor_modal(
         hint: str,
         multiline: bool = False,
         prefix_icon: object = None,
-        width: int | None = 800,
+        width: int | None = None,
     ) -> ft.TextField:
         return ft.TextField(
             value=value,
@@ -531,7 +537,7 @@ def open_disease_editor_modal(
         label_row: ft.Control,
         field: ft.Control,
         expand: int | None = None,
-        wrap_row: bool = True,
+        wrap_row: bool = False,
     ) -> ft.Column:
         field_ctrl = ft.Row([field]) if wrap_row else field
         return ft.Column(
@@ -548,7 +554,6 @@ def open_disease_editor_modal(
         item.get("code", ""),
         "VD: Infected_Bacterial_Erysipelas",
         prefix_icon=ft.Icons.TERMINAL_ROUNDED,
-        width=600,
     )
 
     # 2. Mức độ nguy hiểm — Icon đổi màu động theo mức độ
@@ -580,7 +585,6 @@ def open_disease_editor_modal(
         focused_border_color="#10B981",
         focused_border_width=2,
         border_radius=12,
-        width=300,
         expand=True,
         on_select=on_danger_select,
     )
@@ -593,7 +597,6 @@ def open_disease_editor_modal(
         item.get("name_vi", ""),
         "VD: Bệnh đóng dấu lợn (Erysipelas)",
         prefix_icon=ft.Icons.LOCAL_HOSPITAL_ROUNDED,
-        width=800,
     )
 
     # 4. Triệu chứng nhận diện lâm sàng — Tím y sinh #7C3AED
@@ -602,7 +605,6 @@ def open_disease_editor_modal(
         item.get("symptoms", ""),
         "Mô tả tổn thương da: mảng đỏ, mụn nước, đóng vảy, rụng lông, sốt...",
         multiline=True,
-        width=800,
     )
 
     # 5. Phòng ngừa & An toàn sinh học — Xanh lam #0284C7
@@ -613,7 +615,6 @@ def open_disease_editor_modal(
         item.get("prevention", ""),
         "Cách ly, sát trùng chuồng trại, lịch tiêm vắc-xin...",
         multiline=True,
-        width=800,
     )
 
     # 6. Phác đồ điều trị & Thuốc khuyến nghị — Xanh lục y tế #16A34A
@@ -624,7 +625,6 @@ def open_disease_editor_modal(
         item.get("treatment", ""),
         "Thuốc đặc trị, liều lượng (mg/kg TT), liệu trình, chăm sóc hồi phục...",
         multiline=True,
-        width=800,
     )
 
     err_text = ft.Text("", size=13.5, color="#DC2626", weight=ft.FontWeight.W_600, visible=False)
@@ -799,6 +799,17 @@ def build_disease_catalog_crud_card(
             on_changed()
         latest = load_classes_config()
         classes_list_col.controls.clear()
+        if not latest:
+            classes_list_col.controls.append(
+                _empty_chart_box(
+                    cur_t,
+                    ft.Icons.MEDICAL_INFORMATION_OUTLINED,
+                    title="Danh mục bệnh lý hiện đang trống",
+                    subtitle="Nhấn nút 'Tạo lớp bệnh mới' ở góc phải để thêm nhóm bệnh lý và phác đồ điều trị.",
+                )
+            )
+            page.update()
+            return
         for code, raw_item in latest.items():
             item = dict(raw_item)
             item["code"] = code

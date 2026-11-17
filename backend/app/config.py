@@ -132,3 +132,21 @@ class Settings:
 
 
 settings = Settings()
+
+
+def get_settings() -> Settings:
+    return Settings()
+
+
+def save_env_settings(new_values: dict[str, str]) -> Path:
+    for k, v in (new_values or {}).items():
+        if v is not None:
+            os.environ[k] = str(v)
+    try:
+        from services.config_store import save_settings
+
+        return save_settings(new_values)
+    except Exception:
+        lines = [f"{k}={v}" for k, v in os.environ.items() if k.startswith(("SQLSERVER_", "AI_", "GEMINI_", "DB_", "DATABASE_"))]
+        ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return ENV_FILE

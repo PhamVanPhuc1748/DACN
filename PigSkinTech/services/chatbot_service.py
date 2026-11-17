@@ -481,13 +481,16 @@ def _call_gemini_rest_api(
     }
 
     for m_name in candidate_models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent"
         try:
             resp = requests.post(
                 url,
                 json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=25,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": api_key,
+                },
+                timeout=15,
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -497,6 +500,10 @@ def _call_gemini_rest_api(
                     reply_txt = "".join(str(p.get("text") or "") for p in parts).strip()
                     if reply_txt:
                         return reply_txt, m_name
+            elif resp.status_code in (400, 401, 403):
+                break
+        except requests.RequestException:
+            break
         except Exception:
             continue
     return None, model_name
@@ -757,12 +764,16 @@ def register_chat_refresher(page: object, refresh_fn: Callable[[], None]) -> Non
     """Đăng ký hàm làm mới giao diện khung chat (Tab chính & Popup nổi) để đồng bộ 100%."""
     if refresh_fn not in _GLOBAL_CHAT_REFRESHERS:
         _GLOBAL_CHAT_REFRESHERS.append(refresh_fn)
+        if len(_GLOBAL_CHAT_REFRESHERS) > 4:
+            del _GLOBAL_CHAT_REFRESHERS[:-4]
     if page is not None and hasattr(page, "data"):
         if not isinstance(getattr(page, "data", None), dict):
             page.data = {}
         lst = page.data.setdefault("chat_view_refreshers", [])
         if refresh_fn not in lst:
             lst.append(refresh_fn)
+            if len(lst) > 4:
+                del lst[:-4]
 
 
 def clear_chat_refreshers(page: object = None) -> None:

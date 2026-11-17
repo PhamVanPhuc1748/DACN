@@ -10,6 +10,7 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 CODE_ROOT = APP_ROOT.parent.parent
 CLASSES_JSON_PATH = APP_ROOT / "models" / "classes.json"
 ACTIVE_MODEL_STATE_PATH = APP_ROOT / "models" / "active_model.json"
+_CKPT_HASH_CACHE: dict[tuple[str, int, int], str] = {}
 
 APP_MODEL_NAMES = {
     "mobilenet_v2": "MobileNetV2",
@@ -186,7 +187,12 @@ def list_model_runs() -> list[dict]:
     for folder in _run_candidates():
         ckpt = folder / "best_model.pt"
         try:
-            fingerprint = hashlib.sha256(ckpt.read_bytes()).hexdigest()
+            st = ckpt.stat()
+            cache_key = (str(ckpt.resolve()), int(st.st_mtime_ns), int(st.st_size))
+            fingerprint = _CKPT_HASH_CACHE.get(cache_key)
+            if not fingerprint:
+                fingerprint = hashlib.sha256(ckpt.read_bytes()).hexdigest()
+                _CKPT_HASH_CACHE[cache_key] = fingerprint
             cfg = json.loads((folder / "config.json").read_text(encoding="utf-8"))
             metrics = json.loads((folder / "final_metrics.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -309,6 +315,12 @@ def set_active_checkpoint(checkpoint_path: str) -> dict:
         ),
         encoding="utf-8",
     )
+    try:
+        from services.store import sync_model_version_to_sql
+
+        sync_model_version_to_sql(details)
+    except Exception:
+        pass
     return active_run() or {}
 
 

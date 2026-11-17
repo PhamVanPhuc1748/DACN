@@ -4,6 +4,7 @@ import asyncio
 import flet as ft
 
 from services.auth_service import (
+    build_outbreak_alert_banner,
     build_role_shell,
     create_file_picker,
     ensure_flet_compat,
@@ -444,6 +445,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             spacing=16,
         )
 
+        outbreak = build_outbreak_alert_banner(all_records, page=page)
         return [
             tech_banner(
                 "Tổng quan & Hàng đợi Thẩm định Chuyên gia",
@@ -451,6 +453,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                 pills=header_pills,
                 page=page,
             ),
+            *([outbreak] if outbreak else []),
             expert_kpi_row,
             build_clinical_charts_section(page, sys_stats),
             tech_card(
@@ -712,15 +715,23 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             page.update()
 
         def handle_export_expert_report(e):
+            import json
+
             is_agree = decision_group.value == "agree"
             chosen_label = pred_code if is_agree else (relabel_dropdown.value or pred_code)
             cls_meta = get_class_info(chosen_label)
-            scores = rec.get("scores_json") or {pred_code: conf}
+            raw_scores = rec.get("scores_json")
+            try:
+                parsed_scores = json.loads(raw_scores) if isinstance(raw_scores, str) else raw_scores
+            except Exception:
+                parsed_scores = None
             export_vet_report_html(
                 page,
                 {
+                    "record_id": rec.get("id") or 1,
                     "case_id": case_code,
                     "created_at": rec.get("created_at") or "",
+                    "user_name": rec.get("user_name") or "Người chăn nuôi",
                     "farm_name": rec.get("farm_name") or "Trang trại chăn nuôi",
                     "animal_id": rec.get("animal_id") or "Chưa gán thẻ",
                     "pig_age": rec.get("pig_age") or "—",
@@ -728,9 +739,12 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                     "symptoms": rec.get("symptoms") or "Không có ghi chú",
                     "image_path": rec.get("image_path") or "",
                     "predicted_class": chosen_label,
+                    "disease_name": cls_meta.get("name_vi") or display_class(chosen_label),
                     "confidence": conf,
                     "danger_level": cls_meta.get("danger_level", "Trung bình"),
-                    "scores": scores if isinstance(scores, dict) else {pred_code: conf},
+                    "scores": parsed_scores if isinstance(parsed_scores, (list, dict)) and parsed_scores else [{"label": chosen_label, "confidence": conf}],
+                    "isolation_guide": cls_meta.get("prevention") or "",
+                    "treatment_guide": (treatment_note.value or "").strip() or cls_meta.get("treatment", ""),
                     "expert_label": chosen_label,
                     "expert_note": (treatment_note.value or "").strip() or cls_meta.get("treatment", ""),
                     "reviewed_by": user.get("email", "bs.thuy.pigskin@gmail.com"),
@@ -779,6 +793,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                 ],
                 spacing=10,
                 scroll=ft.ScrollMode.AUTO,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
         )
         left_panel.height = REVIEW_PANEL_HEIGHT
@@ -826,6 +841,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                                 ft.ProgressBar(value=conf, bar_height=9, color=c_color, bgcolor=t["BORDER"]),
                             ],
                             spacing=6,
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                         ),
                     ),
                     ft.Text("1. Đánh giá nhãn chẩn đoán (Human-in-the-Loop):", size=14.5, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
@@ -852,6 +868,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                 ],
                 spacing=12,
                 scroll=ft.ScrollMode.AUTO,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
         )
         right_panel.height = REVIEW_PANEL_HEIGHT
@@ -1193,6 +1210,20 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             results_col.controls.clear()
             results = state["batch_results"]
             if not results:
+                results_col.controls.append(
+                    _build_empty_state_card(
+                        title_text="Chưa có kết quả phân tích hàng loạt",
+                        desc_text=(
+                            "Hãy chọn nhiều ảnh vùng da heo từ thiết bị hoặc nhấn 'Nạp bộ 5 ảnh mẫu lâm sàng', "
+                            "sau đó bấm 'Chạy Phân tích Hàng loạt' để đánh giá độ nhạy của mô hình AI."
+                        ),
+                        icon_name=ft.Icons.SCIENCE_ROUNDED,
+                        on_refresh=lambda e: handle_load_sample_batch(e),
+                        secondary_label="Về Hàng đợi Thẩm định",
+                        secondary_icon=ft.Icons.PENDING_ACTIONS_ROUNDED,
+                        secondary_tab_idx=0,
+                    )
+                )
                 return
             valid = [r for r in results if r.get("mode") == "ai"]
             avg_conf = (sum(float(r.get("confidence") or 0) for r in valid) / len(valid) * 100.0) if valid else 0.0

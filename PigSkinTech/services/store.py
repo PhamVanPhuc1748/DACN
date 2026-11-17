@@ -66,53 +66,34 @@ CASE_COLUMNS = {
 
 
 def _migrate_sqlite_review_default(c) -> None:
-    """Replace the legacy SQLite default without changing case IDs or review history."""
     row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='inspections'").fetchone()
-    if not row:
-        return
-    create_sql = row["sql"]
-    if not re.search(r"review_status\s+TEXT\s+NOT NULL\s+DEFAULT\s+'needs_review'", create_sql, re.I):
+    if not row or not re.search(r"review_status\s+TEXT\s+NOT NULL\s+DEFAULT\s+'needs_review'", row["sql"], re.I):
         return
     for table in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
         table_name = table["name"].replace('"', '""')
-        if any(
-            table_name.lower() == "inspections" or fk["table"].lower() == "inspections"
-            for fk in c.execute(f'PRAGMA foreign_key_list("{table_name}")')
-        ):
+        if any(table_name.lower() == "inspections" or fk["table"].lower() == "inspections"
+               for fk in c.execute(f'PRAGMA foreign_key_list("{table_name}")')):
             raise RuntimeError("Cannot migrate inspections referenced by foreign keys automatically")
-    related = c.execute(
-        "SELECT type, sql FROM sqlite_master WHERE tbl_name='inspections' "
-        "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
+    indexes = c.execute(
+        "SELECT sql FROM sqlite_master WHERE tbl_name='inspections' AND type='index' AND sql IS NOT NULL"
     ).fetchall()
     views = c.execute(
         "SELECT name, sql FROM sqlite_master WHERE type='view' AND sql LIKE '%inspections%'"
     ).fetchall()
-    migrated_sql = re.sub(
-        r"\bCREATE\s+TABLE\s+inspections\b",
-        "CREATE TABLE inspections_review_migration",
-        create_sql,
-        count=1,
-        flags=re.I,
-    )
-    migrated_sql = re.sub(
-        r"(review_status\s+TEXT\s+NOT NULL\s+DEFAULT\s+)'needs_review'",
-        r"\1'not_requested'",
-        migrated_sql,
-        count=1,
-        flags=re.I,
-    )
-    if migrated_sql == create_sql or "inspections_review_migration" not in migrated_sql:
-        raise RuntimeError("Cannot safely migrate the inspections table definition")
-    c.execute(migrated_sql)
-    columns = [col["name"] for col in c.execute("PRAGMA table_info(inspections)").fetchall()]
-    names = ", ".join('"' + name.replace('"', '""') + '"' for name in columns)
-    c.execute(f"INSERT INTO inspections_review_migration ({names}) SELECT {names} FROM inspections")
+    create_sql = re.sub(r"\bCREATE\s+TABLE\s+inspections\b", "CREATE TABLE inspections_review_migration", row["sql"], count=1, flags=re.I)
+    create_sql = re.sub(r"(review_status\s+TEXT\s+NOT NULL\s+DEFAULT\s+)'needs_review'", r"\1'not_requested'", create_sql, count=1, flags=re.I)
+    if "inspections_review_migration" not in create_sql:
+        raise RuntimeError("Cannot safely migrate inspections table")
+    c.execute(create_sql)
+    columns = [item["name"] for item in c.execute("PRAGMA table_info(inspections)").fetchall()]
+    column_list = ", ".join('"' + name.replace('"', '""') + '"' for name in columns)
+    c.execute(f"INSERT INTO inspections_review_migration ({column_list}) SELECT {column_list} FROM inspections")
     for view in views:
         c.execute('DROP VIEW "' + view["name"].replace('"', '""') + '"')
     c.execute("DROP TABLE inspections")
     c.execute("ALTER TABLE inspections_review_migration RENAME TO inspections")
-    for item in related:
-        c.execute(item["sql"])
+    for index in indexes:
+        c.execute(index["sql"])
     for view in views:
         c.execute(view["sql"])
 
@@ -220,8 +201,15 @@ def _build_sqlserver_conn_str(settings: dict[str, str], database: str | None = N
         f"DRIVER={{{driver}}}",
         f"SERVER={server}",
         f"DATABASE={db_name}",
-        "Trusted_Connection=yes",
     ]
+    user = (settings.get("DB_USER") or settings.get("SQLSERVER_USERNAME") or "").strip()
+    password = (settings.get("DB_PASSWORD") or settings.get("SQLSERVER_PASSWORD") or "").strip()
+    trusted_raw = (settings.get("Trusted_Connection") or settings.get("SQLSERVER_TRUSTED_CONNECTION") or "yes").strip().lower()
+    use_trusted = trusted_raw in ("yes", "true", "1") or not user
+    if use_trusted:
+        parts.append("Trusted_Connection=yes")
+    else:
+        parts.extend([f"UID={user}", f"PWD={password}"])
     if "Driver 18" in driver:
         parts.append("TrustServerCertificate=yes")
     return ";".join(parts)
@@ -320,6 +308,7 @@ _SHARED_ENGINE_TYPE: str | None = None
 _SHARED_CONN_STR: str = ""
 _SQLSERVER_RETRY_AFTER = 0.0
 _SQLSERVER_FAILED_CONN_STR = ""
+_SCHEMA_INITIALIZED_KEY: str = ""
 
 
 def _get_shared_connection(force_reconnect: bool = False) -> tuple[Any, bool]:
@@ -394,8 +383,13 @@ def _get_shared_connection(force_reconnect: bool = False) -> tuple[Any, bool]:
                 _SQLSERVER_RETRY_AFTER = time.monotonic() + 30.0
 
         # Fallback SQLite
-        if _SHARED_RAW_CONN is not None and _SHARED_ENGINE_TYPE == "sqlite":
+        if _SHARED_RAW_CONN is not None and _SHARED_ENGINE_TYPE == "sqlite" and _SHARED_CONN_STR == str(DB):
             return _SHARED_RAW_CONN, False
+        if _SHARED_RAW_CONN is not None:
+            try:
+                _SHARED_RAW_CONN.close()
+            except Exception:
+                pass
 
         _SHARED_RAW_CONN = sqlite3.connect(DB, check_same_thread=False)
         _SHARED_RAW_CONN.row_factory = sqlite3.Row
@@ -418,16 +412,27 @@ class _UnifiedConnection:
     """
 
     def __init__(self):
-        raw_conn, is_sqlserver = _get_shared_connection()
-        self._raw = raw_conn
-        self.is_sqlserver = is_sqlserver
+        self._raw = None
+        self.is_sqlserver = False
+        self._cursors: list[Any] = []
 
     def __enter__(self) -> "_UnifiedConnection":
         _SHARED_CONN_LOCK.acquire()
-        return self
+        try:
+            self._raw, self.is_sqlserver = _get_shared_connection()
+            return self
+        except Exception:
+            _SHARED_CONN_LOCK.release()
+            raise
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
+            for cur in self._cursors:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+            self._cursors.clear()
             if self._raw is not None:
                 if exc_type is None:
                     self._raw.commit()
@@ -439,6 +444,8 @@ class _UnifiedConnection:
             _SHARED_CONN_LOCK.release()
 
     def execute(self, sql: str, params: tuple | list = ()) -> _CursorWrapper:
+        if self._raw is None:
+            self._raw, self.is_sqlserver = _get_shared_connection()
         query = sql.strip()
         if self.is_sqlserver:
             # Dịch SQLite LIMIT 300 sang TOP 300 của T-SQL nếu có
@@ -447,6 +454,7 @@ class _UnifiedConnection:
 
         try:
             cur = self._raw.cursor()
+            self._cursors.append(cur)
             cur.execute(query, tuple(params))
         except Exception as exc:
             # Tự động reconnect nếu mất kết nối mạng hoặc timeout
@@ -459,6 +467,7 @@ class _UnifiedConnection:
                 self._raw = raw_conn
                 self.is_sqlserver = is_sqlserver
                 cur = self._raw.cursor()
+                self._cursors.append(cur)
                 cur.execute(query, tuple(params))
             else:
                 raise
@@ -511,6 +520,8 @@ def test_sqlserver_connection(custom_settings: dict[str, str] | None = None) -> 
                 _SHARED_RAW_CONN = None
             _SQLSERVER_RETRY_AFTER = 0.0
             _SQLSERVER_FAILED_CONN_STR = ""
+            global _SCHEMA_INITIALIZED_KEY
+            _SCHEMA_INITIALIZED_KEY = ""
         state = "đã được tạo và kết nối" if created else "đã tồn tại và kết nối"
         return {
             "ok": True,
@@ -540,13 +551,17 @@ def test_sqlserver_connection(custom_settings: dict[str, str] | None = None) -> 
         }
 
 
-def initialize():
+def initialize(force: bool = False):
     """
-    Tự động khởi tạo các bảng Users, Inspections, ChatMessages, DiseaseCatalog
+    Tự động khởi tạo các bảng Users, Inspections, ChatMessages, DiseaseCatalog, ModelVersions
     và View dbo.vw_DashboardKPIs nếu chưa tồn tại.
-    Đồng thời đảm bảo tương thích 100% cột case_id và predicted_label.
+    Đồng thời đảm bảo tương thích 100% với kịch bản database_setup.sql.
     """
+    global _SCHEMA_INITIALIZED_KEY
     with conn() as c:
+        target_key = f"{'sqlserver' if c.is_sqlserver else 'sqlite'}:{_SHARED_CONN_STR}"
+        if not force and _SCHEMA_INITIALIZED_KEY == target_key:
+            return
         if c.is_sqlserver:
             c.execute(
                 """
@@ -566,16 +581,17 @@ def initialize():
                 );
                 """
             )
+            c.execute("IF COL_LENGTH('dbo.users', 'username') IS NULL ALTER TABLE dbo.users ADD username NVARCHAR(128) NOT NULL DEFAULT '';")
             c.execute(
                 """
                 IF OBJECT_ID(N'dbo.inspections', N'U') IS NULL
                 CREATE TABLE dbo.inspections (
                     id INT IDENTITY(1,1) PRIMARY KEY,
-                    filename NVARCHAR(500) NOT NULL,
-                    width INT NOT NULL,
-                    height INT NOT NULL,
-                    size_bytes INT NOT NULL,
-                    mode NVARCHAR(64) NOT NULL,
+                    filename NVARCHAR(500) NOT NULL DEFAULT '',
+                    width INT NOT NULL DEFAULT 0,
+                    height INT NOT NULL DEFAULT 0,
+                    size_bytes INT NOT NULL DEFAULT 0,
+                    mode NVARCHAR(64) NOT NULL DEFAULT 'ai',
                     predicted_class NVARCHAR(255) NULL,
                     predicted_label NVARCHAR(255) NULL,
                     confidence FLOAT NULL,
@@ -609,11 +625,25 @@ def initialize():
                 );
                 """
             )
-            # Đảm bảo các cột bắt buộc luôn hiện diện trên SQL Server
-            c.execute("IF COL_LENGTH('dbo.inspections', 'predicted_label') IS NULL ALTER TABLE dbo.inspections ADD predicted_label NVARCHAR(255) NULL;")
-            c.execute("IF COL_LENGTH('dbo.inspections', 'expert_display_name') IS NULL ALTER TABLE dbo.inspections ADD expert_display_name NVARCHAR(255) NULL;")
-            c.execute("IF COL_LENGTH('dbo.inspections', 'inference_ms') IS NULL ALTER TABLE dbo.inspections ADD inference_ms FLOAT NULL;")
-            c.execute("IF COL_LENGTH('dbo.inspections', 'case_id') IS NULL ALTER TABLE dbo.inspections ADD case_id NVARCHAR(64) NOT NULL DEFAULT '';")
+            # Đảm bảo các cột bắt buộc luôn hiện diện trên SQL Server (tương thích 100% với database_setup.sql)
+            for col_name, col_def in (
+                ("filename", "NVARCHAR(500) NOT NULL DEFAULT ''"),
+                ("width", "INT NOT NULL DEFAULT 0"),
+                ("height", "INT NOT NULL DEFAULT 0"),
+                ("size_bytes", "INT NOT NULL DEFAULT 0"),
+                ("mode", "NVARCHAR(64) NOT NULL DEFAULT 'ai'"),
+                ("body_site", "NVARCHAR(255) NOT NULL DEFAULT ''"),
+                ("onset_date", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+                ("entered_at", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+                ("review_note", "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+                ("scores_json", "NVARCHAR(MAX) NOT NULL DEFAULT '[]'"),
+                ("model_info", "NVARCHAR(255) NOT NULL DEFAULT ''"),
+                ("predicted_label", "NVARCHAR(255) NULL"),
+                ("expert_display_name", "NVARCHAR(255) NULL"),
+                ("inference_ms", "FLOAT NULL"),
+                ("case_id", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+            ):
+                c.execute(f"IF COL_LENGTH('dbo.inspections', '{col_name}') IS NULL ALTER TABLE dbo.inspections ADD {col_name} {col_def};")
             c.execute("IF COL_LENGTH('dbo.inspections', 'requested_review') IS NULL ALTER TABLE dbo.inspections ADD requested_review INT NOT NULL DEFAULT 0;")
             c.execute("IF COL_LENGTH('dbo.inspections', 'review_status') IS NULL ALTER TABLE dbo.inspections ADD review_status NVARCHAR(64) NOT NULL DEFAULT 'not_requested';")
             c.execute("IF COL_LENGTH('dbo.inspections', 'expert_label') IS NULL ALTER TABLE dbo.inspections ADD expert_label NVARCHAR(255) NOT NULL DEFAULT '';")
@@ -636,22 +666,33 @@ def initialize():
                         DEFAULT 'not_requested' FOR review_status;
                 END;
             """)
+            c.execute("IF COL_LENGTH('dbo.inspections', 'model_name') IS NOT NULL ALTER TABLE dbo.inspections ALTER COLUMN model_name VARCHAR(150) NULL;")
 
             c.execute(
                 """
                 IF OBJECT_ID(N'dbo.ChatMessages', N'U') IS NULL
                 CREATE TABLE dbo.ChatMessages (
                     id INT IDENTITY(1,1) PRIMARY KEY,
-                    timestamp NVARCHAR(64) NOT NULL,
+                    timestamp NVARCHAR(64) NOT NULL DEFAULT '',
                     user_id INT NULL,
-                    user_email NVARCHAR(255) NOT NULL,
-                    role NVARCHAR(32) NOT NULL,
-                    content NVARCHAR(MAX) NOT NULL,
+                    user_email NVARCHAR(255) NOT NULL DEFAULT '',
+                    role NVARCHAR(32) NOT NULL DEFAULT 'user',
+                    content NVARCHAR(MAX) NOT NULL DEFAULT '',
                     case_id NVARCHAR(64) NOT NULL DEFAULT '',
                     model_name NVARCHAR(128) NOT NULL DEFAULT ''
                 );
                 """
             )
+            for col_name, col_def in (
+                ("timestamp", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+                ("role", "NVARCHAR(32) NOT NULL DEFAULT 'user'"),
+                ("content", "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+                ("model_name", "NVARCHAR(128) NOT NULL DEFAULT ''"),
+                ("case_id", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+            ):
+                c.execute(f"IF COL_LENGTH('dbo.ChatMessages', '{col_name}') IS NULL ALTER TABLE dbo.ChatMessages ADD [{col_name}] {col_def};")
+            c.execute("IF COL_LENGTH('dbo.ChatMessages', 'message_text') IS NOT NULL ALTER TABLE dbo.ChatMessages ALTER COLUMN message_text NVARCHAR(MAX) NULL;")
+
             c.execute(
                 """
                 IF OBJECT_ID(N'dbo.DiseaseCatalog', N'U') IS NULL
@@ -666,11 +707,34 @@ def initialize():
                 );
                 """
             )
+            for col_name, col_def in (
+                ("code", "NVARCHAR(128) NULL"),
+                ("name_vi", "NVARCHAR(255) NULL"),
+                ("treatment", "NVARCHAR(MAX) NULL"),
+                ("updated_at", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+            ):
+                c.execute(f"IF COL_LENGTH('dbo.DiseaseCatalog', '{col_name}') IS NULL ALTER TABLE dbo.DiseaseCatalog ADD {col_name} {col_def};")
+            c.execute("IF COL_LENGTH('dbo.DiseaseCatalog', 'class_key') IS NOT NULL ALTER TABLE dbo.DiseaseCatalog ALTER COLUMN class_key VARCHAR(120) NULL;")
+            c.execute("IF COL_LENGTH('dbo.DiseaseCatalog', 'display_name') IS NOT NULL ALTER TABLE dbo.DiseaseCatalog ALTER COLUMN display_name NVARCHAR(255) NULL;")
+
+            c.execute(
+                """
+                IF OBJECT_ID(N'dbo.ModelVersions', N'U') IS NULL
+                CREATE TABLE dbo.ModelVersions (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    version_name NVARCHAR(200) NOT NULL,
+                    architecture VARCHAR(100) NOT NULL,
+                    weights_path NVARCHAR(500) NOT NULL UNIQUE,
+                    accuracy FLOAT NULL,
+                    is_active BIT NOT NULL DEFAULT 0,
+                    activated_by NVARCHAR(255) NULL,
+                    activated_at NVARCHAR(64) NOT NULL DEFAULT ''
+                );
+                """
+            )
             # Khởi tạo hoặc cập nhật View dbo.vw_DashboardKPIs
             c.execute(
                 """
-                IF OBJECT_ID(N'dbo.vw_DashboardKPIs', N'V') IS NULL
-                   OR COALESCE(OBJECT_DEFINITION(OBJECT_ID(N'dbo.vw_DashboardKPIs')), N'') NOT LIKE N'%needs_review%'
                 EXEC(N'
                 CREATE OR ALTER VIEW dbo.vw_DashboardKPIs AS
                 SELECT
@@ -755,6 +819,18 @@ def initialize():
                     prevention TEXT NOT NULL DEFAULT '',
                     treatment TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL DEFAULT ''
+                )"""
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS ModelVersions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version_name TEXT NOT NULL,
+                    architecture TEXT NOT NULL,
+                    weights_path TEXT NOT NULL UNIQUE,
+                    accuracy REAL,
+                    is_active INTEGER NOT NULL DEFAULT 0,
+                    activated_by TEXT,
+                    activated_at TEXT NOT NULL DEFAULT ''
                 )"""
             )
             view_row = c.execute(
@@ -846,6 +922,7 @@ def initialize():
                         now_str,
                     ),
                 )
+        _SCHEMA_INITIALIZED_KEY = target_key
 
 
 def get_sample_gallery() -> list[dict]:
@@ -880,14 +957,10 @@ def save(info, result, case=None, source_image=None):
 
     try:
         with conn() as c:
-            # Nếu chưa có case_id, tự động lấy số thứ tự tiếp theo để sinh mã PS-xxxxxx
-            if not case_id:
-                try:
-                    max_row = c.execute("SELECT MAX(id) AS mid FROM inspections").fetchone()
-                    next_id = (int(max_row["mid"] or 0)) + 1
-                    case_id = f"PS-{next_id:06d}"
-                except Exception:
-                    case_id = f"PS-{uuid4().hex[:6].upper()}"
+            # Dùng mã tạm duy nhất khi INSERT để tránh đụng độ UNIQUE constraint (UQ_Inspections_CaseId) nếu có bản ghi cũ từng bị xóa
+            auto_assign_code = not case_id
+            if auto_assign_code:
+                case_id = f"TMP-{uuid4().hex[:8].upper()}"
 
             cur = c.execute(
                 """INSERT INTO inspections
@@ -914,7 +987,7 @@ def save(info, result, case=None, source_image=None):
                     case.get("symptoms", "").strip(),
                     case.get("onset_date", "").strip(),
                     case.get("entered_at", "").strip(),
-                    case.get("review_status", "not_requested"),
+                    case.get("review_status", "needs_review"),
                     case.get("review_note", "").strip(),
                     json.dumps(result.get("scores", []), ensure_ascii=False),
                     str(result.get("model_info", "")),
@@ -936,11 +1009,16 @@ def save(info, result, case=None, source_image=None):
                 except Exception:
                     pass
 
-            if row_id > 0:
+            if row_id > 0 and (auto_assign_code or case_id.startswith("TMP-")):
                 actual_code = f"PS-{row_id:06d}"
                 if case_id != actual_code:
-                    c.execute("UPDATE inspections SET case_id=? WHERE id=?", (actual_code, row_id))
-                    case_id = actual_code
+                    try:
+                        c.execute("UPDATE inspections SET case_id=? WHERE id=?", (actual_code, row_id))
+                        case_id = actual_code
+                    except Exception:
+                        fallback_code = f"PS-{row_id:06d}-{uuid4().hex[:3].upper()}"
+                        c.execute("UPDATE inspections SET case_id=? WHERE id=?", (fallback_code, row_id))
+                        case_id = fallback_code
 
             return row_id
     except Exception:
@@ -1012,7 +1090,7 @@ def request_expert_review(record_id: int) -> None:
 
 
 def list_review_queue(include_reviewed: bool = False) -> list[dict]:
-    """Return user-requested pending cases; optionally include completed reviews for expert history."""
+    """Return user-requested pending cases; optionally include completed reviews for history."""
     initialize()
     with conn() as c:
         rows = c.execute(
@@ -1131,7 +1209,7 @@ def get_system_stats() -> dict:
             pending_count = int(
                 kpi_row.get("pending_reviews")
                 if kpi_row.get("pending_reviews") is not None
-                else (kpi_row.get("pending_count") if kpi_row.get("pending_count") is not None else 0)
+                else (kpi_row.get("pending_count") or max(0, total_inspections - reviewed_count))
             )
             curated_count = int(kpi_row.get("dataset_count") or kpi_row.get("curated_count") or 0)
             ai_accuracy_vs_expert = float(
@@ -1152,7 +1230,7 @@ def get_system_stats() -> dict:
                 (SELECT COUNT(1) FROM {i_tbl}) AS total_inspections,
                 (SELECT COUNT(1) FROM {i_tbl} WHERE review_status='reviewed' AND agreed_with_ai IS NOT NULL) AS reviewed_count,
                 (SELECT COUNT(1) FROM {i_tbl} WHERE review_status='reviewed' AND agreed_with_ai=1) AS agreed_count,
-                (SELECT COUNT(1) FROM {i_tbl} WHERE requested_review=1 AND review_status='needs_review') AS pending_count,
+                (SELECT COUNT(1) FROM {i_tbl} WHERE review_status != 'reviewed') AS pending_count,
                 (SELECT COUNT(1) FROM {i_tbl} WHERE in_dataset=1) AS curated_count,
                 (SELECT COALESCE(AVG(confidence), 0.0) FROM {i_tbl}) AS avg_confidence,
                 (SELECT COUNT(1) FROM {c_tbl}) AS total_chats
@@ -1261,18 +1339,52 @@ def sync_disease_catalog_to_sql(catalog: dict) -> None:
         for code, info in (catalog or {}).items():
             if not isinstance(info, dict):
                 continue
+            c_key = str(code).strip()
+            c_name = str(info.get("name_vi") or code).strip()
+            c_danger = str(info.get("danger_level") or "Trung bình").strip()
+            c_symp = str(info.get("symptoms") or "").strip()
+            c_prev = str(info.get("prevention") or "").strip()
+            c_treat = str(info.get("treatment") or "").strip()
+            if c.is_sqlserver:
+                try:
+                    c.execute(
+                        """INSERT INTO DiseaseCatalog
+                        (code, name_vi, class_key, display_name, danger_level, symptoms, prevention, treatment, treatment_protocol, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (c_key, c_name, c_key, c_name, c_danger, c_symp, c_prev, c_treat, c_treat, now_str),
+                    )
+                    continue
+                except Exception:
+                    pass
             c.execute(
                 """INSERT INTO DiseaseCatalog (code, name_vi, danger_level, symptoms, prevention, treatment, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    str(code).strip(),
-                    str(info.get("name_vi") or code).strip(),
-                    str(info.get("danger_level") or "Trung bình").strip(),
-                    str(info.get("symptoms") or "").strip(),
-                    str(info.get("prevention") or "").strip(),
-                    str(info.get("treatment") or "").strip(),
-                    now_str,
-                ),
+                (c_key, c_name, c_danger, c_symp, c_prev, c_treat, now_str),
+            )
+
+
+def sync_model_version_to_sql(details: dict, activated_by: str = "admin") -> None:
+    """Đồng bộ phiên bản mô hình đang kích hoạt vào bảng ModelVersions trong SQL."""
+    initialize()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    w_path = str(details.get("checkpoint") or "")
+    v_name = str(details.get("run_name") or "")
+    arch = str(details.get("model") or "mobilenet_v2")
+    acc = details.get("test_accuracy")
+    acc_val = float(acc) if isinstance(acc, (int, float)) else None
+    with conn() as c:
+        c.execute("UPDATE ModelVersions SET is_active = 0")
+        existing = c.execute("SELECT id FROM ModelVersions WHERE weights_path = ?", (w_path,)).fetchone()
+        if existing:
+            c.execute(
+                "UPDATE ModelVersions SET is_active = 1, accuracy = ?, activated_by = ?, activated_at = ? WHERE id = ?",
+                (acc_val, activated_by, now_str, existing["id"]),
+            )
+        else:
+            c.execute(
+                """INSERT INTO ModelVersions (version_name, architecture, weights_path, accuracy, is_active, activated_by, activated_at)
+                VALUES (?, ?, ?, ?, 1, ?, ?)""",
+                (v_name, arch, w_path, acc_val, activated_by, now_str),
             )
 
 
@@ -1534,4 +1646,7 @@ def clear_chat_messages(user_email: str) -> None:
         c.execute("DELETE FROM ChatMessages WHERE LOWER(user_email)=?", (clean_email,))
 
 
-initialize()
+try:
+    initialize()
+except Exception:
+    pass

@@ -312,3 +312,15 @@ CARE_GUIDANCE = {
 
 for disease_code, guidance in CARE_GUIDANCE.items():
     DISEASES_DATA[disease_code].update(guidance)
+
+DISEASES_SEED = [
+    {
+        "code": item["code"],
+        "name_vi": item["name_vi"],
+        "symptoms": " ".join(item.get("symptoms", [])) if isinstance(item.get("symptoms"), list) else str(item.get("symptoms", "")),
+        "treatment": " ".join(item.get("treatment_protocol", [])) if isinstance(item.get("treatment_protocol"), list) else str(item.get("treatment_protocol", "")),
+        "prevention": str(item.get("isolation_protocol", "")),
+        "reference_image": "",
+    }
+    for item in DISEASES_DATA.values()
+]

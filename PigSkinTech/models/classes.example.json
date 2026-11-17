@@ -1,1 +1,18 @@
-["Thay bằng tên lớp 0 từ dữ liệu train", "Thay bằng tên lớp 1 từ dữ liệu train"]
+{
+  "Healthy": {
+    "code": "Healthy",
+    "name_vi": "Da khỏe mạnh (Bình thường)",
+    "danger_level": "An toàn",
+    "symptoms": "Da hồng hào, lông bóng mượt, không có vết loét, mụn mủ, đóng vảy hay mảng xuất huyết.",
+    "prevention": "Duy trì vệ sinh chuồng trại khô thoáng, tiêm phòng đầy đủ vắc-xin định kỳ và bổ sung khoáng chất, vitamin.",
+    "treatment": "Không cần điều trị thuốc. Tiếp tục theo dõi định kỳ và đảm bảo khẩu phần dinh dưỡng."
+  },
+  "Infected_Bacterial_Erysipelas": {
+    "code": "Infected_Bacterial_Erysipelas",
+    "name_vi": "Bệnh đóng dấu lợn (Erysipelas)",
+    "danger_level": "Cao",
+    "symptoms": "Sốt cao 41-42°C, xuất hiện các mảng đỏ hình thoi/vuông nổi cộm trên da lưng, ngực, cổ; ấn vào mất màu rồi đỏ lại.",
+    "prevention": "Tiêm vắc-xin phòng bệnh đóng dấu lợn định kỳ 2 lần/năm; tiêu độc khử trùng chuồng nuôi.",
+    "treatment": "Tiêm Penicillin G (20.000-30.000 IU/kg TT) hoặc Amoxicillin LA kết hợp hạ sốt Analgin + Vitamin C trong 3-5 ngày."
+  }
+}

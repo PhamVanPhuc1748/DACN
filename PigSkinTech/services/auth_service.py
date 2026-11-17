@@ -11,7 +11,7 @@ import urllib.parse
 import webbrowser
 
 import flet as ft
-from PIL import Image, ImageDraw, ImageEnhance, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageOps
 
 try:
     from flet.auth.providers import GoogleOAuthProvider
@@ -1213,26 +1213,11 @@ def generate_lesion_heatmap(image_path: str) -> str:
             contrast_img = ImageEnhance.Sharpness(contrast_img).enhance(1.85)
 
             r_ch, g_ch, b_ch = rgb.split()
-            # Erythema / inflammation index emphasizing reddish & warm skin lesions
-            erythema = Image.eval(
-                Image.merge(
-                    "RGB",
-                    (
-                        r_ch,
-                        g_ch,
-                        b_ch,
-                    ),
-                ).convert("L"),
-                lambda x: x,
-            )
-            r_bytes = r_ch.tobytes()
-            g_bytes = g_ch.tobytes()
-            b_bytes = b_ch.tobytes()
-            heat_vals = bytearray(len(r_bytes))
-            for i in range(len(r_bytes)):
-                score = int(r_bytes[i] * 1.45 - 0.55 * g_bytes[i] - 0.45 * b_bytes[i]) + 60
-                heat_vals[i] = 255 if score > 255 else (0 if score < 0 else score)
-            erythema = Image.frombytes("L", (w, h), bytes(heat_vals))
+            # Erythema / inflammation index emphasizing reddish & warm skin lesions (C-level PIL LUTs)
+            r_lut = r_ch.point(lambda v: min(255, int(v * 1.45) + 60))
+            g_lut = g_ch.point(lambda v: int(v * 0.55))
+            b_lut = b_ch.point(lambda v: int(v * 0.45))
+            erythema = ImageChops.subtract(ImageChops.subtract(r_lut, g_lut), b_lut)
             erythema = ImageOps.autocontrast(erythema, cutoff=2)
 
             thermal = ImageOps.colorize(

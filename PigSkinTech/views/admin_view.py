@@ -2,6 +2,7 @@
 import asyncio
 import inspect
 import json
+
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import flet as ft
 
 from services.auth_service import (
+    build_outbreak_alert_banner,
     build_role_shell,
     close_dialog,
     create_file_picker,
@@ -26,6 +28,7 @@ from services.auth_service import (
     theme_tokens,
 )
 from services.clinical_widgets import (
+    _empty_chart_box,
     build_clinical_charts_section,
     build_disease_catalog_crud_card,
     open_disease_editor_modal,
@@ -147,7 +150,17 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                         spacing=8,
                     ),
                     ft.Divider(height=10, color=t["BORDER"]),
-                    *(dist_rows or [ft.Text("Chưa có dữ liệu chẩn đoán.", size=14, color=t["MUTED"])]),
+                    *(
+                        dist_rows
+                        or [
+                            _empty_chart_box(
+                                t,
+                                ft.Icons.BAR_CHART_ROUNDED,
+                                title="Chưa có dữ liệu chẩn đoán trên hệ thống",
+                                subtitle="Phân bố các loại bệnh sẽ tự động cập nhật ngay khi có ca khám mới từ người chăn nuôi.",
+                            )
+                        ]
+                    ),
                 ],
                 spacing=12,
             ),
@@ -234,6 +247,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             header_stat_pill("Đồng thuận AI", f"{stats['ai_accuracy_vs_expert']:.1f}%", ft.Icons.VERIFIED_ROUNDED, "#D97706", t["AMBER_SOFT"], f"{stats['agreed_count']}/{stats['reviewed_count']} ca duyệt", page=page),
         ]
 
+        outbreak = build_outbreak_alert_banner(recent(""), page=page)
         return [
             tech_banner(
                 "Tổng quan Quản trị Hệ thống",
@@ -241,6 +255,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 pills=admin_pills,
                 page=page,
             ),
+            *([outbreak] if outbreak else []),
             kpi_cards,
             build_clinical_charts_section(page, stats),
             ft.ResponsiveRow(
@@ -282,9 +297,9 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             )
 
         def open_add_user_dialog(e):
-            new_name = css_input(label="Họ và tên người dùng", hint_text="VD: Nguyễn Văn B", prefix_icon=ft.Icons.BADGE_OUTLINED, page=page)
-            new_email = css_input(label="Địa chỉ Email", hint_text="VD: b.nguyen@gmail.com", prefix_icon=ft.Icons.EMAIL_OUTLINED, page=page)
-            new_pw = css_input(label="Mật khẩu khởi tạo", value="123456", prefix_icon=ft.Icons.LOCK_OUTLINE_ROUNDED, page=page)
+            new_name = css_input(label="Họ và tên người dùng", hint_text="VD: Nguyễn Văn B", prefix_icon=ft.Icons.BADGE_OUTLINED, expand=True, page=page)
+            new_email = css_input(label="Địa chỉ Email", hint_text="VD: b.nguyen@gmail.com", prefix_icon=ft.Icons.EMAIL_OUTLINED, expand=True, page=page)
+            new_pw = css_input(label="Mật khẩu khởi tạo", value="123456", prefix_icon=ft.Icons.LOCK_OUTLINE_ROUNDED, expand=True, page=page)
             new_role_dd = make_dropdown(
                 "Phân quyền (RBAC)",
                 "user",
@@ -334,17 +349,18 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 spacing=8,
             )
             dlg.content = ft.Container(
-                width=460,
+                width=560,
                 content=ft.Column(
                     [
                         new_name,
                         new_email,
-                        ft.Row([new_role_dd, new_provider_dd], spacing=10),
+                        ft.Row([new_role_dd, new_provider_dd], spacing=12),
                         new_pw,
                         err_lbl,
                     ],
                     spacing=12,
                     tight=True,
+                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 ),
             )
             dlg.actions = [
@@ -473,7 +489,15 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 ],
                 rows=rows,
             )
-            table_host.content = ft.Row([table], expand=True)
+            if not rows:
+                table_host.content = _empty_chart_box(
+                    t,
+                    ft.Icons.PERSON_SEARCH_ROUNDED,
+                    title="Không tìm thấy tài khoản người dùng phù hợp",
+                    subtitle="Thử thay đổi từ khóa tìm kiếm hoặc chọn lại bộ lọc vai trò (Role).",
+                )
+            else:
+                table_host.content = ft.Row([table], expand=True)
             page.update()
 
         role_filter = make_dropdown(
@@ -626,6 +650,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             expand=True,
             page=page,
         )
+
 
         def refresh_model_runs(e):
             nonlocal runs
@@ -803,6 +828,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                         color=t["SECONDARY"],
                     ),
                     active_model_status,
+
                     ft.Row([
                         run_dropdown,
                         ft.OutlinedButton("Làm mới danh sách", icon=ft.Icons.REFRESH_ROUNDED, on_click=refresh_model_runs),
@@ -906,7 +932,13 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
 
         def render_result(result):
             if not result:
-                result_host.content = None
+
+                result_host.content = _empty_chart_box(
+                    t,
+                    ft.Icons.AUTO_AWESOME_ROUNDED,
+                    title="Chưa có kết quả dự đoán kiểm thử",
+                    subtitle="Chọn một ảnh da heo ở khung bên trái và nhấn 'Dự đoán ảnh' để xem phân phối xác suất Softmax.",
+                )
                 return
             if result.get("mode") != "ai":
                 result_host.content = ft.Text(
@@ -1010,6 +1042,8 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 page.update()
 
         predict_button.on_click = handle_test_prediction
+
+        render_result(None)
 
         return [
             tech_banner(

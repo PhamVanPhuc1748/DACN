@@ -1,55 +1,64 @@
-# PigSkin AI Studio — Flet Desktop
+# PigSkinTech AI Studio — Flet Desktop Application
 
-A desktop research UI for pig-skin health records and image review, built with Flet 0.28.3.
+Ứng dụng Desktop hỗ trợ chẩn đoán, thẩm định lâm sàng và quản lý hồ sơ bệnh ngoài da ở heo, xây dựng bằng **Flet**, **PyTorch/TorchVision**, **pyodbc (SQL Server)** và **SQLite**.
 
-The UI supports Light and Dark palettes, role-based navigation (Admin, Expert/Vet, Farm User), and direct model inference.
+---
 
-## Running (PowerShell, inside PigSkinTech)
+## 1. Khởi chạy nhanh (PowerShell trong thư mục `PigSkinTech`)
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
 .\.venv\Scripts\python.exe main.py
 ```
 
-## What works now
-- Toggle between light and dark palettes; the open page and case form values are preserved.
-- Role-based views: Admin, Expert, User.
-- Dashboard, dataset, and training views read the latest completed run's `config.json`, `final_metrics.json`, and manifest; absent files show as unavailable rather than sample values.
-- Image picker, JPG/PNG/WEBP file verification and image preview.
-- Case intake with animal/group ID, farm, lesion location, onset date, and observed signs.
-- SQLite case records with generated case IDs, searchable history, review status, and saved top-5 model scores.
-- In the image-analysis page, choose between bundled MobileNetV2 and EfficientNet-B0 checkpoints. The app selects the best validation macro-F1 run per architecture from the shared v4 manifest.
-- Real inference uses the selected checkpoint and records its architecture/run identity with the case. The worker also supports MobileNetV3-Large checkpoints for other workflows.
-- The app uses the training environment's Python when the lightweight Flet environment has no Torch installed. Inference runs outside the UI thread, and the saved record includes the run/checkpoint identity.
-- Page, image-preview, and result changes use short fade transitions; inference shows an indeterminate progress bar.
+Hoặc khởi chạy từ thư mục gốc của dự án bằng `..\run_app.bat` hoặc `python ..\run_app.py`.
 
-Original images are copied into the local `case_images/` archive when an inspection is saved. The history view can reopen archived images; deleting a record removes its archived copy but never deletes the source image selected by the user. Each inspection currently stores one image. A detected checkpoint and class file do not prove that the model is compatible; the first inference must load the weights successfully. Softmax scores are displayed as model scores, not calibrated disease probabilities, and results require veterinary review.
+---
 
-## Selecting the model and connecting training runs
+## 2. Các chức năng chính theo phân quyền (RBAC)
 
-The bundled model checkpoints are in `models/runs/20261103_125653` (MobileNetV2) and
-`models/runs/20261103_125004` (EfficientNet-B0). The image-analysis page lets the user
-choose one of these architectures. For each supported architecture, the app displays the
-complete run with the highest validation macro-F1 among runs matching the v4 manifest hash.
-Complete runs contain `best_model.pt`, `config.json`, `final_metrics.json`, and
-`best_validation.json`.
+- **Giao diện Sáng / Tối (Light & Dark Mode):** Chuyển đổi tức thì trên thanh Sidebar mà không làm mất dữ liệu đang nhập trên biểu mẫu.
+- **Người chăn nuôi (`/user`):**
+  - Chọn mô hình suy luận thực tế (**MobileNetV2** `20261103_125653` hoặc **EfficientNet-B0** `20261103_125004`).
+  - Tải ảnh vùng da heo (`JPG`, `PNG`, `WEBP` tối đa 10 MB) hoặc chọn nhanh từ bộ 5 ảnh mẫu lâm sàng trong `case_images/`.
+  - Bật/tắt chế độ **Soi vùng tổn thương AI (Lesion Contrast & Thermal Heatmap)**.
+  - Xem kết quả suy luận Tensor Softmax, biểu đồ Top-3 khả năng, biện pháp cách ly và phác đồ điều trị tham khảo.
+  - Gửi hồ sơ tới Bác sĩ Thú y thẩm định, hỏi đáp với **Trợ lý AI Thú y (Chatbot)** và **Xuất Phiếu Khám chuẩn 1 trang A4 (`exports/*.html`)**.
+- **Bác sĩ Thú y (`/expert`):**
+  - Rà soát các hồ sơ người dùng chủ động gửi; độ tin cậy AI thấp chỉ hiện gợi ý, không tự đưa hồ sơ vào hàng đợi.
+  - Xác nhận hoặc gán lại nhãn bệnh chuẩn (**Relabeling**) và gửi phác đồ điều trị về cho chủ trại.
+  - Duyệt ảnh đã chuẩn hóa nhãn vào kho dữ liệu huấn luyện `curated_dataset/<Class_Name>/`.
+  - Thêm/sửa/xóa danh mục bệnh lý & phác đồ điều trị chuẩn (đồng bộ trực tiếp giữa `models/classes.json` và bảng `DiseaseCatalog`).
+  - Chạy phân tích hàng loạt (**Batch Inference**) để đánh giá độ nhạy của mô hình.
+- **Quản trị viên (`/admin`):**
+  - Giám sát thống kê KPI toàn hệ thống, cảnh báo dịch tễ sớm và 3 biểu đồ phân tích trực quan.
+  - Quản lý danh sách người dùng (Local & Google OAuth), tìm kiếm, khóa/mở khóa và cấp quyền RBAC.
+  - Kích hoạt phiên bản trọng số mô hình `.pt` dùng chung cho toàn hệ thống (đồng bộ với `models/active_model.json` và bảng `ModelVersions`).
+  - Mở cửa sổ Flet riêng để kiểm tra manifest, cấu hình và theo dõi một lượt retrain.
+  - Kiểm tra kết nối và tự động khởi tạo cơ sở dữ liệu **SQL Server (`PigSkinTechDB`)**, cấu hình **Google OAuth 2.0** và **Gemini API Key**.
 
-The app also discovers complete runs under `E:\code\PigSkinResearchStudio\ml_workspace\runs`.
-The checkpoint carries the architecture, ordered class labels, image size, and normalization
-used during training. The app runs `services/inference_worker.py` using the training
-studio's `.venv` when Torch is not installed in the app environment.
+---
 
-To use a different training studio folder, set `PIGSKIN_RESEARCH_ROOT` before launching
-the app. For example:
+## 3. Trọng số mô hình & Kết nối dữ liệu
+
+| Kiến trúc | Run đóng gói | Validation Macro-F1 | Test Accuracy | Test Macro-F1 |
+|---|---|---:|---:|---:|
+| **MobileNetV2** | `models/runs/20261103_125653` | **72.35%** | **64.18%** | **63.55%** |
+| **EfficientNet-B0** | `models/runs/20261103_125004` | **71.16%** | **62.69%** | **62.24%** |
+| **MobileNetV2** | `models/runs/20261029_161050` | **71.00%** | **62.19%** | **61.25%** |
+
+- Để kết nối thêm thư mục huấn luyện bên ngoài, đặt biến môi trường `PIGSKIN_RESEARCH_ROOT` trước khi chạy ứng dụng:
+  ```powershell
+  $env:PIGSKIN_RESEARCH_ROOT = 'D:\Research\PigSkinResearchStudio'
+  python main.py
+  ```
+
+---
+
+## 4. Kiểm thử
 
 ```powershell
-$env:PIGSKIN_RESEARCH_ROOT = 'D:\Research\PigSkinResearchStudio'
-..\run_app.bat
+python -m unittest discover -s tests -v
 ```
-
-The manifest statistics are counted from the CSV and checked against its recorded SHA-256.
-The displayed training metrics come from that run's `final_metrics.json`; the app does not
-substitute hand-entered example values when those files are missing.
-
-The UI does not create fake diagnoses. It is a research aid and is not a veterinary diagnosis tool. Softmax scores are model scores, not calibrated disease probabilities; have a veterinarian review predictions.

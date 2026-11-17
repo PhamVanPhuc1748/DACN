@@ -34,6 +34,7 @@ BEGIN
     CREATE TABLE dbo.Users (
         id              INT IDENTITY(1,1) NOT NULL,
         email           VARCHAR(255)      NOT NULL,
+        username        NVARCHAR(128)     NOT NULL CONSTRAINT DF_Users_Username DEFAULT (''),
         full_name       NVARCHAR(255)     NOT NULL,
         password_hash   VARCHAR(255)      NULL,
         role            VARCHAR(30)       NOT NULL CONSTRAINT DF_Users_Role DEFAULT ('user'),
@@ -53,6 +54,8 @@ BEGIN
 END
 ELSE
 BEGIN
+    IF COL_LENGTH(N'dbo.Users', N'username') IS NULL
+        ALTER TABLE dbo.Users ADD username NVARCHAR(128) NOT NULL CONSTRAINT DF_Users_Username_Mig DEFAULT ('');
     IF COL_LENGTH(N'dbo.Users', N'full_name') IS NULL
         ALTER TABLE dbo.Users ADD full_name NVARCHAR(255) NOT NULL CONSTRAINT DF_Users_FullName_Mig DEFAULT (N'Người dùng');
     IF COL_LENGTH(N'dbo.Users', N'password_hash') IS NULL
@@ -85,22 +88,30 @@ IF OBJECT_ID(N'dbo.DiseaseCatalog', N'U') IS NULL
 BEGIN
     CREATE TABLE dbo.DiseaseCatalog (
         id                  INT IDENTITY(1,1) NOT NULL,
-        class_key           VARCHAR(120)      NOT NULL,
-        display_name        NVARCHAR(255)     NOT NULL,
+        code                NVARCHAR(128)     NULL,
+        name_vi             NVARCHAR(255)     NULL,
+        class_key           VARCHAR(120)      NULL,
+        display_name        NVARCHAR(255)     NULL,
         danger_level        NVARCHAR(30)      NOT NULL CONSTRAINT DF_Disease_Danger DEFAULT (N'Trung bình'),
         symptoms            NVARCHAR(MAX)     NULL,
         prevention          NVARCHAR(MAX)     NULL,
+        treatment           NVARCHAR(MAX)     NULL,
         treatment_protocol  NVARCHAR(MAX)     NULL,
         is_active           BIT               NOT NULL CONSTRAINT DF_Disease_Active DEFAULT (1),
         updated_by          NVARCHAR(255)     NULL,
         updated_at          DATETIME2(0)      NOT NULL CONSTRAINT DF_Disease_Updated DEFAULT (SYSDATETIME()),
 
-        CONSTRAINT PK_DiseaseCatalog PRIMARY KEY CLUSTERED (id ASC),
-        CONSTRAINT UQ_DiseaseCatalog_ClassKey UNIQUE NONCLUSTERED (class_key ASC)
+        CONSTRAINT PK_DiseaseCatalog PRIMARY KEY CLUSTERED (id ASC)
     );
 END
 ELSE
 BEGIN
+    IF COL_LENGTH(N'dbo.DiseaseCatalog', N'code') IS NULL
+        ALTER TABLE dbo.DiseaseCatalog ADD code NVARCHAR(128) NULL;
+    IF COL_LENGTH(N'dbo.DiseaseCatalog', N'name_vi') IS NULL
+        ALTER TABLE dbo.DiseaseCatalog ADD name_vi NVARCHAR(255) NULL;
+    IF COL_LENGTH(N'dbo.DiseaseCatalog', N'treatment') IS NULL
+        ALTER TABLE dbo.DiseaseCatalog ADD treatment NVARCHAR(MAX) NULL;
     IF COL_LENGTH(N'dbo.DiseaseCatalog', N'class_key') IS NULL
         ALTER TABLE dbo.DiseaseCatalog ADD class_key VARCHAR(120) NULL;
     IF COL_LENGTH(N'dbo.DiseaseCatalog', N'display_name') IS NULL
@@ -137,31 +148,42 @@ BEGIN
         id                  INT IDENTITY(1,1) NOT NULL,
         case_id             VARCHAR(50)       NOT NULL CONSTRAINT DF_Inspections_CaseId 
                                               DEFAULT ('PS-' + RIGHT('000000' + CAST(NEXT VALUE FOR dbo.Seq_CaseId AS VARCHAR(10)), 6)),
+        filename            NVARCHAR(500)     NOT NULL CONSTRAINT DF_Inspections_Filename DEFAULT (''),
+        width               INT               NOT NULL CONSTRAINT DF_Inspections_Width DEFAULT (0),
+        height              INT               NOT NULL CONSTRAINT DF_Inspections_Height DEFAULT (0),
+        size_bytes          INT               NOT NULL CONSTRAINT DF_Inspections_SizeBytes DEFAULT (0),
+        mode                NVARCHAR(64)      NOT NULL CONSTRAINT DF_Inspections_Mode DEFAULT ('ai'),
         user_id             INT               NULL,
         user_email          VARCHAR(255)      NULL,
         user_name           NVARCHAR(255)     NULL,
         animal_id           VARCHAR(100)      NULL,
         farm_name           NVARCHAR(255)     NULL,
+        body_site           NVARCHAR(255)     NOT NULL CONSTRAINT DF_Inspections_BodySite DEFAULT (''),
         symptoms            NVARCHAR(MAX)     NULL,
-        image_path          NVARCHAR(500)     NOT NULL,
-        model_name          VARCHAR(150)      NOT NULL,
-        predicted_class     VARCHAR(120)      NOT NULL,
+        onset_date          NVARCHAR(64)      NOT NULL CONSTRAINT DF_Inspections_OnsetDate DEFAULT (''),
+        entered_at          NVARCHAR(64)      NOT NULL CONSTRAINT DF_Inspections_EnteredAt DEFAULT (''),
+        image_path          NVARCHAR(500)     NOT NULL CONSTRAINT DF_Inspections_ImgPath DEFAULT (''),
+        model_name          VARCHAR(150)      NULL     CONSTRAINT DF_Inspections_ModelName DEFAULT (''),
+        model_info          NVARCHAR(255)     NOT NULL CONSTRAINT DF_Inspections_ModelInfo DEFAULT (''),
+        predicted_class     VARCHAR(120)      NOT NULL CONSTRAINT DF_Inspections_PredClass DEFAULT (''),
         predicted_label     NVARCHAR(255)     NULL,
         confidence          FLOAT             NOT NULL CONSTRAINT DF_Inspections_Conf DEFAULT (0.0),
         inference_ms        FLOAT             NULL     CONSTRAINT DF_Inspections_Ms DEFAULT (0.0),
+        scores_json         NVARCHAR(MAX)     NOT NULL CONSTRAINT DF_Inspections_ScoresJson DEFAULT ('[]'),
         top3_scores_json    NVARCHAR(MAX)     NULL,
         danger_level        NVARCHAR(30)      NULL,
         recommendation      NVARCHAR(MAX)     NULL,
         requested_review    BIT               NOT NULL CONSTRAINT DF_Inspections_ReqRev DEFAULT (0),
         review_status       VARCHAR(30)       NOT NULL CONSTRAINT DF_Inspections_RevStatus DEFAULT ('not_requested'),
+        review_note         NVARCHAR(MAX)     NOT NULL CONSTRAINT DF_Inspections_RevNote DEFAULT (''),
         agreed_with_ai      BIT               NULL,
-        expert_label        VARCHAR(120)      NULL,
+        expert_label        VARCHAR(120)      NOT NULL CONSTRAINT DF_Inspections_ExpLabel DEFAULT (''),
         expert_display_name NVARCHAR(255)     NULL,
-        expert_note         NVARCHAR(MAX)     NULL,
-        reviewed_by         NVARCHAR(255)     NULL,
-        reviewed_at         DATETIME2(0)      NULL,
+        expert_note         NVARCHAR(MAX)     NOT NULL CONSTRAINT DF_Inspections_ExpNote DEFAULT (''),
+        reviewed_by         NVARCHAR(255)     NOT NULL CONSTRAINT DF_Inspections_RevBy DEFAULT (''),
+        reviewed_at         NVARCHAR(64)      NOT NULL CONSTRAINT DF_Inspections_RevAt DEFAULT (''),
         in_dataset          BIT               NOT NULL CONSTRAINT DF_Inspections_InDataset DEFAULT (0),
-        created_at          DATETIME2(0)      NOT NULL CONSTRAINT DF_Inspections_Created DEFAULT (SYSDATETIME()),
+        created_at          NVARCHAR(64)      NOT NULL CONSTRAINT DF_Inspections_Created DEFAULT (CONVERT(NVARCHAR(19), SYSDATETIME(), 120)),
 
         CONSTRAINT PK_Inspections PRIMARY KEY CLUSTERED (id ASC),
         CONSTRAINT UQ_Inspections_CaseId UNIQUE NONCLUSTERED (case_id ASC),
@@ -176,6 +198,28 @@ BEGIN
     IF COL_LENGTH(N'dbo.Inspections', N'case_id') IS NULL
         ALTER TABLE dbo.Inspections ADD case_id VARCHAR(50) NOT NULL 
             CONSTRAINT DF_Inspections_CaseId_Mig DEFAULT ('PS-' + RIGHT('000000' + CAST(NEXT VALUE FOR dbo.Seq_CaseId AS VARCHAR(10)), 6));
+    IF COL_LENGTH(N'dbo.Inspections', N'filename') IS NULL
+        ALTER TABLE dbo.Inspections ADD filename NVARCHAR(500) NOT NULL CONSTRAINT DF_Insp_Filename_Mig DEFAULT ('');
+    IF COL_LENGTH(N'dbo.Inspections', N'width') IS NULL
+        ALTER TABLE dbo.Inspections ADD width INT NOT NULL CONSTRAINT DF_Insp_Width_Mig DEFAULT (0);
+    IF COL_LENGTH(N'dbo.Inspections', N'height') IS NULL
+        ALTER TABLE dbo.Inspections ADD height INT NOT NULL CONSTRAINT DF_Insp_Height_Mig DEFAULT (0);
+    IF COL_LENGTH(N'dbo.Inspections', N'size_bytes') IS NULL
+        ALTER TABLE dbo.Inspections ADD size_bytes INT NOT NULL CONSTRAINT DF_Insp_Size_Mig DEFAULT (0);
+    IF COL_LENGTH(N'dbo.Inspections', N'mode') IS NULL
+        ALTER TABLE dbo.Inspections ADD mode NVARCHAR(64) NOT NULL CONSTRAINT DF_Insp_Mode_Mig DEFAULT ('ai');
+    IF COL_LENGTH(N'dbo.Inspections', N'body_site') IS NULL
+        ALTER TABLE dbo.Inspections ADD body_site NVARCHAR(255) NOT NULL CONSTRAINT DF_Insp_BodySite_Mig DEFAULT ('');
+    IF COL_LENGTH(N'dbo.Inspections', N'onset_date') IS NULL
+        ALTER TABLE dbo.Inspections ADD onset_date NVARCHAR(64) NOT NULL CONSTRAINT DF_Insp_Onset_Mig DEFAULT ('');
+    IF COL_LENGTH(N'dbo.Inspections', N'entered_at') IS NULL
+        ALTER TABLE dbo.Inspections ADD entered_at NVARCHAR(64) NOT NULL CONSTRAINT DF_Insp_Entered_Mig DEFAULT ('');
+    IF COL_LENGTH(N'dbo.Inspections', N'review_note') IS NULL
+        ALTER TABLE dbo.Inspections ADD review_note NVARCHAR(MAX) NOT NULL CONSTRAINT DF_Insp_RevNote_Mig DEFAULT ('');
+    IF COL_LENGTH(N'dbo.Inspections', N'scores_json') IS NULL
+        ALTER TABLE dbo.Inspections ADD scores_json NVARCHAR(MAX) NOT NULL CONSTRAINT DF_Insp_Scores_Mig DEFAULT ('[]');
+    IF COL_LENGTH(N'dbo.Inspections', N'model_info') IS NULL
+        ALTER TABLE dbo.Inspections ADD model_info NVARCHAR(255) NOT NULL CONSTRAINT DF_Insp_ModelInfo_Mig DEFAULT ('');
     IF COL_LENGTH(N'dbo.Inspections', N'user_id') IS NULL
         ALTER TABLE dbo.Inspections ADD user_id INT NULL;
     IF COL_LENGTH(N'dbo.Inspections', N'user_email') IS NULL
@@ -192,6 +236,8 @@ BEGIN
         ALTER TABLE dbo.Inspections ADD image_path NVARCHAR(500) NULL;
     IF COL_LENGTH(N'dbo.Inspections', N'model_name') IS NULL
         ALTER TABLE dbo.Inspections ADD model_name VARCHAR(150) NULL;
+    ELSE
+        ALTER TABLE dbo.Inspections ALTER COLUMN model_name VARCHAR(150) NULL;
     IF COL_LENGTH(N'dbo.Inspections', N'predicted_class') IS NULL
         ALTER TABLE dbo.Inspections ADD predicted_class VARCHAR(120) NULL;
     IF COL_LENGTH(N'dbo.Inspections', N'predicted_label') IS NULL
@@ -229,14 +275,13 @@ BEGIN
 END
 GO
 
--- Preserve completed reviews; map only unresolved legacy cases to the current flow.
+-- Align legacy records with the user-requested expert-review flow.
 UPDATE dbo.Inspections SET review_status = 'needs_review'
-WHERE requested_review = 1 AND review_status IN ('pending', 'not_requested')
-  AND reviewed_at IS NULL AND (expert_label IS NULL OR expert_label = '');
+WHERE requested_review = 1 AND review_status <> 'reviewed'
+  AND (expert_label IS NULL OR expert_label = '');
 UPDATE dbo.Inspections SET review_status = 'not_requested'
-WHERE requested_review = 0 AND review_status IN ('pending', 'needs_review')
-  AND reviewed_at IS NULL AND (expert_label IS NULL OR expert_label = '');
-GO
+WHERE requested_review = 0 AND review_status <> 'reviewed'
+  AND (expert_label IS NULL OR expert_label = '');
 
 DECLARE @review_default sysname, @review_definition nvarchar(max), @drop_review_default nvarchar(max);
 SELECT @review_default = dc.name, @review_definition = dc.definition
@@ -262,12 +307,16 @@ IF OBJECT_ID(N'dbo.ChatMessages', N'U') IS NULL
 BEGIN
     CREATE TABLE dbo.ChatMessages (
         id              INT IDENTITY(1,1) NOT NULL,
+        timestamp       NVARCHAR(64)      NOT NULL CONSTRAINT DF_Chat_Timestamp DEFAULT (CONVERT(NVARCHAR(19), SYSDATETIME(), 120)),
         user_id         INT               NULL,
         user_email      VARCHAR(255)      NULL,
         inspection_id   INT               NULL,
-        case_id         VARCHAR(50)       NULL,
+        case_id         VARCHAR(50)       NOT NULL CONSTRAINT DF_Chat_CaseId DEFAULT (''),
+        role            NVARCHAR(32)      NOT NULL CONSTRAINT DF_Chat_Role DEFAULT ('user'),
+        content         NVARCHAR(MAX)     NOT NULL CONSTRAINT DF_Chat_Content DEFAULT (''),
+        model_name      NVARCHAR(128)     NOT NULL CONSTRAINT DF_Chat_ModelName DEFAULT (''),
         sender          VARCHAR(20)       NOT NULL CONSTRAINT DF_Chat_Sender DEFAULT ('user'),
-        message_text    NVARCHAR(MAX)     NOT NULL,
+        message_text    NVARCHAR(MAX)     NULL,
         created_at      DATETIME2(0)      NOT NULL CONSTRAINT DF_Chat_Created DEFAULT (SYSDATETIME()),
 
         CONSTRAINT PK_ChatMessages PRIMARY KEY CLUSTERED (id ASC),
@@ -276,6 +325,14 @@ BEGIN
 END
 ELSE
 BEGIN
+    IF COL_LENGTH(N'dbo.ChatMessages', N'timestamp') IS NULL
+        ALTER TABLE dbo.ChatMessages ADD [timestamp] NVARCHAR(64) NOT NULL CONSTRAINT DF_Chat_Timestamp_Mig DEFAULT (CONVERT(NVARCHAR(19), SYSDATETIME(), 120));
+    IF COL_LENGTH(N'dbo.ChatMessages', N'role') IS NULL
+        ALTER TABLE dbo.ChatMessages ADD [role] NVARCHAR(32) NOT NULL CONSTRAINT DF_Chat_Role_Mig DEFAULT ('user');
+    IF COL_LENGTH(N'dbo.ChatMessages', N'content') IS NULL
+        ALTER TABLE dbo.ChatMessages ADD content NVARCHAR(MAX) NOT NULL CONSTRAINT DF_Chat_Content_Mig DEFAULT ('');
+    IF COL_LENGTH(N'dbo.ChatMessages', N'model_name') IS NULL
+        ALTER TABLE dbo.ChatMessages ADD model_name NVARCHAR(128) NOT NULL CONSTRAINT DF_Chat_ModelName_Mig DEFAULT ('');
     IF COL_LENGTH(N'dbo.ChatMessages', N'user_id') IS NULL
         ALTER TABLE dbo.ChatMessages ADD user_id INT NULL;
     IF COL_LENGTH(N'dbo.ChatMessages', N'user_email') IS NULL
@@ -288,6 +345,8 @@ BEGIN
         ALTER TABLE dbo.ChatMessages ADD sender VARCHAR(20) NOT NULL CONSTRAINT DF_Chat_Sender_Mig DEFAULT ('user');
     IF COL_LENGTH(N'dbo.ChatMessages', N'message_text') IS NULL
         ALTER TABLE dbo.ChatMessages ADD message_text NVARCHAR(MAX) NULL;
+    ELSE
+        ALTER TABLE dbo.ChatMessages ALTER COLUMN message_text NVARCHAR(MAX) NULL;
     IF COL_LENGTH(N'dbo.ChatMessages', N'created_at') IS NULL
         ALTER TABLE dbo.ChatMessages ADD created_at DATETIME2(0) NOT NULL CONSTRAINT DF_Chat_Cat_Mig DEFAULT (SYSDATETIME());
 END
@@ -373,7 +432,9 @@ SELECT
             ELSE 0.0 
         END AS DECIMAL(5,1)
     ) AS ai_agreement_rate,
-    ISNULL(SUM(CASE WHEN in_dataset = 1 THEN 1 ELSE 0 END), 0) AS dataset_count
+    ISNULL(SUM(CASE WHEN in_dataset = 1 THEN 1 ELSE 0 END), 0) AS dataset_count,
+    ISNULL(AVG(confidence), 0.0) AS avg_confidence,
+    (SELECT COUNT(1) FROM dbo.ChatMessages) AS total_chats
 FROM dbo.Inspections;
 GO
 
@@ -437,7 +498,7 @@ USING (VALUES
      N''Tẩy ghẻ định kỳ cho đàn nái trước khi đẻ và heo mới nhập trại, phun thuốc diệt cái ghẻ lên nền và vách chuồng.'',
      N''Tiêm dưới da Ivermectin hoặc Doramectin (1 ml/33 kg TT), lặp lại mũi thứ 2 sau 10-14 ngày kết hợp phun Amitraz chuồng nuôi.''),
 
-    (''Infected_Viral_Foot_And_Mouth'', N''Lở mồm long móng (FMD)'', N''Cao'',
+    (''Infected_Viral_Foot_and_Mouth_Disease'', N''Lở mồm long móng (FMD)'', N''Cao'',
      N''Sốt cao, nổi mụn nước ở gương mũi, vành móng, kẽ chân và vú; mụn vỡ tạo vết loét đỏ khiến heo đi khập khiễng, bỏ ăn.'',
      N''Tiêm vắc-xin LMLM định kỳ, kiểm dịch nghiêm ngặt người và phương tiện ra vào trại, rắc vôi bột lối đi.'',
      N''Cách ly khẩn cấp toàn bộ ô chuồng, báo cơ quan thú y địa phương, rửa vết loét bằng Xanh Methylen/Iodine và chống phụ nhiễm.''),
@@ -447,18 +508,22 @@ USING (VALUES
      N''Diệt rận heo, ruồi muỗi (vật chủ trung gian truyền virus đậu), sát trùng chuồng trại định kỳ.'',
      N''Bôi Xanh Methylen 1% hoặc Iodine lên các nốt đậu vỡ để chống nhiễm khuẩn kế phát, bổ sung Vitamin C và gluco-K-C.'')
 ) AS src (class_key, display_name, danger_level, symptoms, prevention, treatment_protocol)
-ON target.class_key = src.class_key
+ON (target.class_key = src.class_key OR target.code = src.class_key)
 WHEN MATCHED THEN
     UPDATE SET
+        code = src.class_key,
+        name_vi = src.display_name,
+        class_key = src.class_key,
         display_name = src.display_name,
         danger_level = src.danger_level,
         symptoms = src.symptoms,
         prevention = src.prevention,
+        treatment = src.treatment_protocol,
         treatment_protocol = src.treatment_protocol,
         updated_at = SYSDATETIME()
 WHEN NOT MATCHED THEN
-    INSERT (class_key, display_name, danger_level, symptoms, prevention, treatment_protocol)
-    VALUES (src.class_key, src.display_name, src.danger_level, src.symptoms, src.prevention, src.treatment_protocol);
+    INSERT (code, name_vi, class_key, display_name, danger_level, symptoms, prevention, treatment, treatment_protocol)
+    VALUES (src.class_key, src.display_name, src.class_key, src.display_name, src.danger_level, src.symptoms, src.prevention, src.treatment_protocol, src.treatment_protocol);
 ';
 GO
 

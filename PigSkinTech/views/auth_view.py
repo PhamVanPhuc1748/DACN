@@ -239,6 +239,7 @@ def build_auth_view(page: ft.Page) -> ft.Control:
             hint_text="xxxx-yyyy.apps.googleusercontent.com",
             prefix_icon=ft.Icons.KEY_ROUNDED,
             dense=True,
+            expand=True,
         )
         csec_input = ft.TextField(
             label="GOOGLE_CLIENT_SECRET",
@@ -248,6 +249,7 @@ def build_auth_view(page: ft.Page) -> ft.Control:
             can_reveal_password=True,
             prefix_icon=ft.Icons.LOCK_PERSON_ROUNDED,
             dense=True,
+            expand=True,
         )
         dlg_err = ft.Text("", size=12, color="#DC2626", visible=False)
         cfg_dialog = ft.AlertDialog(modal=True)
@@ -279,7 +281,7 @@ def build_auth_view(page: ft.Page) -> ft.Control:
             spacing=10,
         )
         cfg_dialog.content = ft.Container(
-            width=480,
+            width=540,
             content=ft.Column(
                 [
                     ft.Text(
@@ -293,6 +295,7 @@ def build_auth_view(page: ft.Page) -> ft.Control:
                 ],
                 spacing=10,
                 tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
         )
         cfg_dialog.actions = [

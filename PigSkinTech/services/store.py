@@ -1,9 +1,13 @@
 """SQL Database persistence (SQL Server via pyodbc + Local SQL Engine) for Users, Inspections, and ChatMessages."""
 from __future__ import annotations
 
+import csv
 from datetime import datetime
 import hashlib
+import hmac
+import io
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -11,6 +15,7 @@ import threading
 import time
 from typing import Any
 from uuid import uuid4
+import zipfile
 
 try:
     import pyodbc
@@ -134,8 +139,56 @@ SAMPLE_GALLERY_CASES = [
 ]
 
 
+PBKDF2_SCHEME = "pbkdf2_sha256"
+PBKDF2_ITERATIONS = 120_000
+
+
+def hash_password(password: str) -> str:
+    """Hash password with PBKDF2-HMAC-SHA256 and a 16-byte random salt."""
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", (password or "").encode("utf-8"), salt, PBKDF2_ITERATIONS)
+    return f"{PBKDF2_SCHEME}${PBKDF2_ITERATIONS}${salt.hex()}${dk.hex()}"
+
+
+def is_legacy_sha256_hash(stored_hash: str) -> bool:
+    """Detect legacy unsalted 64-hex SHA-256 hashes so logins can transparently upgrade to PBKDF2."""
+    raw = (stored_hash or "").strip()
+    if len(raw) != 64 or raw.startswith(f"{PBKDF2_SCHEME}$"):
+        return False
+    try:
+        bytes.fromhex(raw)
+        return True
+    except ValueError:
+        return False
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Verify password against PBKDF2-HMAC-SHA256 (or legacy unsalted SHA-256 for backward compatibility)."""
+    raw = (stored_hash or "").strip()
+    if not raw:
+        return False
+    pw_bytes = (password or "").encode("utf-8")
+    if raw.startswith(f"{PBKDF2_SCHEME}$"):
+        parts = raw.split("$")
+        if len(parts) != 4:
+            return False
+        try:
+            iterations = int(parts[1])
+            salt = bytes.fromhex(parts[2])
+            expected_hex = parts[3]
+        except ValueError:
+            return False
+        computed_hex = hashlib.pbkdf2_hmac("sha256", pw_bytes, salt, iterations).hex()
+        return hmac.compare_digest(computed_hex, expected_hex)
+    if is_legacy_sha256_hash(raw):
+        legacy_hex = hashlib.sha256(pw_bytes).hexdigest()
+        return hmac.compare_digest(legacy_hex, raw.lower())
+    return False
+
+
 def _hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    """Backward-compatible alias delegating to salted PBKDF2-HMAC-SHA256."""
+    return hash_password(password)
 
 
 def _pick_odbc_driver(preferred: str) -> str:
@@ -548,6 +601,8 @@ def initialize(force: bool = False):
                 """
             )
             c.execute("IF COL_LENGTH('dbo.users', 'username') IS NULL ALTER TABLE dbo.users ADD username NVARCHAR(128) NOT NULL DEFAULT '';")
+            c.execute("IF COL_LENGTH('dbo.users', 'phone') IS NULL ALTER TABLE dbo.users ADD phone NVARCHAR(30) NULL;")
+            c.execute("IF COL_LENGTH('dbo.users', 'farm_name') IS NULL ALTER TABLE dbo.users ADD farm_name NVARCHAR(255) NULL;")
             c.execute(
                 """
                 IF OBJECT_ID(N'dbo.inspections', N'U') IS NULL
@@ -655,6 +710,7 @@ def initialize(force: bool = False):
                 ("code", "NVARCHAR(128) NULL"),
                 ("name_vi", "NVARCHAR(255) NULL"),
                 ("treatment", "NVARCHAR(MAX) NULL"),
+                ("updated_by", "NVARCHAR(255) NULL"),
                 ("updated_at", "NVARCHAR(64) NOT NULL DEFAULT ''"),
             ):
                 c.execute(f"IF COL_LENGTH('dbo.DiseaseCatalog', '{col_name}') IS NULL ALTER TABLE dbo.DiseaseCatalog ADD {col_name} {col_def};")
@@ -721,6 +777,10 @@ def initialize(force: bool = False):
             existing_user_cols = {row["name"] for row in c.execute("PRAGMA table_info(users)")}
             if "google_sub" not in existing_user_cols:
                 c.execute("ALTER TABLE users ADD COLUMN google_sub TEXT NOT NULL DEFAULT ''")
+            if "phone" not in existing_user_cols:
+                c.execute("ALTER TABLE users ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
+            if "farm_name" not in existing_user_cols:
+                c.execute("ALTER TABLE users ADD COLUMN farm_name TEXT NOT NULL DEFAULT ''")
 
             c.execute(
                 """CREATE TABLE IF NOT EXISTS inspections (
@@ -761,9 +821,13 @@ def initialize(force: bool = False):
                     symptoms TEXT NOT NULL DEFAULT '',
                     prevention TEXT NOT NULL DEFAULT '',
                     treatment TEXT NOT NULL DEFAULT '',
+                    updated_by TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL DEFAULT ''
                 )"""
             )
+            existing_dc_cols = {row["name"] for row in c.execute("PRAGMA table_info(DiseaseCatalog)")}
+            if "updated_by" not in existing_dc_cols:
+                c.execute("ALTER TABLE DiseaseCatalog ADD COLUMN updated_by TEXT NOT NULL DEFAULT ''")
             c.execute(
                 """CREATE TABLE IF NOT EXISTS ModelVersions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -831,8 +895,29 @@ def initialize(force: bool = False):
             except Exception:
                 pass
 
+        # Backfill DiseaseCatalog nếu bảng đang trống (đồng bộ 2 chiều ban đầu với models/classes.json)
+        try:
+            cnt_row = c.execute("SELECT COUNT(1) AS cnt FROM DiseaseCatalog").fetchone()
+            if cnt_row and int(cnt_row["cnt"] or 0) == 0 and classes_cfg:
+                now_seed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                for code, info in classes_cfg.items():
+                    if not isinstance(info, dict):
+                        continue
+                    c_key = str(code).strip()
+                    c_name = str(info.get("name_vi") or code).strip()
+                    c_danger = str(info.get("danger_level") or "Trung bình").strip()
+                    c_symp = str(info.get("symptoms") or "").strip()
+                    c_prev = str(info.get("prevention") or "").strip()
+                    c_treat = str(info.get("treatment") or "").strip()
+                    c.execute(
+                        """INSERT INTO DiseaseCatalog (code, name_vi, danger_level, symptoms, prevention, treatment, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (c_key, c_name, c_danger, c_symp, c_prev, c_treat, now_seed),
+                    )
+        except Exception:
+            pass
+
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        default_pw = _hash_password("123456")
         for acc in DEFAULT_RBAC_USERS:
             existing_u = c.execute("SELECT id FROM users WHERE LOWER(email)=?", (acc["email"].lower(),)).fetchone()
             if not existing_u:
@@ -843,7 +928,7 @@ def initialize(force: bool = False):
                     (
                         acc["email"],
                         acc["username"],
-                        default_pw,
+                        hash_password("123456"),
                         acc["full_name"],
                         acc["avatar_url"],
                         acc["role"],
@@ -864,9 +949,11 @@ def get_sample_gallery() -> list[dict]:
 
 
 def save(info, result, case=None, source_image=None):
+    if result and (result.get("is_valid_pig") is False or result.get("mode") == "invalid_image"):
+        raise ValueError("Không thể lưu ảnh không phải heo hoặc vùng da heo không hợp lệ vào cơ sở dữ liệu.")
     initialize()
     case = case or {}
-    case_id = (case.get("case_id") or "").strip()
+    case_id = str(case.get("case_id") or "").strip()
     archived_path = ""
     if source_image:
         source = Path(source_image)
@@ -910,19 +997,19 @@ def save(info, result, case=None, source_image=None):
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     archived_path,
                     case_id,
-                    case.get("animal_id", "").strip(),
-                    case.get("farm_name", "").strip(),
-                    case.get("body_site", "").strip(),
-                    case.get("symptoms", "").strip(),
-                    case.get("onset_date", "").strip(),
-                    case.get("entered_at", "").strip(),
-                    case.get("review_status", "needs_review"),
-                    case.get("review_note", "").strip(),
+                    str(case.get("animal_id") or "").strip(),
+                    str(case.get("farm_name") or "").strip(),
+                    str(case.get("body_site") or "").strip(),
+                    str(case.get("symptoms") or "").strip(),
+                    str(case.get("onset_date") or "").strip(),
+                    str(case.get("entered_at") or "").strip(),
+                    str(case.get("review_status") or "needs_review"),
+                    str(case.get("review_note") or "").strip(),
                     json.dumps(result.get("scores", []), ensure_ascii=False),
-                    str(result.get("model_info", "")),
+                    str(result.get("model_info") or ""),
                     int(case.get("user_id") or 1),
-                    case.get("user_email", "nongdan.pigskin@gmail.com").strip(),
-                    case.get("user_name", "Người chăn nuôi").strip(),
+                    str(case.get("user_email") or "nongdan.pigskin@gmail.com").strip(),
+                    str(case.get("user_name") or "Người chăn nuôi").strip(),
                     int(case.get("requested_review") or 0),
                     danger_level,
                     recommendation,
@@ -1084,20 +1171,221 @@ def list_curated_candidates() -> list[dict]:
 
 
 def approve_for_dataset(record_id: int, approved: bool = True) -> str:
-    """Mark a standardized expert-reviewed image as included in the clean training dataset."""
+    """
+    Duyệt (approved=True) hoặc Gỡ duyệt (approved=False) ca bệnh khỏi Dataset chuẩn:
+    - approved=True: đặt in_dataset = 1 và sao chép ảnh sang curated_dataset/<class>/.
+    - approved=False: đặt in_dataset = 0 và xóa bản sao trong curated_dataset/<class>/ (giữ nguyên ảnh gốc ở case_images/).
+    """
     initialize()
     with conn() as c:
         row = c.execute("SELECT * FROM inspections WHERE id=?", (record_id,)).fetchone()
         if not row:
             raise ValueError("Không tìm thấy bản ghi chẩn đoán.")
         c.execute("UPDATE inspections SET in_dataset=? WHERE id=?", (1 if approved else 0, record_id))
-        if approved and row["image_path"] and Path(row["image_path"]).is_file():
-            label_dir = CURATED_DIR / (row["expert_label"] or row["predicted_class"] or "Unlabeled")
-            label_dir.mkdir(parents=True, exist_ok=True)
-            dest = label_dir / f"{row['case_id']}_{Path(row['image_path']).name}"
-            shutil.copy2(row["image_path"], dest)
-            return str(dest)
+        case_code = str(row["case_id"] or f"PS-{int(row['id']):06d}").strip()
+        orig_img_path = Path(row["image_path"] or "") if row["image_path"] else None
+
+        if approved:
+            if orig_img_path and orig_img_path.is_file():
+                label_dir = CURATED_DIR / (row["expert_label"] or row["predicted_class"] or "Unlabeled")
+                label_dir.mkdir(parents=True, exist_ok=True)
+                dest = label_dir / f"{case_code}_{orig_img_path.name}"
+                shutil.copy2(orig_img_path, dest)
+                return str(dest)
+            return ""
+
+        # Gỡ duyệt: chỉ xóa bản sao nằm bên trong CURATED_DIR, tuyệt đối không chạm vào case_images/
+        if CURATED_DIR.is_dir():
+            curated_root = CURATED_DIR.resolve()
+            orig_name = orig_img_path.name if orig_img_path else ""
+            target_names = {f"{case_code}_{orig_name}"} if orig_name else set()
+            for sub in CURATED_DIR.iterdir():
+                if not sub.is_dir():
+                    continue
+                for fpath in sub.iterdir():
+                    if not fpath.is_file():
+                        continue
+                    if fpath.name in target_names or (case_code and fpath.name.startswith(f"{case_code}_")):
+                        resolved = fpath.resolve()
+                        if curated_root in resolved.parents:
+                            try:
+                                resolved.unlink(missing_ok=True)
+                            except OSError:
+                                pass
     return ""
+
+
+def export_retrain_bundle(exports_dir: Path | None = None) -> dict:
+    """
+    Đóng gói toàn bộ dữ liệu chuẩn lâm sàng (curated_dataset/<class>/ + các bản ghi in_dataset = 1 trong SQL)
+    thành gói Retrain (.zip) lưu tại PigSkinTech/exports/retrain_bundle_<YYYYMMDD_HHMMSS>.zip gồm:
+      - images/<class>/<filename>
+      - manifest.csv (relative_path, split, labels, group_id, sha256) chống trùng lặp theo SHA-256
+      - classes.json hiện hành
+      - dataset_summary.json thống kê số lượng ảnh theo đủ 10 lớp bệnh
+    """
+    from services.project_data import CLASSES_JSON_PATH, load_classes_config
+
+    initialize()
+    valid_exts = {".jpg", ".jpeg", ".png", ".webp"}
+    classes_cfg = load_classes_config()
+    class_keys = list(classes_cfg.keys())
+
+    # 1. Đồng bộ các bản ghi SQL có in_dataset = 1 và ánh xạ metadata (group_id)
+    case_meta_by_filename: dict[str, dict] = {}
+    with conn() as c:
+        db_rows = c.execute(
+            """SELECT id, case_id, animal_id, image_path, expert_label, predicted_class
+            FROM inspections
+            WHERE in_dataset = 1
+            ORDER BY id ASC"""
+        ).fetchall()
+
+    for raw in db_rows:
+        row = dict(raw)
+        cid = str(row.get("case_id") or f"PS-{int(row['id']):06d}").strip()
+        lbl = str(row.get("expert_label") or row.get("predicted_class") or "Unlabeled").strip()
+        group_id = str(row.get("animal_id") or cid).strip() or cid
+        src_img = Path(row.get("image_path") or "") if row.get("image_path") else None
+        if src_img and src_img.is_file() and src_img.suffix.lower() in valid_exts:
+            label_dir = CURATED_DIR / lbl
+            label_dir.mkdir(parents=True, exist_ok=True)
+            dest = label_dir / f"{cid}_{src_img.name}"
+            if not dest.is_file():
+                try:
+                    shutil.copy2(src_img, dest)
+                except OSError:
+                    pass
+            case_meta_by_filename[dest.name] = {"group_id": group_id, "case_id": cid, "label": lbl}
+
+    # 2. Quét toàn bộ ảnh hợp lệ trong curated_dataset/<class>/ và lọc trùng lặp theo SHA-256
+    collected: list[dict] = []
+    seen_sha: set[str] = set()
+    duplicates_skipped = 0
+
+    if CURATED_DIR.is_dir():
+        for class_dir in sorted(CURATED_DIR.iterdir(), key=lambda p: p.name):
+            if not class_dir.is_dir():
+                continue
+            cls_name = class_dir.name.strip()
+            for img_file in sorted(class_dir.iterdir(), key=lambda p: p.name):
+                if not img_file.is_file() or img_file.suffix.lower() not in valid_exts:
+                    continue
+                try:
+                    raw_bytes = img_file.read_bytes()
+                except OSError:
+                    continue
+                if not raw_bytes:
+                    continue
+                sha = hashlib.sha256(raw_bytes).hexdigest()
+                if sha in seen_sha:
+                    duplicates_skipped += 1
+                    continue
+                seen_sha.add(sha)
+                meta = case_meta_by_filename.get(img_file.name, {})
+                group_id = meta.get("group_id") or img_file.stem.split("_")[0] or img_file.stem
+                collected.append(
+                    {
+                        "source_path": img_file,
+                        "relative_path": f"images/{cls_name}/{img_file.name}",
+                        "labels": cls_name,
+                        "group_id": group_id,
+                        "sha256": sha,
+                    }
+                )
+
+    if not collected:
+        raise ValueError(
+            "Chưa có ảnh nào trong Dataset chuẩn (in_dataset = 1 hoặc curated_dataset/). "
+            "Hãy duyệt ít nhất 1 ca bệnh vào Dataset trước khi xuất gói Retrain."
+        )
+
+    # 3. Chia split xác định (group-aware per class: 70% train / 15% val / 15% test khi đủ mẫu)
+    by_class: dict[str, list[dict]] = {}
+    for item in collected:
+        by_class.setdefault(item["labels"], []).append(item)
+
+    split_counts = {"train": 0, "val": 0, "test": 0}
+    per_class_counts = {k: 0 for k in class_keys}
+    for cls_name, cls_items in by_class.items():
+        per_class_counts[cls_name] = len(cls_items)
+        # Nhóm theo group_id để ảnh cùng 1 con heo không rò rỉ giữa train và val/test
+        groups_ordered: list[str] = []
+        grouped: dict[str, list[dict]] = {}
+        for it in cls_items:
+            gid = it["group_id"]
+            if gid not in grouped:
+                groups_ordered.append(gid)
+                grouped[gid] = []
+            grouped[gid].append(it)
+
+        n_groups = len(groups_ordered)
+        for g_idx, gid in enumerate(groups_ordered):
+            if n_groups >= 5:
+                ratio = g_idx / n_groups
+                sp = "train" if ratio < 0.70 else ("val" if ratio < 0.85 else "test")
+            elif n_groups >= 3:
+                sp = "val" if g_idx == n_groups - 1 else "train"
+            else:
+                sp = "train"
+            for it in grouped[gid]:
+                it["split"] = sp
+                split_counts[sp] += 1
+
+    # 4. Đóng gói file .zip chuẩn hóa
+    target_exports = Path(exports_dir) if exports_dir else (Path(__file__).resolve().parents[1] / "exports")
+    target_exports.mkdir(parents=True, exist_ok=True)
+    ts_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_name = f"retrain_bundle_{ts_slug}.zip"
+    zip_path = target_exports / zip_name
+
+    manifest_buf = io.StringIO()
+    writer = csv.DictWriter(
+        manifest_buf,
+        fieldnames=["relative_path", "split", "labels", "group_id", "sha256"],
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    for it in collected:
+        writer.writerow(
+            {
+                "relative_path": it["relative_path"],
+                "split": it["split"],
+                "labels": it["labels"],
+                "group_id": it["group_id"],
+                "sha256": it["sha256"],
+            }
+        )
+
+    summary_obj = {
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "zip_name": zip_name,
+        "total_images": len(collected),
+        "duplicates_skipped": duplicates_skipped,
+        "classes_count": len(per_class_counts),
+        "split_counts": split_counts,
+        "per_class_counts": per_class_counts,
+        "db_approved_records": len(db_rows),
+    }
+
+    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for it in collected:
+            zf.write(it["source_path"], arcname=it["relative_path"])
+        zf.writestr("manifest.csv", manifest_buf.getvalue().encode("utf-8"))
+        if CLASSES_JSON_PATH.is_file():
+            zf.write(CLASSES_JSON_PATH, arcname="classes.json")
+        else:
+            zf.writestr("classes.json", json.dumps(classes_cfg, ensure_ascii=False, indent=2).encode("utf-8"))
+        zf.writestr("dataset_summary.json", json.dumps(summary_obj, ensure_ascii=False, indent=2).encode("utf-8"))
+
+    return {
+        "zip_path": str(zip_path.resolve()),
+        "zip_name": zip_name,
+        "total_images": len(collected),
+        "duplicates_skipped": duplicates_skipped,
+        "per_class_counts": per_class_counts,
+        "split_counts": split_counts,
+    }
 
 
 def get_system_stats() -> dict:
@@ -1254,16 +1542,97 @@ def get_system_stats() -> dict:
     }
 
 
-def sync_disease_catalog_to_sql(catalog: dict) -> None:
-    """Đồng bộ danh mục bệnh lý & phác đồ điều trị từ models/classes.json vào bảng DiseaseCatalog trong SQL."""
+def get_farm_outbreak_alerts(min_cases: int = 3) -> list[dict]:
+    """
+    Quét trực tiếp bảng dbo.Inspections (SQL Server / SQLite) để phát hiện sớm ổ dịch:
+    trả về danh sách các trang trại có >= min_cases (mặc định 3) ca mức độ nguy hiểm 'Cao' / 'Khẩn cấp'.
+    """
+    from services.project_data import display_class, load_classes_config
+
+    try:
+        initialize()
+        with conn() as c:
+            rows = c.execute(
+                """SELECT farm_name, predicted_class, expert_label, danger_level, created_at
+                FROM inspections
+                ORDER BY id DESC"""
+            ).fetchall()
+    except Exception:
+        return []
+
+    classes_cfg = load_classes_config()
+    farms: dict[str, dict] = {}
+    for raw in rows:
+        row = dict(raw)
+        cls_code = str(row.get("expert_label") or row.get("predicted_class") or "").strip()
+        meta = classes_cfg.get(cls_code) if isinstance(classes_cfg, dict) else None
+        danger = str((meta.get("danger_level") if isinstance(meta, dict) else "") or row.get("danger_level") or "").strip()
+        if danger not in ("Cao", "Khẩn cấp"):
+            continue
+        raw_farm = str(row.get("farm_name") or "").strip()
+        if not raw_farm:
+            continue
+        farm_key = raw_farm.lower()
+        bucket = farms.setdefault(
+            farm_key,
+            {
+                "farm_name": raw_farm,
+                "count": 0,
+                "diseases": [],
+                "latest_at": str(row.get("created_at") or ""),
+            },
+        )
+        bucket["count"] += 1
+        d_name = display_class(cls_code) if cls_code else "Bệnh nguy hiểm cao"
+        if d_name not in bucket["diseases"]:
+            bucket["diseases"].append(d_name)
+
+    alerts = [item for item in farms.values() if item["count"] >= max(1, int(min_cases))]
+    alerts.sort(key=lambda item: (-item["count"], item["farm_name"]))
+    return alerts
+
+
+def load_disease_catalog_from_sql() -> dict:
+    """Đọc danh mục bệnh lý từ bảng DiseaseCatalog trong SQL Server / SQLite để đồng bộ 2 chiều với models/classes.json."""
+    initialize()
+    catalog: dict[str, dict] = {}
+    with conn() as c:
+        rows = c.execute("SELECT * FROM DiseaseCatalog").fetchall()
+    for r in rows:
+        row = dict(r)
+        code = str(row.get("code") or row.get("class_key") or "").strip()
+        if not code:
+            continue
+        catalog[code] = {
+            "code": code,
+            "name_vi": str(row.get("name_vi") or row.get("display_name") or code).strip(),
+            "danger_level": str(row.get("danger_level") or "Trung bình").strip(),
+            "symptoms": str(row.get("symptoms") or "").strip(),
+            "prevention": str(row.get("prevention") or "").strip(),
+            "treatment": str(row.get("treatment") or row.get("treatment_protocol") or "").strip(),
+        }
+    return catalog
+
+
+def sync_disease_catalog_to_sql(
+    catalog: dict,
+    updated_by: str = "",
+    deleted_codes: list[str] | None = None,
+) -> None:
+    """
+    Đồng bộ danh mục bệnh lý & phác đồ điều trị từ models/classes.json vào bảng DiseaseCatalog bằng UPSERT
+    (MERGE trên SQL Server / UPDATE-or-INSERT trên SQLite) để giữ nguyên ID gốc và lưu dấu vết updated_by / updated_at.
+    """
     initialize()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    actor = str(updated_by or "").strip()
     with conn() as c:
-        c.execute("DELETE FROM DiseaseCatalog")
         for code, info in (catalog or {}).items():
             if not isinstance(info, dict):
                 continue
             c_key = str(code).strip()
+            if not c_key:
+                continue
             c_name = str(info.get("name_vi") or code).strip()
             c_danger = str(info.get("danger_level") or "Trung bình").strip()
             c_symp = str(info.get("symptoms") or "").strip()
@@ -1272,19 +1641,84 @@ def sync_disease_catalog_to_sql(catalog: dict) -> None:
             if c.is_sqlserver:
                 try:
                     c.execute(
-                        """INSERT INTO DiseaseCatalog
-                        (code, name_vi, class_key, display_name, danger_level, symptoms, prevention, treatment, treatment_protocol, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (c_key, c_name, c_key, c_name, c_danger, c_symp, c_prev, c_treat, c_treat, now_str),
+                        """MERGE INTO dbo.DiseaseCatalog AS target
+                        USING (SELECT ? AS code, ? AS name_vi, ? AS danger_level, ? AS symptoms,
+                                      ? AS prevention, ? AS treatment, ? AS updated_by, ? AS updated_at) AS src
+                        ON (target.code = src.code OR target.class_key = src.code)
+                        WHEN MATCHED THEN
+                            UPDATE SET
+                                code = src.code,
+                                name_vi = src.name_vi,
+                                class_key = src.code,
+                                display_name = src.name_vi,
+                                danger_level = src.danger_level,
+                                symptoms = src.symptoms,
+                                prevention = src.prevention,
+                                treatment = src.treatment,
+                                treatment_protocol = src.treatment,
+                                updated_by = CASE WHEN src.updated_by != '' THEN src.updated_by ELSE target.updated_by END,
+                                updated_at = src.updated_at
+                        WHEN NOT MATCHED THEN
+                            INSERT (code, name_vi, class_key, display_name, danger_level, symptoms, prevention, treatment, treatment_protocol, updated_by, updated_at)
+                            VALUES (src.code, src.name_vi, src.code, src.name_vi, src.danger_level, src.symptoms, src.prevention, src.treatment, src.treatment, src.updated_by, src.updated_at);""",
+                        (c_key, c_name, c_danger, c_symp, c_prev, c_treat, actor, now_str),
+                    )
+                    continue
+                except Exception:
+                    # Fallback MERGE for minimal schema without legacy alias columns
+                    c.execute(
+                        """MERGE INTO dbo.DiseaseCatalog AS target
+                        USING (SELECT ? AS code, ? AS name_vi, ? AS danger_level, ? AS symptoms,
+                                      ? AS prevention, ? AS treatment, ? AS updated_by, ? AS updated_at) AS src
+                        ON target.code = src.code
+                        WHEN MATCHED THEN
+                            UPDATE SET
+                                name_vi = src.name_vi,
+                                danger_level = src.danger_level,
+                                symptoms = src.symptoms,
+                                prevention = src.prevention,
+                                treatment = src.treatment,
+                                updated_by = CASE WHEN src.updated_by != '' THEN src.updated_by ELSE target.updated_by END,
+                                updated_at = src.updated_at
+                        WHEN NOT MATCHED THEN
+                            INSERT (code, name_vi, danger_level, symptoms, prevention, treatment, updated_by, updated_at)
+                            VALUES (src.code, src.name_vi, src.danger_level, src.symptoms, src.prevention, src.treatment, src.updated_by, src.updated_at);""",
+                        (c_key, c_name, c_danger, c_symp, c_prev, c_treat, actor, now_str),
+                    )
+                    continue
+
+            existing = c.execute("SELECT code FROM DiseaseCatalog WHERE code = ?", (c_key,)).fetchone()
+            if existing:
+                c.execute(
+                    """UPDATE DiseaseCatalog
+                    SET name_vi=?, danger_level=?, symptoms=?, prevention=?, treatment=?,
+                        updated_by=CASE WHEN ? != '' THEN ? ELSE updated_by END,
+                        updated_at=?
+                    WHERE code=?""",
+                    (c_name, c_danger, c_symp, c_prev, c_treat, actor, actor, now_str, c_key),
+                )
+            else:
+                c.execute(
+                    """INSERT INTO DiseaseCatalog (code, name_vi, danger_level, symptoms, prevention, treatment, updated_by, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (c_key, c_name, c_danger, c_symp, c_prev, c_treat, actor, now_str),
+                )
+
+        # Chỉ xóa đúng các mã lớp bệnh được yêu cầu xóa rõ ràng, không xóa trắng toàn bảng
+        for del_code in deleted_codes or []:
+            clean_del = str(del_code or "").strip()
+            if not clean_del:
+                continue
+            if c.is_sqlserver:
+                try:
+                    c.execute(
+                        "DELETE FROM dbo.DiseaseCatalog WHERE code = ? OR class_key = ?",
+                        (clean_del, clean_del),
                     )
                     continue
                 except Exception:
                     pass
-            c.execute(
-                """INSERT INTO DiseaseCatalog (code, name_vi, danger_level, symptoms, prevention, treatment, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (c_key, c_name, c_danger, c_symp, c_prev, c_treat, now_str),
-            )
+            c.execute("DELETE FROM DiseaseCatalog WHERE code = ?", (clean_del,))
 
 
 def sync_model_version_to_sql(details: dict, activated_by: str = "admin") -> None:
@@ -1340,13 +1774,25 @@ def create_user_account(
     initialize()
     clean_email = (email or "").strip().lower()
     clean_name = (full_name or "").strip()
-    if not clean_email or "@" not in clean_email:
-        raise ValueError("Email không hợp lệ.")
+    local_part, sep, domain = clean_email.partition("@")
+    if (
+        not sep
+        or not local_part
+        or "." not in domain
+        or domain.startswith(".")
+        or domain.endswith(".")
+        or any(ch.isspace() for ch in clean_email)
+        or len(clean_email) > 254
+    ):
+        raise ValueError("Vui lòng nhập địa chỉ email hợp lệ (VD: tenban@gmail.com).")
+    clean_pw = str(password or "")
+    if auth_provider == "local" and len(clean_pw.strip()) < 6:
+        raise ValueError("Mật khẩu cần có ít nhất 6 ký tự.")
     if not clean_name:
-        clean_name = clean_email.split("@")[0].replace(".", " ").title()
+        clean_name = local_part.replace(".", " ").title()
     if role not in ("user", "expert", "admin"):
         role = "user"
-    username = clean_email.split("@")[0]
+    username = local_part
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with conn() as c:
         existing = c.execute("SELECT id FROM users WHERE LOWER(email)=?", (clean_email,)).fetchone()
@@ -1359,7 +1805,7 @@ def create_user_account(
             (
                 clean_email,
                 username,
-                _hash_password(password or "123456"),
+                _hash_password(clean_pw or "123456"),
                 clean_name,
                 f"https://ui-avatars.com/api/?name={clean_name.replace(' ', '+')}&background=059669&color=fff",
                 role,
@@ -1376,8 +1822,10 @@ def update_user_profile(
     full_name: str,
     avatar_url: str | None = None,
     email: str | None = None,
+    phone: str | None = None,
+    farm_name: str | None = None,
 ) -> dict:
-    """Update profile fields and keep email-keyed account history in sync."""
+    """Update profile fields (including phone & farm_name) and keep email-keyed account history in sync."""
     initialize()
     clean_name = (full_name or "").strip()
     if not 2 <= len(clean_name) <= 100:
@@ -1393,6 +1841,12 @@ def update_user_profile(
             or len(clean_email) > 254
         ):
             raise ValueError("Vui lòng nhập địa chỉ email hợp lệ.")
+    clean_phone = (phone or "").strip() if phone is not None else None
+    if clean_phone is not None and len(clean_phone) > 30:
+        raise ValueError("Số điện thoại không được dài quá 30 ký tự.")
+    clean_farm = (farm_name or "").strip() if farm_name is not None else None
+    if clean_farm is not None and len(clean_farm) > 255:
+        raise ValueError("Tên trang trại / khu chuồng không được dài quá 255 ký tự.")
 
     with conn() as c:
         row = c.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
@@ -1412,9 +1866,11 @@ def update_user_profile(
             if duplicate:
                 raise ValueError("Email này đã được một tài khoản khác sử dụng.")
         next_avatar = row["avatar_url"] if avatar_url is None else str(avatar_url).strip()
+        next_phone = (row.get("phone") or "") if clean_phone is None else clean_phone
+        next_farm = (row.get("farm_name") or "") if clean_farm is None else clean_farm
         c.execute(
-            "UPDATE users SET full_name=?, email=?, avatar_url=? WHERE id=?",
-            (clean_name, next_email, next_avatar, int(user_id)),
+            "UPDATE users SET full_name=?, email=?, avatar_url=?, phone=?, farm_name=? WHERE id=?",
+            (clean_name, next_email, next_avatar, next_phone, next_farm, int(user_id)),
         )
         if next_email != old_email:
             c.execute(
@@ -1453,11 +1909,11 @@ def change_user_password(
             raise ValueError("Không tìm thấy tài khoản.")
         if not row["password_hash"]:
             raise ValueError("Tài khoản này dùng đăng nhập Google và chưa có mật khẩu riêng.")
-        if _hash_password(current) != row["password_hash"]:
+        if not verify_password(current, row["password_hash"]):
             raise ValueError("Mật khẩu hiện tại chưa chính xác.")
         c.execute(
             "UPDATE users SET password_hash=? WHERE id=?",
-            (_hash_password(replacement), int(user_id)),
+            (hash_password(replacement), int(user_id)),
         )
 
 
@@ -1509,17 +1965,18 @@ def update_review(record_id, status, note=""):
 
 def update_case(record_id, case):
     initialize()
+    case = case or {}
     with conn() as c:
         cur = c.execute(
             """UPDATE inspections SET animal_id=?,farm_name=?,body_site=?,
             symptoms=?,onset_date=?,entered_at=? WHERE id=?""",
             (
-                case.get("animal_id", "").strip(),
-                case.get("farm_name", "").strip(),
-                case.get("body_site", "").strip(),
-                case.get("symptoms", "").strip(),
-                case.get("onset_date", "").strip(),
-                case.get("entered_at", "").strip(),
+                str(case.get("animal_id") or "").strip(),
+                str(case.get("farm_name") or "").strip(),
+                str(case.get("body_site") or "").strip(),
+                str(case.get("symptoms") or "").strip(),
+                str(case.get("onset_date") or "").strip(),
+                str(case.get("entered_at") or "").strip(),
                 record_id,
             ),
         )

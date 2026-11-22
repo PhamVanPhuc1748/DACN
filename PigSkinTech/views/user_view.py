@@ -1,5 +1,6 @@
 """User Role View (/user - Người chăn nuôi): Modern SaaS / Shadcn-UI & Tailwind Style Veterinary Clinic."""
 import asyncio
+import json
 
 import flet as ft
 
@@ -16,11 +17,14 @@ from services.auth_service import (
     open_image_zoom_dialog,
     pick_image_files,
     preview_thumbnail_with_zoom,
+    save_vet_report_with_picker,
     show_snack,
     tech_banner,
 )
 from services.chat_widget import build_chat_panel
+from services.clinical_widgets import build_dual_benchmark_card, build_smart_dosage_calculator
 from services.inference import inspect_image, predict
+from services.inference_service import predict_dual_benchmark
 from services.project_data import (
     active_run,
     display_class,
@@ -28,7 +32,6 @@ from services.project_data import (
     list_class_keys,
     list_model_runs,
     load_classes_config,
-    set_active_checkpoint,
 )
 from services.store import (
     get_sample_gallery,
@@ -87,9 +90,11 @@ def _confidence_color(conf: float, dark: bool = False) -> str:
 def build_user_view(page: ft.Page, user: dict) -> ft.Control:
     ensure_flet_compat(page)
     picker = create_file_picker(page)
+    report_save_picker = create_file_picker(page)
     cur_run = active_run() or {}
     model_runs = list_model_runs()
     default_run_name = cur_run.get("name") or (model_runs[0]["name"] if model_runs else "")
+    default_model_path = str(cur_run.get("checkpoint") or (model_runs[0]["checkpoint"] if model_runs else ""))
     state = {
         "image_path": None,
         "heatmap_path": None,
@@ -102,20 +107,21 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         "sent_to_expert": False,
         "wiki_triage": "all",
         "selected_run": default_run_name,
+        "selected_model_path": default_model_path,
+        "dual_mode": False,
+        "dual_benchmark": None,
     }
 
     def on_model_run_change(e):
         chosen = getattr(e.control, "value", None) or default_run_name
         state["selected_run"] = chosen
+        state["heatmap_path"] = None
         for r in model_runs:
             if r["name"] == chosen:
-                try:
-                    set_active_checkpoint(r["checkpoint"])
-                except Exception:
-                    pass
+                state["selected_model_path"] = str(r.get("checkpoint") or "")
                 show_snack(
                     page,
-                    f"Đã chuyển sang mô hình {r.get('model_label', r['model'])} ({r['name']})",
+                    f"Đã chọn mô hình {r.get('model_label', r['model'])} ({r['name']}) cho phiên khám hiện tại.",
                     "#059669",
                 )
                 break
@@ -134,6 +140,20 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         on_change=on_model_run_change,
         expand=True,
         page=page,
+    )
+
+    def on_dual_mode_change(e):
+        state["dual_mode"] = bool(getattr(e.control, "value", False))
+        model_run_dropdown.disabled = state["dual_mode"]
+        if not state["dual_mode"]:
+            state["dual_benchmark"] = None
+        page.update()
+
+    dual_mode_switch = ft.Switch(
+        label="⚖️ Hội chẩn Kép 2 Mô hình (So sánh song song MobileNetV2 & EfficientNet-B0)",
+        value=False,
+        active_color=PRIMARY,
+        on_change=on_dual_mode_change,
     )
 
     animal_field = css_input(
@@ -229,7 +249,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             pills=pills,
             page=page,
         )
-        outbreak = build_outbreak_alert_banner(records, page=page)
+        outbreak = build_outbreak_alert_banner(page=page)
         header_host.content = ft.Column([banner, outbreak], spacing=12, tight=True) if outbreak else banner
 
     def append_symptom_chip(symptom_text: str):
@@ -265,12 +285,19 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 )
             )
 
-    def toggle_heatmap_view(e=None):
+    async def toggle_heatmap_view(e=None):
         if not state["image_path"]:
             return
         state["heatmap_mode"] = not state["heatmap_mode"]
         if state["heatmap_mode"] and not state["heatmap_path"]:
-            state["heatmap_path"] = generate_lesion_heatmap(state["image_path"])
+            loading_bar.visible = True
+            page.update()
+            try:
+                state["heatmap_path"] = await asyncio.to_thread(
+                    generate_lesion_heatmap, state["image_path"], state.get("selected_run")
+                )
+            finally:
+                loading_bar.visible = False
         render_dropzone()
         page.update()
 
@@ -373,7 +400,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                         border_radius=8,
                         padding=ft.padding.symmetric(horizontal=10, vertical=5),
                         content=ft.Text(
-                            "🔥 Chế độ Bản đồ Nhiệt & Tăng Tương Phản Tổn Thương AI",
+                            "🔥 Bản đồ Nhiệt Grad-CAM Explainable AI (Feature Map)",
                             size=12.5,
                             weight=ft.FontWeight.W_600,
                             color="#34D399",
@@ -504,6 +531,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 scanning=False,
                 image_info=info,
                 result=None,
+                dual_benchmark=None,
                 record_id=None,
                 sent_to_expert=False,
             )
@@ -575,8 +603,8 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         )
 
     def handle_send_to_expert(e):
-        if not state["record_id"]:
-            show_snack(page, "Vui lòng phân tích ảnh trước khi gửi Bác sĩ Thú y.", "#DC2626")
+        if not state["record_id"] or not state["result"] or state["result"].get("is_valid_pig") is False:
+            show_snack(page, "Vui lòng phân tích ảnh vùng da heo hợp lệ trước khi gửi Bác sĩ Thú y.", "#DC2626")
             return
         request_expert_review(state["record_id"])
         state["sent_to_expert"] = True
@@ -585,18 +613,19 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         show_snack(page, f"Đã gửi hồ sơ PS-{state['record_id']:06d} tới Bác sĩ Thú y thẩm định!", "#0284C7")
         page.update()
 
-    def handle_export_report(e):
+    async def handle_export_report(e):
         res = state["result"]
-        if not res:
-            show_snack(page, "Vui lòng phân tích chẩn đoán trước khi xuất Phiếu Khám.", "#DC2626")
+        if not res or res.get("is_valid_pig") is False or res.get("mode") != "ai":
+            show_snack(page, "Vui lòng phân tích chẩn đoán ảnh hợp lệ trước khi xuất Phiếu Khám.", "#DC2626")
             return
         cls_info = get_class_info(res.get("label"))
-        export_vet_report_html(
+        await save_vet_report_with_picker(
             page,
             case_data={
                 "record_id": state["record_id"] or 1,
                 "case_id": f"PS-{int(state['record_id'] or 1):06d}",
                 "image_path": state["image_path"],
+                "predicted_class": res.get("label"),
                 "disease_name": res.get("display_label") or display_class(res.get("label")),
                 "danger_level": res.get("danger_level", "Trung bình"),
                 "confidence": float(res.get("confidence") or 0.0),
@@ -607,7 +636,9 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 "symptoms": symptoms_field.value or "",
                 "isolation_guide": cls_info.get("prevention") or "",
                 "treatment_guide": res.get("recommendation") or cls_info.get("treatment") or "",
+                "review_status": "needs_review",
             },
+            save_picker=report_save_picker,
         )
 
     def _build_recent_3_list() -> list[ft.Control]:
@@ -797,6 +828,103 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                             ),
                         ),
                         steps_row,
+                        ft.Text("3 lần khám gần nhất", size=15, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
+                        *_build_recent_3_list(),
+                    ],
+                    spacing=14,
+                ),
+            )
+            return
+
+        # INVALID IMAGE / NON-PIG WARNING STATE (Do not show fake disease or vet submission button)
+        if res.get("is_valid_pig") is False or res.get("mode") in ("invalid_image", "unavailable"):
+            reason_detail = res.get("validation_reason") or ""
+            alert_msg = res.get("message") or (
+                "Ảnh tải lên không phải là heo hoặc vùng da heo hợp lệ. "
+                "Vui lòng chụp rõ vùng da heo cần kiểm tra."
+            )
+            right_card_host.content = css_card(
+                padding=24,
+                page=page,
+                content=ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Icon(ft.Icons.GPP_MAYBE_ROUNDED, color="#DC2626", size=24),
+                                ft.Text("Kết quả Kiểm tra Ảnh Đầu vào", size=18, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"], expand=True),
+                                ft.Container(
+                                    bgcolor=p["SOFT_RED"],
+                                    border=ft.border.all(1, "#DC2626"),
+                                    padding=ft.padding.symmetric(horizontal=12, vertical=5),
+                                    border_radius=20,
+                                    content=ft.Text("Ảnh không hợp lệ", size=12.5, color="#DC2626", weight=ft.FontWeight.BOLD),
+                                ),
+                            ],
+                            spacing=8,
+                        ),
+                        ft.Container(
+                            width=float("inf"),
+                            padding=20,
+                            bgcolor=p["SOFT_RED"],
+                            border=ft.border.all(1.5, "#EF4444"),
+                            border_radius=14,
+                            content=ft.Column(
+                                [
+                                    ft.Row(
+                                        [
+                                            ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color="#DC2626", size=28),
+                                            ft.Text(
+                                                res.get("display_label") or "Không thể xác định / Ảnh không rõ vùng da heo",
+                                                size=16.5,
+                                                weight=ft.FontWeight.BOLD,
+                                                color="#FCA5A5" if p["IS_DARK"] else "#991B1B",
+                                                expand=True,
+                                            ),
+                                        ],
+                                        spacing=10,
+                                    ),
+                                    ft.Text(
+                                        alert_msg,
+                                        size=14.5,
+                                        weight=ft.FontWeight.W_600,
+                                        color="#FECACA" if p["IS_DARK"] else "#7F1D1D",
+                                    ),
+                                    *(
+                                        [
+                                            ft.Text(
+                                                f"Chi tiết bộ lọc AI: {reason_detail}",
+                                                size=13,
+                                                color="#FED7AA" if p["IS_DARK"] else "#9A3412",
+                                            )
+                                        ]
+                                        if reason_detail
+                                        else []
+                                    ),
+                                    ft.Text(
+                                        "• Ảnh này KHÔNG được lưu vào lịch sử SQL Database và không thể gửi Chuyên gia thẩm định.",
+                                        size=12.5,
+                                        color=p["TEXT_SECONDARY"],
+                                    ),
+                                ],
+                                spacing=8,
+                            ),
+                        ),
+                        ft.Row(
+                            [
+                                ft.FilledButton(
+                                    "Chọn ảnh vùng da heo khác",
+                                    icon=ft.Icons.ADD_A_PHOTO_ROUNDED,
+                                    on_click=handle_choose_file,
+                                ),
+                                ft.OutlinedButton(
+                                    "Làm mới",
+                                    icon=ft.Icons.REFRESH_ROUNDED,
+                                    on_click=handle_reset_case,
+                                ),
+                            ],
+                            spacing=10,
+                        ),
+                        ft.Divider(height=12, color=p["BORDER_LIGHT"]),
                         ft.Text("3 lần khám gần nhất", size=15, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
                         *_build_recent_3_list(),
                     ],
@@ -1032,6 +1160,11 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                             spacing=8,
                         ),
                     ),
+                    *(
+                        [build_dual_benchmark_card(page, state["dual_benchmark"])]
+                        if state.get("dual_benchmark")
+                        else []
+                    ),
                     ft.Container(
                         padding=16,
                         bgcolor=p["SOFT_EMERALD"],
@@ -1047,6 +1180,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                             spacing=6,
                         ),
                     ),
+                    build_smart_dosage_calculator(page, res.get("label") or "Healthy"),
                     actions_row,
                     ft.Divider(height=12, color=p["BORDER_LIGHT"]),
                     ft.Text("3 lần khám gần nhất", size=15, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
@@ -1064,6 +1198,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             scanning=False,
             image_info=None,
             result=None,
+            dual_benchmark=None,
             record_id=None,
             sent_to_expert=False,
         )
@@ -1089,6 +1224,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 scanning=False,
                 image_info=info,
                 result=None,
+                dual_benchmark=None,
                 record_id=None,
                 sent_to_expert=False,
             )
@@ -1102,40 +1238,97 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
     async def handle_choose_file(e):
         await pick_image_files(picker, allow_multiple=False, on_picked=on_files_selected)
 
+    cta_btn_ref: dict[str, ft.Control | None] = {"btn": None}
+
+    def _set_analyze_btn_busy(busy: bool):
+        btn = cta_btn_ref.get("btn")
+        if btn is None:
+            return
+        btn.disabled = busy
+        btn.bgcolor = "#64748B" if busy else PRIMARY_DARK
+        btn.content = (
+            ft.Row(
+                [
+                    ft.ProgressRing(width=18, height=18, stroke_width=2.5, color="#FFFFFF"),
+                    ft.Text("Đang phân tích hình ảnh AI...", size=15.5, weight=ft.FontWeight.BOLD, color="#FFFFFF"),
+                ],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=10,
+                tight=True,
+            )
+            if busy
+            else ft.Text("⚡ Phân tích Chẩn đoán AI", size=16, weight=ft.FontWeight.BOLD, color="#FFFFFF")
+        )
+
     async def handle_run_predict(e):
+        if state["scanning"]:
+            return
         if not state["image_path"]:
             show_snack(page, "Vui lòng tải ảnh da heo hoặc chọn 1 mẫu thử bên dưới.", "#DC2626")
             return
 
         loading_bar.visible = True
         state["scanning"] = True
+        _set_analyze_btn_busy(True)
+        dual_on = bool(state.get("dual_mode"))
         scan_steps = [
-            "🔍 Đang tiền xử lý & tách nền da heo...",
-            "🧠 Đang trích xuất đặc trưng qua mạng Deep Learning...",
-            "📊 Đang tổng hợp phác đồ thú y...",
+            "🔍 Đang tiền xử lý & kiểm tra vùng da heo hợp lệ...",
+            (
+                "⚖️ Đang chạy Hội chẩn Kép MobileNetV2 & EfficientNet-B0..."
+                if dual_on
+                else "🧠 Đang trích xuất đặc trưng qua mạng Deep Learning..."
+            ),
+            "📊 Đang tổng hợp phác đồ thú y & tính liều lượng...",
         ]
 
         try:
             # Start AI inference in background thread while running the 0.9s AI Laser Scanner sequence
-            pred_task = asyncio.create_task(
-                asyncio.to_thread(predict, state["image_path"], state.get("selected_run"))
-            )
+            if dual_on:
+                pred_task = asyncio.create_task(
+                    asyncio.to_thread(predict_dual_benchmark, state["image_path"])
+                )
+            else:
+                pred_task = asyncio.create_task(
+                    asyncio.to_thread(predict, state["image_path"], state.get("selected_run"))
+                )
             for msg in scan_steps:
                 state["scan_status"] = msg
                 render_dropzone()
                 page.update()
                 await asyncio.sleep(0.3)
 
-            res = await pred_task
+            raw_out = await pred_task
+            if dual_on:
+                state["dual_benchmark"] = raw_out
+                res = raw_out.get("primary") or {
+                    "ok": False,
+                    "is_valid_pig": False,
+                    "mode": "invalid_image",
+                    "message": (raw_out.get("consensus") or {}).get("summary") or "Không thể chạy hội chẩn kép.",
+                }
+            else:
+                state["dual_benchmark"] = None
+                res = raw_out
             if not isinstance(getattr(page, "data", None), dict):
                 page.data = {}
+
+            # Non-pig / OOD / low-confidence image: show warning, DO NOT save to SQL, DO NOT allow vet submission
+            if res.get("is_valid_pig") is False or res.get("mode") in ("invalid_image", "unavailable"):
+                page.data.pop("active_scan_result", None)
+                state.update(result=res, dual_benchmark=None, record_id=None, sent_to_expert=False, scanning=False)
+                render_dropzone()
+                render_right_card()
+                show_snack(page, res.get("message") or "Ảnh tải lên không phải vùng da heo hợp lệ.", "#D97706")
+                return
+
             page.data["active_scan_result"] = res
             info = state["image_info"] or inspect_image(state["image_path"])
             auto_review = 1 if float(res.get("confidence") or 0.0) < 0.75 else 0
-            rid = save(
+            rid = await asyncio.to_thread(
+                save,
                 info,
                 res,
-                case={
+                {
                     "animal_id": animal_field.value or "PIG-NEW",
                     "farm_name": farm_field.value or "Trại chăn nuôi",
                     "symptoms": symptoms_field.value or "",
@@ -1144,7 +1337,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     "user_name": user.get("full_name", ""),
                     "requested_review": auto_review,
                 },
-                source_image=state["image_path"],
+                state["image_path"],
             )
             state.update(result=res, record_id=rid, sent_to_expert=bool(auto_review), scanning=False)
             refresh_page_header()
@@ -1172,7 +1365,9 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             render_dropzone()
             show_snack(page, f"Không thể phân tích ảnh: {err}", "#DC2626")
         finally:
+            state["scanning"] = False
             loading_bar.visible = False
+            _set_analyze_btn_busy(False)
             page.update()
 
     # Tab 1: Predict (2 balanced 5:5 cards fitting neatly in 1 screen)
@@ -1192,6 +1387,8 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         render_right_card()
 
         def on_cta_hover(e):
+            if state["scanning"]:
+                return
             hovered = str(getattr(e, "data", "")).lower() == "true"
             e.control.bgcolor = PRIMARY if hovered else PRIMARY_DARK
             e.control.shadow = ft.BoxShadow(
@@ -1223,6 +1420,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 color="#FFFFFF",
             ),
         )
+        cta_btn_ref["btn"] = cta_analyze_btn
 
         reset_case_btn = ft.Container(
             padding=ft.padding.symmetric(horizontal=12, vertical=7),
@@ -1258,6 +1456,13 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     dropzone_host,
                     sample_gallery_host,
                     ft.Row([model_run_dropdown]),
+                    ft.Container(
+                        padding=ft.padding.symmetric(horizontal=12, vertical=6),
+                        border_radius=10,
+                        bgcolor=p["BG_SUB"],
+                        border=ft.border.all(1, p["BORDER_LIGHT"]),
+                        content=dual_mode_switch,
+                    ),
                     ft.Row([animal_field, farm_field], spacing=12),
                     ft.Column(
                         [
@@ -1301,6 +1506,62 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         ]
         list_host = ft.Column(spacing=16)
 
+        async def handle_export_history_report(rec: dict):
+            final_cls = rec.get("expert_label") or rec.get("predicted_class") or "Healthy"
+            cls_meta = get_class_info(final_cls)
+            raw_scores = rec.get("scores_json")
+            try:
+                parsed_scores = json.loads(raw_scores) if isinstance(raw_scores, str) else raw_scores
+            except Exception:
+                parsed_scores = None
+            rec_conf = float(rec.get("confidence") or 0.0)
+            is_rev = rec.get("review_status") == "reviewed"
+            await save_vet_report_with_picker(
+                page,
+                case_data={
+                    "record_id": rec.get("id") or 1,
+                    "case_id": rec.get("case_id") or f"PS-{int(rec.get('id') or 1):06d}",
+                    "created_at": rec.get("created_at") or "",
+                    "image_path": rec.get("image_path") or "",
+                    "predicted_class": final_cls,
+                    "disease_name": (
+                        rec.get("expert_display_name")
+                        if is_rev and rec.get("expert_display_name")
+                        else (cls_meta.get("name_vi") or display_class(final_cls))
+                    ),
+                    "danger_level": cls_meta.get("danger_level") or rec.get("danger_level") or "Trung bình",
+                    "confidence": rec_conf,
+                    "scores": (
+                        parsed_scores
+                        if isinstance(parsed_scores, (list, dict)) and parsed_scores
+                        else [{"label": final_cls, "confidence": rec_conf}]
+                    ),
+                    "animal_id": rec.get("animal_id") or "PIG-101",
+                    "farm_name": rec.get("farm_name") or "Trang trại chăn nuôi",
+                    "user_name": rec.get("user_name") or user.get("full_name", "Người chăn nuôi"),
+                    "symptoms": rec.get("symptoms") or "Không có ghi chú triệu chứng",
+                    "isolation_guide": cls_meta.get("prevention") or "",
+                    "treatment_guide": (
+                        (rec.get("expert_note") or "").strip()
+                        if is_rev and (rec.get("expert_note") or "").strip()
+                        else (rec.get("recommendation") or cls_meta.get("treatment") or "")
+                    ),
+                    "review_status": rec.get("review_status") or "needs_review",
+                    "expert_label": rec.get("expert_label") or "",
+                    "expert_note": (
+                        (rec.get("expert_note") or "").strip()
+                        if is_rev and (rec.get("expert_note") or "").strip()
+                        else (rec.get("recommendation") or "Đang chờ Bác sĩ Thú y thẩm định.")
+                    ),
+                    "reviewed_by": (
+                        rec.get("reviewed_by")
+                        if is_rev and rec.get("reviewed_by")
+                        else "Hệ thống Trí tuệ nhân tạo PigSkin AI"
+                    ),
+                },
+                save_picker=report_save_picker,
+            )
+
         def refresh_history(e=None):
             cur_p = get_theme_palette(page)
             d_val = disease_dropdown.value or "all"
@@ -1330,11 +1591,64 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 )
             for rec in records:
                 is_reviewed = rec.get("review_status") == "reviewed"
-                status_text = "Đã được Bác sĩ Thú y xác nhận" if is_reviewed else "Đang chờ duyệt"
+                dark = cur_p["IS_DARK"]
+                status_text = "Đã thẩm định" if is_reviewed else "Đang chờ duyệt"
                 status_color = PRIMARY_DARK if is_reviewed else "#D97706"
                 final_code = rec.get("expert_label") or rec.get("predicted_class")
+                cls_meta = get_class_info(final_code)
+                danger_lvl = cls_meta.get("danger_level", "Trung bình")
+                disease_title = display_class(final_code)
+                if danger_lvl in ("Cao", "Khẩn cấp"):
+                    disease_col = "#FCA5A5" if dark else "#B91C1C"
+                elif danger_lvl in ("An toàn", "Thấp") or final_code == "Healthy":
+                    disease_col = "#34D399" if dark else "#15803D"
+                else:
+                    disease_col = "#FBBF24" if dark else "#B45309"
+
                 conf = float(rec.get("confidence") or 0.0)
-                conf_col = _confidence_color(conf, cur_p["IS_DARK"])
+                if conf >= 0.85:
+                    pill_fg = "#4ADE80" if dark else "#15803D"
+                    pill_bg = "#14532D" if dark else "#DCFCE7"
+                    pill_bd = "#22C55E" if dark else "#86EFAC"
+                    bar_col = "#22C55E" if dark else "#15803D"
+                elif conf >= 0.65:
+                    pill_fg = "#FBBF24" if dark else "#B45309"
+                    pill_bg = "#78350F" if dark else "#FEF3C7"
+                    pill_bd = "#F59E0B" if dark else "#FCD34D"
+                    bar_col = "#F59E0B" if dark else "#B45309"
+                else:
+                    pill_fg = "#FCA5A5" if dark else "#B91C1C"
+                    pill_bg = "#7F1D1D" if dark else "#FEE2E2"
+                    pill_bd = "#EF4444" if dark else "#FCA5A5"
+                    bar_col = "#EF4444" if dark else "#B91C1C"
+
+                conf_badge = ft.Container(
+                    padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                    border_radius=8,
+                    bgcolor=pill_bg,
+                    border=ft.border.all(1, pill_bd),
+                    content=ft.Text(
+                        f"{conf * 100:.1f}%",
+                        size=15,
+                        weight=ft.FontWeight.BOLD,
+                        color=pill_fg,
+                    ),
+                )
+
+                action_btn_style = ft.ButtonStyle(
+                    text_style=ft.TextStyle(size=13.5, weight=ft.FontWeight.W_600),
+                )
+
+                async def _on_print_history(e, r=rec):
+                    await handle_export_history_report(r)
+
+                print_history_btn = ft.OutlinedButton(
+                    "Xuất Phiếu Khám A4",
+                    icon=ft.Icons.PRINT_ROUNDED,
+                    style=action_btn_style,
+                    tooltip="Lưu Phiếu Khám Thú Y A4 (mặc định ~/Downloads) kèm mã QR & tự động mở trình duyệt",
+                    on_click=_on_print_history,
+                )
 
                 expert_feedback = (
                     ft.Container(
@@ -1345,40 +1659,73 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                         content=ft.Column(
                             [
                                 ft.Text(
-                                    f"Kết luận Bác sĩ Thú y ({rec.get('reviewed_by') or 'BS. Thú y'}): {display_class(final_code)}",
+                                    f"Kết luận Bác sĩ Thú y ({rec.get('reviewed_by') or 'BS. Thú y'}): {disease_title}",
                                     size=14,
                                     weight=ft.FontWeight.BOLD,
                                     color=cur_p["PROTOCOL_HEAD"],
                                 ),
                                 ft.Text(
-                                    f"Phác đồ điều trị: {rec.get('expert_note') or rec.get('recommendation')}",
-                                    size=13.5,
-                                    color=cur_p["PROTOCOL_TEXT"],
+                                    size=14,
+                                    spans=[
+                                        ft.TextSpan(
+                                            "Phác đồ điều trị: ",
+                                            ft.TextStyle(weight=ft.FontWeight.W_600, color=cur_p["PROTOCOL_HEAD"]),
+                                        ),
+                                        ft.TextSpan(
+                                            str(rec.get("expert_note") or rec.get("recommendation") or ""),
+                                            ft.TextStyle(color=cur_p["PROTOCOL_TEXT"]),
+                                        ),
+                                    ],
+                                ),
+                                ft.Row(
+                                    [print_history_btn],
+                                    alignment=ft.MainAxisAlignment.END,
+                                    wrap=True,
                                 ),
                             ],
-                            spacing=4,
+                            spacing=8,
+                            tight=True,
                         ),
                     )
                     if is_reviewed
-                    else ft.Row(
+                    else ft.Column(
                         [
                             ft.Text(
-                                f"Hướng xử lý sơ bộ: {rec.get('recommendation') or 'Theo dõi thêm'}",
-                                size=13.5,
-                                color=cur_p["TEXT_SECONDARY"],
-                                expand=True,
+                                size=14,
+                                spans=[
+                                    ft.TextSpan(
+                                        "Hướng xử lý sơ bộ: ",
+                                        ft.TextStyle(weight=ft.FontWeight.W_600, color=cur_p["TEXT_PRIMARY"]),
+                                    ),
+                                    ft.TextSpan(
+                                        str(rec.get("recommendation") or "Theo dõi thêm"),
+                                        ft.TextStyle(color=cur_p["TEXT_SECONDARY"]),
+                                    ),
+                                ],
                             ),
-                            ft.OutlinedButton(
-                                "Đã gửi Bác sĩ Thú y" if rec.get("requested_review") else "Nhờ Bác sĩ Thú y duyệt",
-                                icon=ft.Icons.SEND_ROUNDED,
-                                disabled=bool(rec.get("requested_review")),
-                                on_click=lambda e, rid=rec["id"]: (
-                                    request_expert_review(rid),
-                                    refresh_history(),
-                                    show_snack(page, f"Đã gửi hồ sơ PS-{rid:06d} tới Bác sĩ Thú y!", "#0284C7"),
-                                ),
+                            ft.Row(
+                                [
+                                    print_history_btn,
+                                    ft.OutlinedButton(
+                                        "Đã gửi Bác sĩ Thú y" if rec.get("requested_review") else "Nhờ Bác sĩ Thú y duyệt",
+                                        icon=ft.Icons.SEND_ROUNDED,
+                                        style=action_btn_style,
+                                        disabled=bool(rec.get("requested_review")),
+                                        on_click=lambda e, rid=rec["id"]: (
+                                            request_expert_review(rid),
+                                            refresh_history(),
+                                            show_snack(page, f"Đã gửi hồ sơ PS-{rid:06d} tới Bác sĩ Thú y!", "#0284C7"),
+                                        ),
+                                    ),
+                                ],
+                                spacing=10,
+                                run_spacing=8,
+                                wrap=True,
+                                alignment=ft.MainAxisAlignment.START,
                             ),
-                        ]
+                        ],
+                        spacing=8,
+                        tight=True,
                     )
                 )
 
@@ -1392,9 +1739,10 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                                 preview_thumbnail_with_zoom(
                                     page,
                                     rec.get("image_path"),
-                                    f"{rec.get('case_id')} • {display_class(final_code)}",
-                                    width=88,
-                                    height=88,
+                                    f"{rec.get('case_id')} • {disease_title}",
+                                    width=100,
+                                    height=100,
+                                    border_radius=12,
                                 ),
                                 ft.Column(
                                     [
@@ -1402,39 +1750,61 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                                             [
                                                 ft.Text(
                                                     f"{rec.get('case_id')} • {rec.get('animal_id') or 'Heo'} ({rec.get('farm_name') or 'Trang trại'})",
-                                                    size=16,
-                                                    weight=ft.FontWeight.BOLD,
-                                                    color=cur_p["TEXT_PRIMARY"],
+                                                    size=14,
+                                                    weight=ft.FontWeight.W_600,
+                                                    color=cur_p["TEXT_SECONDARY"],
                                                     expand=True,
+                                                ),
+                                                ft.Text(
+                                                    f"Ngày khám: {rec.get('created_at')}",
+                                                    size=13,
+                                                    color=cur_p["TEXT_MUTED"],
                                                 ),
                                                 ft.Container(
                                                     bgcolor=status_color,
-                                                    padding=ft.padding.symmetric(horizontal=12, vertical=5),
-                                                    border_radius=12,
-                                                    content=ft.Text(status_text, size=12.5, color="#FFFFFF", weight=ft.FontWeight.W_600),
+                                                    padding=ft.padding.symmetric(horizontal=14, vertical=6),
+                                                    border_radius=14,
+                                                    content=ft.Text(
+                                                        status_text,
+                                                        size=13,
+                                                        color="#FFFFFF",
+                                                        weight=ft.FontWeight.W_600,
+                                                    ),
                                                 ),
-                                            ]
+                                            ],
+                                            spacing=10,
+                                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                                         ),
                                         ft.Row(
                                             [
                                                 ft.Text(
-                                                    f"Kết quả PigSkin AI: {display_class(rec.get('predicted_class'))} ({conf*100:.1f}%)",
-                                                    size=14,
-                                                    weight=ft.FontWeight.W_600,
-                                                    color=conf_col,
-                                                    expand=True,
+                                                    disease_title,
+                                                    size=19,
+                                                    weight=ft.FontWeight.BOLD,
+                                                    color=disease_col,
                                                 ),
-                                                ft.Text(f"Ngày khám: {rec.get('created_at')}", size=13, color=cur_p["TEXT_MUTED"]),
-                                            ]
+                                                conf_badge,
+                                            ],
+                                            wrap=True,
+                                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                            spacing=10,
+                                            run_spacing=6,
                                         ),
-                                        ft.ProgressBar(value=conf, bar_height=7, color=conf_col, bgcolor=cur_p["BORDER_LIGHT"]),
+                                        ft.ProgressBar(
+                                            value=conf,
+                                            bar_height=7,
+                                            border_radius=4,
+                                            color=bar_col,
+                                            bgcolor=cur_p["BORDER_LIGHT"],
+                                        ),
                                         expert_feedback,
                                     ],
-                                    spacing=8,
+                                    spacing=10,
                                     expand=True,
+                                    tight=True,
                                 ),
                             ],
-                            spacing=16,
+                            spacing=18,
                             vertical_alignment=ft.CrossAxisAlignment.START,
                         ),
                     )
@@ -1462,13 +1832,17 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             css_card(
                 padding=20,
                 page=page,
-                content=ft.Row(
-                    [
-                        date_input,
-                        disease_dropdown,
-                        ft.OutlinedButton("Làm mới", icon=ft.Icons.REFRESH_ROUNDED, on_click=refresh_history),
-                    ],
-                    spacing=12,
+                content=ft.Container(
+                    padding=ft.padding.only(top=8),
+                    content=ft.Row(
+                        [
+                            date_input,
+                            disease_dropdown,
+                            ft.OutlinedButton("Làm mới", icon=ft.Icons.REFRESH_ROUNDED, on_click=refresh_history),
+                        ],
+                        spacing=12,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
                 ),
             ),
             ft.Container(padding=ft.padding.only(bottom=90), content=list_host),

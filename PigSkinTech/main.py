@@ -50,6 +50,9 @@ def main(page: ft.Page):
 
         user = get_session_user(page)
         if target == "/login":
+            from services.chatbot_service import clear_chat_refreshers
+
+            clear_chat_refreshers(page)
             page.route = "/login"
             page.controls.clear()
             page.add(build_auth_view(page))

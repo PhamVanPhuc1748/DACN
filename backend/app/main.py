@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hmac
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -20,6 +22,7 @@ if str(PIGSKIN_DIR) not in sys.path:
 
 from services.auth_service import authenticate_local
 from services.chatbot_service import ask_vet_ai
+from services.config_store import read_settings as read_app_settings
 from services.inference import predict as run_real_predict
 from services.project_data import load_classes_config
 from services.store import (
@@ -86,14 +89,43 @@ class AdminSettingsPayload(BaseModel):
     )
 
 
+def _get_admin_api_token() -> str:
+    token = (os.getenv("ADMIN_API_TOKEN") or "").strip()
+    if token:
+        return token
+    try:
+        return (read_app_settings().get("ADMIN_API_TOKEN") or "").strip()
+    except Exception:
+        return ""
+
+
 def _require_admin(request: Request) -> dict:
+    expected_token = _get_admin_api_token()
+    if not expected_token:
+        raise HTTPException(
+            status_code=401,
+            detail="ADMIN_API_TOKEN chưa được cấu hình trong .env; từ chối truy cập quản trị.",
+        )
+
+    auth_header = (request.headers.get("Authorization") or "").strip()
+    bearer_token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+    provided_token = (request.headers.get("X-Admin-Token") or bearer_token or "").strip()
+    if not provided_token or not hmac.compare_digest(provided_token, expected_token):
+        raise HTTPException(
+            status_code=401,
+            detail="Thiếu hoặc sai mã xác thực quản trị (X-Admin-Token / Authorization Bearer).",
+        )
+
     username = (request.headers.get("X-Admin-Username") or "").strip().lower()
     if not username:
-        raise HTTPException(status_code=403, detail="Thiếu thông tin xác thực quản trị viên")
+        raise HTTPException(status_code=401, detail="Thiếu thông tin tài khoản quản trị (X-Admin-Username).")
     for u in list_users("admin", username):
-        if username in (str(u.get("username") or "").lower(), str(u.get("email") or "").lower()):
+        if int(u.get("is_active") or 0) == 1 and username in (
+            str(u.get("username") or "").lower(),
+            str(u.get("email") or "").lower(),
+        ):
             return u
-    raise HTTPException(status_code=403, detail="Chỉ quản trị viên mới có quyền truy cập mục này")
+    raise HTTPException(status_code=401, detail="Tài khoản không hợp lệ hoặc không có quyền quản trị viên.")
 
 
 @app.get("/health")
@@ -161,8 +193,8 @@ async def predict_disease(
 
     try:
         pred = run_real_predict(tmp_path, run_name=model_run)
-        if not pred.get("ok"):
-            raise HTTPException(status_code=400, detail=pred.get("message", "Inference error"))
+        if not pred.get("ok") or pred.get("is_valid_pig") is False:
+            raise HTTPException(status_code=400, detail=pred.get("message", "Ảnh không hợp lệ hoặc lỗi suy luận"))
         row_id = save_inspection(
             pred["info"],
             pred,

@@ -6,6 +6,7 @@ import flet as ft
 from services.auth_service import (
     build_outbreak_alert_banner,
     build_role_shell,
+    close_dialog,
     create_file_picker,
     ensure_flet_compat,
     export_inspections_csv,
@@ -16,9 +17,11 @@ from services.auth_service import (
     kpi_stat_card,
     make_dropdown,
     make_image,
+    open_dialog,
     open_image_zoom_dialog,
     pick_image_files,
     preview_thumbnail_with_zoom,
+    save_vet_report_with_picker,
     show_snack,
     tech_banner,
     tech_card,
@@ -27,9 +30,12 @@ from services.auth_service import (
 from services.clinical_widgets import (
     build_clinical_charts_section,
     build_disease_catalog_crud_card,
+    build_dual_benchmark_card,
+    build_smart_dosage_calculator,
     open_disease_editor_modal,
 )
 from services.inference import predict_batch
+from services.inference_service import predict_dual_benchmark
 from services.project_data import (
     active_run,
     display_class,
@@ -40,6 +46,7 @@ from services.project_data import (
 )
 from services.store import (
     approve_for_dataset,
+    export_retrain_bundle,
     get_sample_gallery,
     get_system_stats,
     list_curated_candidates,
@@ -72,6 +79,7 @@ REVIEW_PANEL_HEIGHT = 560
 def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
     ensure_flet_compat(page)
     batch_picker = create_file_picker(page)
+    report_save_picker = create_file_picker(page)
     nav_ref = {"switch_tab": None}
     state = {
         "selected_case": None,
@@ -79,11 +87,17 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
         "batch_paths": [],
         "batch_results": [],
         "expert_heatmap_mode": False,
+        "expert_heatmap_path": None,
+        "expert_dual_bench": None,
+        "expert_dual_loading": False,
     }
 
     def select_case_and_open_tab2(rec: dict):
         state["selected_case"] = rec
         state["expert_heatmap_mode"] = False
+        state["expert_heatmap_path"] = None
+        state["expert_dual_bench"] = None
+        state["expert_dual_loading"] = False
         if nav_ref.get("switch_tab"):
             nav_ref["switch_tab"](1)
 
@@ -443,7 +457,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             spacing=16,
         )
 
-        outbreak = build_outbreak_alert_banner(all_records, page=page)
+        outbreak = build_outbreak_alert_banner(page=page)
         return [
             tech_banner(
                 "Tổng quan & Hàng đợi Thẩm định Chuyên gia",
@@ -546,6 +560,9 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             if found:
                 state["selected_case"] = found
                 state["expert_heatmap_mode"] = False
+                state["expert_heatmap_path"] = None
+                state["expert_dual_bench"] = None
+                state["expert_dual_loading"] = False
                 if nav_ref.get("switch_tab"):
                     nav_ref["switch_tab"](1)
 
@@ -565,11 +582,23 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
         initial_label = rec.get("expert_label") or pred_code
         default_tx = rec.get("expert_note") or get_class_info(initial_label).get("treatment", "")
 
+        dosage_host = ft.Container()
+
+        def refresh_dosage_widget(target_cls: str, do_update: bool = False):
+            dosage_host.content = build_smart_dosage_calculator(page, target_cls or pred_code)
+            if do_update:
+                page.update()
+
+        def on_relabel_change(e):
+            if decision_group.value != "agree":
+                refresh_dosage_widget(relabel_dropdown.value or pred_code, do_update=True)
+
         class_options = [(code, f"{display_class(code)} ({code})") for code in list_class_keys()]
         relabel_dropdown = make_dropdown(
             "Chọn nhãn bệnh lý chuẩn hóa",
             initial_label,
             class_options,
+            on_change=on_relabel_change,
             expand=True,
             page=page,
         )
@@ -591,7 +620,10 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             target_cls = pred_code if is_agree else (relabel_dropdown.value or pred_code)
             if not treatment_note.value.strip():
                 treatment_note.value = get_class_info(target_cls).get("treatment", "")
+            refresh_dosage_widget(target_cls, do_update=False)
             page.update()
+
+        refresh_dosage_widget(pred_code if initial_agreed == "agree" else initial_label, do_update=False)
 
         decision_group = ft.RadioGroup(
             value=initial_agreed,
@@ -661,13 +693,13 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             cur_t = theme_tokens(page)
             is_hm = bool(state.get("expert_heatmap_mode"))
             orig_path = rec.get("image_path") or ""
-            shown_path = generate_lesion_heatmap(orig_path) if is_hm else orig_path
+            shown_path = (state.get("expert_heatmap_path") or orig_path) if is_hm else orig_path
             image_preview_host.bgcolor = cur_t["SUB_SURFACE"] if is_dark_mode(page) else "#F8FAFC"
             image_preview_host.border = ft.border.all(1.5 if is_hm else 1, "#D97706" if is_hm else cur_t["BORDER"])
             image_preview_host.on_click = lambda e: open_image_zoom_dialog(
                 page,
                 shown_path,
-                f"Hồ sơ {case_code}{' • AI Heatmap' if is_hm else ''}",
+                f"Hồ sơ {case_code}{' • Grad-CAM AI Heatmap' if is_hm else ''}",
             )
             image_preview_host.content = make_image(
                 shown_path,
@@ -691,7 +723,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                             color="#FFFFFF" if is_hm else cur_t["EMERALD"],
                         ),
                         ft.Text(
-                            "Đang bật Heatmap (Tắt)" if is_hm else "Soi vùng tổn thương AI",
+                            "Đang bật Grad-CAM (Tắt)" if is_hm else "Soi vùng tổn thương AI",
                             size=12.5,
                             weight=ft.FontWeight.W_600,
                             color="#FFFFFF" if is_hm else cur_t["EMERALD"],
@@ -703,14 +735,59 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                 ),
             )
 
-        def toggle_expert_heatmap(e):
+        async def toggle_expert_heatmap(e):
             state["expert_heatmap_mode"] = not bool(state.get("expert_heatmap_mode"))
+            if state["expert_heatmap_mode"] and not state.get("expert_heatmap_path"):
+                orig_path = rec.get("image_path") or ""
+                if orig_path:
+                    state["expert_heatmap_path"] = await asyncio.to_thread(generate_lesion_heatmap, orig_path)
             render_expert_image_preview()
             if state["expert_heatmap_mode"]:
-                show_snack(page, "🔬 Đã bật chế độ soi vùng tổn thương AI cho chuyên gia thú y.", "#D97706")
+                show_snack(page, "🔬 Đã tạo Bản đồ nhiệt Grad-CAM từ Feature Map AI cho chuyên gia.", "#D97706")
             page.update()
 
-        def handle_export_expert_report(e):
+        dual_bench_host = ft.Container(
+            content=build_dual_benchmark_card(page, state["expert_dual_bench"])
+            if state.get("expert_dual_bench")
+            else None
+        )
+        dual_bench_btn = ft.OutlinedButton(
+            "⚖️ Hội chẩn kép 2 Mô hình",
+            icon=ft.Icons.COMPARE_ARROWS_ROUNDED,
+            tooltip="Chạy song song MobileNetV2 & EfficientNet-B0 để đối chiếu mức độ đồng thuận",
+        )
+
+        async def handle_expert_dual_benchmark(e):
+            if state.get("expert_dual_loading"):
+                return
+            orig_path = rec.get("image_path") or ""
+            if not orig_path:
+                show_snack(page, "Hồ sơ này không có ảnh đính kèm để hội chẩn kép.", "#DC2626")
+                return
+            state["expert_dual_loading"] = True
+            dual_bench_btn.disabled = True
+            dual_bench_btn.text = "Đang chạy 2 mô hình..."
+            page.update()
+            try:
+                bench = await asyncio.to_thread(predict_dual_benchmark, orig_path)
+                state["expert_dual_bench"] = bench
+                dual_bench_host.content = build_dual_benchmark_card(page, bench)
+                show_snack(
+                    page,
+                    f"⚖️ Hoàn tất Hội chẩn Kép: {(bench.get('consensus') or {}).get('badge', '')}",
+                    (bench.get("consensus") or {}).get("color") or "#0284C7",
+                )
+            except Exception as err:
+                show_snack(page, f"Lỗi chạy hội chẩn kép: {err}", "#DC2626")
+            finally:
+                state["expert_dual_loading"] = False
+                dual_bench_btn.disabled = False
+                dual_bench_btn.text = "⚖️ Hội chẩn kép 2 Mô hình"
+                page.update()
+
+        dual_bench_btn.on_click = handle_expert_dual_benchmark
+
+        async def handle_export_expert_report(e):
             import json
 
             is_agree = decision_group.value == "agree"
@@ -721,7 +798,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                 parsed_scores = json.loads(raw_scores) if isinstance(raw_scores, str) else raw_scores
             except Exception:
                 parsed_scores = None
-            export_vet_report_html(
+            await save_vet_report_with_picker(
                 page,
                 {
                     "record_id": rec.get("id") or 1,
@@ -741,10 +818,12 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                     "scores": parsed_scores if isinstance(parsed_scores, (list, dict)) and parsed_scores else [{"label": chosen_label, "confidence": conf}],
                     "isolation_guide": cls_meta.get("prevention") or "",
                     "treatment_guide": (treatment_note.value or "").strip() or cls_meta.get("treatment", ""),
+                    "review_status": "reviewed",
                     "expert_label": chosen_label,
                     "expert_note": (treatment_note.value or "").strip() or cls_meta.get("treatment", ""),
                     "reviewed_by": user.get("email", "bs.thuy.pigskin@gmail.com"),
                 },
+                save_picker=report_save_picker,
             )
 
         render_expert_image_preview()
@@ -802,9 +881,11 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                     ft.Row(
                         [
                             ft.Icon(ft.Icons.FACT_CHECK_ROUNDED, color="#10B981", size=22),
-                            ft.Text("Kết quả AI & Quyết định của Chuyên gia", size=18, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
+                            ft.Text("Kết quả AI & Quyết định của Chuyên gia", size=18, weight=ft.FontWeight.BOLD, color=t["TEXT"], expand=True),
+                            dual_bench_btn,
                         ],
                         spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                     ft.Container(
                         bgcolor=t["SUB_SURFACE"],
@@ -840,11 +921,13 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                         ),
                     ),
+                    dual_bench_host,
                     ft.Text("1. Đánh giá nhãn chẩn đoán (Human-in-the-Loop):", size=14.5, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
                     decision_group,
                     ft.Row([relabel_dropdown]),
                     ft.Text("2. Phác đồ điều trị & Lời khuyên dùng thuốc gửi User:", size=14.5, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
                     ft.Row([treatment_note]),
+                    dosage_host,
                     ft.Row(
                         [
                             ft.FilledButton(
@@ -933,6 +1016,70 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
         dist_host = ft.Container()
         curation_header_host = ft.Container()
 
+        def handle_export_retrain_bundle(e):
+            try:
+                bundle = export_retrain_bundle()
+                sp = bundle.get("split_counts") or {}
+                cls_summary = ", ".join(
+                    f"{display_class(k)}: {v}"
+                    for k, v in (bundle.get("per_class_counts") or {}).items()
+                    if v > 0
+                )
+                show_snack(
+                    page,
+                    f"Đã đóng gói {bundle['total_images']} ảnh chuẩn vào exports/{bundle['zip_name']}!",
+                    "#059669",
+                )
+                dlg = ft.AlertDialog(modal=True)
+                dlg.title = ft.Row(
+                    [
+                        ft.Icon(ft.Icons.ARCHIVE_ROUNDED, color="#059669", size=24),
+                        ft.Text("Xuất gói Dataset Retrain thành công", size=18, weight=ft.FontWeight.BOLD),
+                    ],
+                    spacing=8,
+                )
+                dlg.content = ft.Container(
+                    width=560,
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                f"• Tổng số ảnh chuẩn đóng gói: {bundle['total_images']} ảnh "
+                                f"(đã lọc bỏ {bundle['duplicates_skipped']} ảnh trùng SHA-256).",
+                                size=14,
+                                weight=ft.FontWeight.W_600,
+                            ),
+                            ft.Text(
+                                f"• Phân chia Split: Train {sp.get('train', 0)} · Val {sp.get('val', 0)} · Test {sp.get('test', 0)}",
+                                size=13.5,
+                            ),
+                            ft.Text(
+                                f"• Phân bố lớp có ảnh: {cls_summary or '—'}",
+                                size=13,
+                            ),
+                            ft.Text(
+                                "• Thành phần bên trong .zip: images/<class>/, manifest.csv, classes.json, dataset_summary.json",
+                                size=12.5,
+                            ),
+                            ft.Text(
+                                f"Đường dẫn file: {bundle['zip_path']}",
+                                size=12.5,
+                                selectable=True,
+                                weight=ft.FontWeight.BOLD,
+                                color="#059669",
+                            ),
+                        ],
+                        spacing=8,
+                        tight=True,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                    ),
+                )
+                dlg.actions = [
+                    ft.FilledButton("Đóng", icon=ft.Icons.CHECK_ROUNDED, on_click=lambda ev: close_dialog(page, dlg))
+                ]
+                open_dialog(page, dlg)
+            except Exception as err:
+                show_snack(page, str(err), "#D97706")
+
         def refresh_curation(e=None):
             t = theme_tokens(page)
             candidates = list_curated_candidates()
@@ -983,7 +1130,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             )
 
             dist_bars = []
-            for code, info in list(classes_cfg.items())[:6]:
+            for code, info in classes_cfg.items():
                 cnt = class_counts.get(code, 0)
                 ratio = cnt / total_curated if curated_sum > 0 else 0.0
                 dist_bars.append(
@@ -1014,10 +1161,20 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                                     size=18,
                                     weight=ft.FontWeight.BOLD,
                                     color=t["TEXT"],
+                                    max_lines=2,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
                                     expand=True,
                                 ),
                                 ft.Text(f"Đã duyệt: {curated_sum}/{len(candidates)} ca", size=14, weight=ft.FontWeight.BOLD, color=t["CYAN"]),
-                            ]
+                                ft.FilledButton(
+                                    "Xuất gói Retrain (.zip)",
+                                    icon=ft.Icons.ARCHIVE_ROUNDED,
+                                    tooltip="Đóng gói ảnh chuẩn, manifest.csv (SHA-256), classes.json và dataset_summary.json thành file .zip để huấn luyện lại",
+                                    on_click=handle_export_retrain_bundle,
+                                ),
+                            ],
+                            spacing=10,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                         *dist_bars,
                     ],
@@ -1098,18 +1255,35 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                                     expand=True,
                                 ),
                                 (
-                                    ft.Container(
-                                        bgcolor=t["EMERALD_SOFT"],
-                                        border=ft.border.all(1, "#10B981"),
-                                        padding=ft.padding.symmetric(horizontal=14, vertical=9),
-                                        border_radius=10,
-                                        content=ft.Row(
-                                            [
-                                                ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, color=t["EMERALD"], size=18),
-                                                ft.Text("Đã đưa vào Dataset chuẩn", size=13, color=t["EMERALD"], weight=ft.FontWeight.BOLD),
-                                            ],
-                                            spacing=6,
-                                        ),
+                                    ft.Column(
+                                        [
+                                            ft.Container(
+                                                bgcolor=t["EMERALD_SOFT"],
+                                                border=ft.border.all(1, "#10B981"),
+                                                padding=ft.padding.symmetric(horizontal=14, vertical=8),
+                                                border_radius=10,
+                                                content=ft.Row(
+                                                    [
+                                                        ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, color=t["EMERALD"], size=18),
+                                                        ft.Text("Đã đưa vào Dataset chuẩn", size=13, color=t["EMERALD"], weight=ft.FontWeight.BOLD),
+                                                    ],
+                                                    spacing=6,
+                                                ),
+                                            ),
+                                            ft.OutlinedButton(
+                                                "Gỡ duyệt",
+                                                icon=ft.Icons.REMOVE_CIRCLE_OUTLINE,
+                                                tooltip="Đặt lại in_dataset = 0 và xóa bản sao trong curated_dataset/ (giữ nguyên ảnh gốc)",
+                                                on_click=lambda e, rid=item["id"]: (
+                                                    approve_for_dataset(rid, False),
+                                                    refresh_curation(),
+                                                    show_snack(page, f"Đã gỡ ca PS-{rid:06d} khỏi Dataset chuẩn.", "#D97706"),
+                                                ),
+                                            ),
+                                        ],
+                                        spacing=6,
+                                        horizontal_alignment=ft.CrossAxisAlignment.END,
+                                        tight=True,
                                     )
                                     if in_ds
                                     else ft.FilledButton(
@@ -1271,21 +1445,27 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
             )
 
             for idx, r in enumerate(results, start=1):
+                is_invalid = r.get("is_valid_pig") is False or r.get("mode") in ("invalid_image", "error")
                 conf = float(r.get("confidence") or 0.0)
-                c_col = _conf_color(conf)
+                c_col = "#DC2626" if is_invalid else _conf_color(conf)
                 img_path = (r.get("info") or {}).get("path")
                 img_name = (r.get("info") or {}).get("name", f"Image #{idx}")
                 arch = r.get("architecture") or r.get("model_label") or "MobileNetV2"
                 ms = r.get("inference_ms", "-")
                 top3 = r.get("top3") or (r.get("scores") or [])[:3]
-                top3_txt = " • ".join(
-                    f"{display_class(s.get('label'))}: {float(s.get('confidence') or 0)*100:.1f}%"
-                    for s in top3
+                top3_txt = (
+                    (r.get("validation_reason") or r.get("message") or "Ảnh không phải vùng da heo hợp lệ.")
+                    if is_invalid
+                    else " • ".join(
+                        f"{display_class(s.get('label'))}: {float(s.get('confidence') or 0)*100:.1f}%"
+                        for s in top3
+                    )
                 )
                 results_col.controls.append(
                     tech_card(
                         page=page,
                         padding=18,
+                        border_color="#EF4444" if is_invalid else None,
                         content=ft.Row(
                             [
                                 preview_thumbnail_with_zoom(page, img_path, img_name, width=88, height=88, border_radius=10),
@@ -1298,22 +1478,24 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                                             color=cur_t["TEXT"],
                                         ),
                                         ft.Text(
-                                            f"AI dự đoán: {r.get('display_label')} ({r.get('label')})",
+                                            f"⚠️ Bị chặn: {r.get('display_label') or 'Ảnh không hợp lệ'}"
+                                            if is_invalid
+                                            else f"AI dự đoán: {r.get('display_label')} ({r.get('label')})",
                                             size=14,
-                                            color=cur_t["CYAN"],
+                                            color="#DC2626" if is_invalid else cur_t["CYAN"],
                                             weight=ft.FontWeight.W_600,
                                         ),
                                         ft.Text(
-                                            f"Top-3 Softmax: {top3_txt}",
+                                            f"Lý do: {top3_txt}" if is_invalid else f"Top-3 Softmax: {top3_txt}",
                                             size=12.5,
                                             color=cur_t["SECONDARY"],
                                         ),
-                                        ft.ProgressBar(value=conf, bar_height=7, color=c_col, bgcolor=cur_t["BORDER"]),
+                                        ft.ProgressBar(value=0.0 if is_invalid else conf, bar_height=7, color=c_col, bgcolor=cur_t["BORDER"]),
                                     ],
                                     spacing=5,
                                     expand=True,
                                 ),
-                                ft.Text(f"{conf*100:.1f}%", size=17, weight=ft.FontWeight.BOLD, color=c_col),
+                                ft.Text("Bị chặn" if is_invalid else f"{conf*100:.1f}%", size=16 if is_invalid else 17, weight=ft.FontWeight.BOLD, color=c_col),
                             ],
                             spacing=16,
                         ),
@@ -1334,10 +1516,16 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
         async def handle_pick_batch(e):
             await pick_image_files(batch_picker, allow_multiple=True, on_picked=on_batch_picked)
 
+        batch_run_btn = ft.FilledButton("Chạy Phân tích Hàng loạt", icon=ft.Icons.BOLT_ROUNDED)
+
         async def handle_run_batch(e):
+            if state.get("batch_running"):
+                return
             if not state["batch_paths"]:
                 show_snack(page, "Vui lòng chọn ít nhất 1 ảnh để phân tích hàng loạt.", "#DC2626")
                 return
+            state["batch_running"] = True
+            batch_run_btn.disabled = True
             progress.visible = True
             status_text.value = "Đang phân tích hàng loạt bằng Trí tuệ nhân tạo PigSkin AI..."
             page.update()
@@ -1348,8 +1536,12 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                 render_batch_results()
                 show_snack(page, f"Đã phân tích xong {len(res)} ảnh!", "#059669")
             finally:
+                state["batch_running"] = False
+                batch_run_btn.disabled = False
                 progress.visible = False
                 page.update()
+
+        batch_run_btn.on_click = handle_run_batch
 
         render_batch_results()
         return [
@@ -1364,7 +1556,7 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
                                 batch_model_dd,
                                 ft.OutlinedButton("Chọn nhiều ảnh (Batch)", icon=ft.Icons.COLLECTIONS_ROUNDED, on_click=handle_pick_batch),
                                 ft.OutlinedButton("Nạp bộ 5 ảnh mẫu lâm sàng", icon=ft.Icons.AUTO_AWESOME_MOTION_ROUNDED, on_click=handle_load_sample_batch),
-                                ft.FilledButton("Chạy Phân tích Hàng loạt", icon=ft.Icons.BOLT_ROUNDED, on_click=handle_run_batch),
+                                batch_run_btn,
                                 status_text,
                             ],
                             spacing=12,

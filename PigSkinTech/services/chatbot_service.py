@@ -8,6 +8,7 @@ PigSkinTech Veterinary AI Chatbot Service:
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import unicodedata
@@ -35,6 +36,34 @@ MANDATORY_DISCLAIMER = (
     "⚠️ Lưu ý: Câu trả lời từ Chatbox AI chỉ mang tính chất tham khảo bước đầu. "
     "Để có chẩn đoán và phác đồ điều trị chính xác nhất, bạn vui lòng gửi yêu cầu thẩm định "
     "cho Chuyên gia Thú y trên ứng dụng hoặc liên hệ bác sĩ thú y trực tiếp."
+)
+
+GREETING_RESPONSE = (
+    "Xin chào bạn! Tôi là **BS. Thú y AI — PigSkinTech**, trợ lý chuyên biệt về chẩn đoán và chăm sóc bệnh ngoài da ở heo.\n\n"
+    "Bạn đang cần hỗ trợ vấn đề nào cho đàn heo hôm nay?\n"
+    "• **Mô tả dấu hiệu trên da heo** (nổi mẩn đỏ hình thoi, mụn nước, đóng vảy xám, ngứa gãi, rỉ dịch nhờn...)\n"
+    "• **Giải thích kết quả quét AI** (`MobileNetV2`, `EfficientNet-B0`, xác suất Softmax & phác đồ cách ly)\n"
+    "• **Hướng dẫn sử dụng PigSkinTech** (tải ảnh chẩn đoán, gửi thẩm định Bác sĩ Thú y, xuất phiếu khám A4)"
+)
+
+THANKS_RESPONSE = (
+    "Rất vui được hỗ trợ bạn chăm sóc sức khỏe đàn heo! "
+    "Nếu heo có thêm dấu hiệu bất thường trên da hoặc bạn cần tra cứu phác đồ cách ly, vệ sinh chuồng trại hay liều lượng thuốc tham khảo, cứ nhắn cho tôi bất cứ lúc nào nhé."
+)
+
+_GREETING_RE = re.compile(
+    r"^(?:"
+    r"(?:xin\s+)?chào(?:\s+(?:bạn|bác\s+sĩ|bs|thầy|cô|anh|chị|em|ai|bot|ad|admin|trợ\s+lý|pigskintech|mọi\s+người|nhé|nha|ạ))*"
+    r"|chào\s+buổi\s+(?:sáng|trưa|chiều|tối)(?:\s+(?:bạn|bác\s+sĩ|nhé|nha|ạ))*"
+    r"|(?:hello|hi|hey|alo|alô)(?:\s+(?:there|bot|ai|doctor|doc|vet|bạn|bác\s+sĩ|pigskintech|nhé|nha|ạ))*"
+    r"|good\s+(?:morning|afternoon|evening)"
+    r")$"
+)
+
+_THANKS_RE = re.compile(
+    r"^(?:(?:ok|oke|okay|vâng|dạ|ừ|uh)\s+)?"
+    r"(?:cảm\s+ơn|cám\s+ơn|thank(?:\s+you|s)?|tks|thanks\s+a\s+lot)"
+    r"(?:\s+(?:bạn|bác\s+sĩ|bs|ai|bot|trợ\s+lý|pigskintech|nhiều|rất\s+nhiều|lắm|nhé|nha|ạ))*$"
 )
 
 
@@ -359,6 +388,13 @@ def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", norm)
 
 
+def _contains_kw(text: str, kw: str) -> bool:
+    """Match short keywords (<=3 chars) on word boundaries to prevent false matches like 'da' in 'data'/'today'."""
+    if len(kw) <= 3 and " " not in kw:
+        return bool(re.search(rf"(?<!\w){re.escape(kw)}(?!\w)", text))
+    return kw in text
+
+
 def ensure_disclaimer(reply: str) -> str:
     """
     Hàm hậu xử lý bắt buộc gắn dòng cảnh báo tham khảo ở cuối 100% câu trả lời của Chatbox
@@ -391,11 +427,11 @@ def is_non_clinical_pig_question(question: str) -> bool:
     if not q:
         return False
 
-    mentions_pig = any(w in q for w in ("heo", "lợn", "pig", "swine"))
+    mentions_pig = any(_contains_kw(q, w) for w in ("heo", "lợn", "pig", "swine"))
     if not mentions_pig:
         return False
 
-    has_clinical_kw = any(kw in q for kw in _CLINICAL_OR_APP_KEYWORDS)
+    has_clinical_kw = any(_contains_kw(q, kw) for kw in _CLINICAL_OR_APP_KEYWORDS)
     if any(pat in q for pat in _PLAYFUL_PIG_PATTERNS) and not has_clinical_kw:
         return True
 
@@ -407,6 +443,32 @@ def is_non_clinical_pig_question(question: str) -> bool:
     return False
 
 
+def is_social_greeting(question: str) -> str | None:
+    """
+    Nhận diện các câu chào hỏi xã giao / cảm ơn ngắn gọn cơ bản
+    ('xin chào', 'hello', 'hi', 'chào bạn', 'cảm ơn'...) để trả lời thân thiện
+    thay vì từ chối cứng nhắc. Trả về 'greeting', 'thanks' hoặc None.
+    """
+    q = _normalize_text(question)
+    if not q:
+        return None
+    if re.search(r"\b\d+\s*[\+\-\*\/\^]\s*\d+", q):
+        return None
+    if any(pat in q for pat in _OFF_TOPIC_PATTERNS):
+        return None
+    if any(_contains_kw(q, kw) for kw in _DOMAIN_KEYWORDS):
+        return None
+    cleaned = re.sub(r"[^\w\s]", " ", q)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned or len(cleaned.split()) > 8:
+        return None
+    if _GREETING_RE.match(cleaned):
+        return "greeting"
+    if _THANKS_RE.match(cleaned):
+        return "thanks"
+    return None
+
+
 def is_in_domain(question: str, result_context: dict | None = None) -> bool:
     """
     Kiểm tra nghiêm ngặt câu hỏi của người dùng có thuộc phạm vi chuyên môn của PigSkinTech hay không.
@@ -415,10 +477,13 @@ def is_in_domain(question: str, result_context: dict | None = None) -> bool:
     if not q:
         return False
 
-    if re.search(r"\b\d+\s*[\+\-\*\/\^]\s*\d+", q) and not any(k in q for k in ("mg/kg", "ml/", "liều", "heo", "lợn", "ngày", "kg")):
+    if is_social_greeting(q):
+        return True
+
+    if re.search(r"\b\d+\s*[\+\-\*\/\^]\s*\d+", q) and not any(_contains_kw(q, k) for k in ("mg/kg", "ml/", "liều", "heo", "lợn", "ngày", "kg")):
         return False
 
-    has_domain_kw = any(kw in q for kw in _DOMAIN_KEYWORDS)
+    has_domain_kw = any(_contains_kw(q, kw) for kw in _DOMAIN_KEYWORDS)
     if not has_domain_kw:
         catalog = load_classes_config()
         for code, info in catalog.items():
@@ -429,7 +494,7 @@ def is_in_domain(question: str, result_context: dict | None = None) -> bool:
 
     has_off_topic = any(pat in q for pat in _OFF_TOPIC_PATTERNS)
     if has_off_topic:
-        if not any(w in q for w in ("heo", "lợn", "chuồng", "da heo", "da lợn", "pigskintech")):
+        if not any(_contains_kw(q, w) for w in ("heo", "lợn", "chuồng", "da heo", "da lợn", "pigskintech")):
             return False
 
     return has_domain_kw
@@ -480,6 +545,7 @@ def _call_gemini_rest_api(
         },
     }
 
+    last_error = ""
     for m_name in candidate_models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{m_name}:generateContent"
         try:
@@ -500,13 +566,29 @@ def _call_gemini_rest_api(
                     reply_txt = "".join(str(p.get("text") or "") for p in parts).strip()
                     if reply_txt:
                         return reply_txt, m_name
+            elif resp.status_code == 429:
+                last_error = "429 Too Many Requests"
+                logging.warning("Gemini API quota exceeded (429) on model %s; falling back.", m_name)
+                continue
             elif resp.status_code in (400, 401, 403):
+                last_error = f"HTTP {resp.status_code} API Key không hợp lệ"
+                logging.warning("Gemini API rejected credentials (%s); falling back.", resp.status_code)
                 break
-        except requests.RequestException:
+            else:
+                last_error = f"HTTP {resp.status_code}"
+                logging.warning("Gemini API returned HTTP %s on %s.", resp.status_code, m_name)
+        except requests.Timeout:
+            last_error = "Timeout kết nối Gemini API"
+            logging.warning("Gemini API timeout on %s; falling back.", m_name)
             break
-        except Exception:
+        except requests.RequestException as exc:
+            last_error = "Mất kết nối mạng"
+            logging.warning("Gemini API network error: %s", exc)
+            break
+        except Exception as exc:
+            last_error = str(exc)
             continue
-    return None, model_name
+    return None, last_error or model_name
 
 
 def _clinical_domain_answer(question: str, result: dict | None) -> tuple[str, str]:
@@ -690,6 +772,13 @@ def ask_vet_ai(question: str, history: list[dict], result_context: dict | None =
     # 1. Phát hiện câu hỏi đùa cợt / phi bệnh lý dù có chữ "heo" (VD: "con heo hôm nay nó nhảy cao lắm làm sao bây giờ")
     if is_non_clinical_pig_question(question):
         return build_non_clinical_pig_response(), "PigSkinTech Clinical Guardrail"
+
+    # 1b. Chào đón thân thiện các câu chào hỏi xã giao / cảm ơn cơ bản
+    social_kind = is_social_greeting(question)
+    if social_kind == "greeting":
+        return ensure_disclaimer(GREETING_RESPONSE), "PigSkinTech Vet Assistant"
+    if social_kind == "thanks":
+        return ensure_disclaimer(THANKS_RESPONSE), "PigSkinTech Vet Assistant"
 
     # 2. Kiểm soát phạm vi câu hỏi ngoài lề (Strict Domain Restriction)
     if not is_in_domain(question, result_context):

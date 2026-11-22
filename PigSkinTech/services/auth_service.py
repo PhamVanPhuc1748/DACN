@@ -4,7 +4,9 @@ import csv
 import hashlib
 import html
 import inspect
+from io import BytesIO
 import os
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 import urllib.parse
@@ -31,7 +33,16 @@ import requests
 from services.config_store import read_settings, save_settings
 from services.inference import model_ready
 from services.project_data import active_run, display_class, get_class_info, load_classes_config
-from services.store import _hash_password, conn, initialize, recent
+from services.store import (
+    _hash_password,
+    conn,
+    get_farm_outbreak_alerts,
+    hash_password,
+    initialize,
+    is_legacy_sha256_hash,
+    recent,
+    verify_password,
+)
 from theme import (
     BG_CARD,
     BG_MAIN,
@@ -303,7 +314,7 @@ def apply_theme_text_contrast(root, background=None, palette=None):
             else:
                 control.color = fix_color(getattr(control, "color", None))
                 if isinstance(control, (ft.TextField, ft.Dropdown)):
-                    for name in ("label_style", "hint_style"):
+                    for name in ("label_style", "hint_style", "text_style"):
                         style = getattr(control, name, None)
                         if style is not None:
                             style.color = fix_color(getattr(style, "color", None))
@@ -667,6 +678,8 @@ def save_session_user(page: ft.Page, user: dict):
         "email": user["email"],
         "full_name": user["full_name"],
         "avatar_url": user.get("avatar_url", ""),
+        "phone": user.get("phone") or "",
+        "farm_name": user.get("farm_name") or "",
         "role": user["role"],
         "auth_provider": user.get("auth_provider", "google"),
         "google_sub": user.get("google_sub", ""),
@@ -691,6 +704,8 @@ def get_session_user(page: ft.Page) -> dict | None:
             "email": row["email"],
             "full_name": row["full_name"],
             "avatar_url": row["avatar_url"],
+            "phone": row.get("phone") or "",
+            "farm_name": row.get("farm_name") or "",
             "role": row["role"],
             "auth_provider": row["auth_provider"],
             "google_sub": row["google_sub"],
@@ -701,7 +716,12 @@ def get_session_user(page: ft.Page) -> dict | None:
 
 
 def logout_user(page: ft.Page):
+    from services.chatbot_service import clear_chat_refreshers
+
     mode = session_get(page, "theme_mode")
+    clear_chat_refreshers(page)
+    if isinstance(getattr(page, "data", None), dict):
+        page.data.clear()
     session_clear(page)
     if mode:
         session_set(page, "theme_mode", mode)
@@ -794,24 +814,29 @@ def fetch_google_userinfo(access_token: str) -> dict:
 
 
 def authenticate_local(identifier: str, password: str) -> dict:
-    """Authenticate by email or username and password."""
+    """Authenticate by email or username and password (PBKDF2-HMAC-SHA256 with automatic legacy SHA-256 upgrade)."""
     initialize()
     ident = (identifier or "").strip().lower()
     pw = (password or "").strip()
     if not ident or not pw:
         raise ValueError("Vui lòng nhập đầy đủ Email/Username và Mật khẩu.")
-    pw_hash = _hash_password(pw)
     with conn() as c:
         row = c.execute(
             """SELECT * FROM users
-            WHERE (LOWER(email)=? OR LOWER(username)=?) AND password_hash=?""",
-            (ident, ident, pw_hash),
+            WHERE LOWER(email)=? OR LOWER(username)=?""",
+            (ident, ident),
         ).fetchone()
-    if not row:
-        raise ValueError("Thông tin đăng nhập không chính xác (Mật khẩu mặc định tài khoản mẫu: 123456).")
-    if int(row["is_active"]) == 0:
-        raise ValueError("Tài khoản này đã bị Quản trị viên khóa.")
-    return dict(row)
+        if not row or not verify_password(pw, row["password_hash"] or ""):
+            raise ValueError("Thông tin đăng nhập không chính xác (Mật khẩu mặc định tài khoản mẫu: 123456).")
+        if int(row["is_active"]) == 0:
+            raise ValueError("Tài khoản này đã bị Quản trị viên khóa.")
+        user_dict = dict(row)
+        # Tự động nâng cấp hash SHA-256 cũ lên PBKDF2-HMAC-SHA256 có salt ngẫu nhiên ngay khi đăng nhập thành công
+        if is_legacy_sha256_hash(user_dict.get("password_hash") or ""):
+            upgraded_hash = hash_password(pw)
+            c.execute("UPDATE users SET password_hash=? WHERE id=?", (upgraded_hash, user_dict["id"]))
+            user_dict["password_hash"] = upgraded_hash
+    return user_dict
 
 
 def authenticate_google(
@@ -876,6 +901,26 @@ def authenticate_google(
 
 class _ReusableHTTPServer(HTTPServer):
     allow_reuse_address = True
+
+
+_ACTIVE_OAUTH_LOCK = threading.Lock()
+_ACTIVE_OAUTH_SERVER: _ReusableHTTPServer | None = None
+_ACTIVE_OAUTH_STOP: threading.Event | None = None
+
+
+def cancel_active_oauth_server() -> None:
+    """Safely release port 8765 if a previous Google OAuth callback listener is still waiting."""
+    global _ACTIVE_OAUTH_SERVER, _ACTIVE_OAUTH_STOP
+    with _ACTIVE_OAUTH_LOCK:
+        if _ACTIVE_OAUTH_STOP is not None:
+            _ACTIVE_OAUTH_STOP.set()
+            _ACTIVE_OAUTH_STOP = None
+        if _ACTIVE_OAUTH_SERVER is not None:
+            try:
+                _ACTIVE_OAUTH_SERVER.server_close()
+            except Exception:
+                pass
+            _ACTIVE_OAUTH_SERVER = None
 
 
 def run_google_oauth_desktop_flow(timeout: int = 120) -> dict:
@@ -950,17 +995,25 @@ def run_google_oauth_desktop_flow(timeout: int = 120) -> dict:
             self.wfile.write(body_bytes)
             done_event.set()
 
+    cancel_active_oauth_server()
     try:
         server = _ReusableHTTPServer((GOOGLE_CALLBACK_HOST, GOOGLE_CALLBACK_PORT), _OAuthCallbackHandler)
     except OSError as exc:
         return {"ok": False, "error": f"Không thể mở cổng callback {redirect_uri}: {exc}"}
 
     server.timeout = 1.0
+    with _ACTIVE_OAUTH_LOCK:
+        global _ACTIVE_OAUTH_SERVER, _ACTIVE_OAUTH_STOP
+        _ACTIVE_OAUTH_SERVER = server
+        _ACTIVE_OAUTH_STOP = done_event
 
     def _serve():
         deadline = time.time() + timeout
         while not done_event.is_set() and time.time() < deadline:
-            server.handle_request()
+            try:
+                server.handle_request()
+            except OSError:
+                break
         try:
             server.server_close()
         except Exception:
@@ -971,15 +1024,14 @@ def run_google_oauth_desktop_flow(timeout: int = 120) -> dict:
     webbrowser.open(auth_url)
 
     finished = done_event.wait(timeout=timeout)
-    try:
-        server.server_close()
-    except Exception:
-        pass
+    cancel_active_oauth_server()
 
     if not finished:
         return {"ok": False, "error": "Hết thời gian chờ đăng nhập Google trên trình duyệt (120 giây)."}
     if "error" in callback_data:
         return {"ok": False, "error": f"Google OAuth trả về lỗi: {callback_data['error']}"}
+    if callback_data.get("state") != state_token:
+        return {"ok": False, "error": "Phiên xác thực Google OAuth không hợp lệ (sai CSRF state token)."}
 
     code = callback_data.get("code", "").strip()
     if not code:
@@ -1192,14 +1244,21 @@ async def pick_image_files(picker: ft.FilePicker, allow_multiple: bool, on_picke
         )
 
 
-def generate_lesion_heatmap(image_path: str) -> str:
+def generate_lesion_heatmap(image_path: str, run_name: str | None = None) -> str:
     """
-    Generate an AI Lesion Contrast & Thermal Heatmap overlay from the original pig skin image
-    using PIL, save to PigSkinTech/case_images/heatmap_cache/, and return its path.
+    Generate an Explainable AI Grad-CAM / Saliency Heatmap overlay from the active PyTorch
+    MobileNetV2 / EfficientNet-B0 feature map (falling back to PIL erythema contrast if needed).
     """
     src_path = Path(image_path or "")
     if not src_path.is_file():
         return str(image_path or "")
+
+    try:
+        from services.inference_service import generate_gradcam_heatmap
+
+        return generate_gradcam_heatmap(src_path, run_name=run_name)
+    except Exception:
+        pass
 
     cache_dir = Path(__file__).resolve().parent.parent / "case_images" / "heatmap_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1208,68 +1267,87 @@ def generate_lesion_heatmap(image_path: str) -> str:
     try:
         with Image.open(src_path) as raw:
             rgb = raw.convert("RGB")
-            w, h = rgb.size
-            contrast_img = ImageEnhance.Contrast(rgb).enhance(2.05)
-            contrast_img = ImageEnhance.Sharpness(contrast_img).enhance(1.85)
-
+            contrast_img = ImageEnhance.Sharpness(ImageEnhance.Contrast(rgb).enhance(2.05)).enhance(1.85)
             r_ch, g_ch, b_ch = rgb.split()
-            # Erythema / inflammation index emphasizing reddish & warm skin lesions (C-level PIL LUTs)
             r_lut = r_ch.point(lambda v: min(255, int(v * 1.45) + 60))
             g_lut = g_ch.point(lambda v: int(v * 0.55))
             b_lut = b_ch.point(lambda v: int(v * 0.45))
-            erythema = ImageChops.subtract(ImageChops.subtract(r_lut, g_lut), b_lut)
-            erythema = ImageOps.autocontrast(erythema, cutoff=2)
-
-            thermal = ImageOps.colorize(
-                erythema,
-                black="#0F172A",
-                mid="#F59E0B",
-                white="#EF4444",
-            )
+            erythema = ImageOps.autocontrast(ImageChops.subtract(ImageChops.subtract(r_lut, g_lut), b_lut), cutoff=2)
+            thermal = ImageOps.colorize(erythema, black="#0F172A", mid="#F59E0B", white="#EF4444")
             blended = Image.blend(contrast_img, thermal, alpha=0.46)
-
-            draw = ImageDraw.Draw(blended)
-            pad_x, pad_y = int(w * 0.14), int(h * 0.14)
-            box = (pad_x, pad_y, w - pad_x, h - pad_y)
-            corner = max(18, min(w, h) // 10)
-            col = (52, 211, 153)
-            # Corner brackets for AI lesion focus
-            for x0, y0, dx, dy in (
-                (box[0], box[1], 1, 1),
-                (box[2], box[1], -1, 1),
-                (box[0], box[3], 1, -1),
-                (box[2], box[3], -1, -1),
-            ):
-                draw.line([(x0, y0), (x0 + dx * corner, y0)], fill=col, width=3)
-                draw.line([(x0, y0), (x0, y0 + dy * corner)], fill=col, width=3)
-
             blended.save(out_path, format="JPEG", quality=92)
         return str(out_path.resolve())
     except Exception:
         return str(src_path.resolve())
 
 
-def build_outbreak_alert_banner(records: list[dict], page: ft.Page | None = None) -> ft.Control | None:
-    """
-    Check the 10 most recent inspections: if >= 2 belong to 'Cao' or 'Khẩn cấp' danger level,
-    return an Epidemic Outbreak Warning Banner.
-    """
-    recent_10 = (records or [])[:10]
-    urgent_cases = []
-    for r in recent_10:
-        cls_code = r.get("expert_label") or r.get("predicted_class") or ""
-        info = get_class_info(cls_code)
-        danger = info.get("danger_level", "Trung bình")
-        if danger in ("Cao", "Khẩn cấp"):
-            urgent_cases.append((r, display_class(cls_code), danger))
+def _extract_farm_outbreaks_from_records(records: list[dict], min_cases: int = 3) -> list[dict]:
+    farms: dict[str, dict] = {}
+    for r in records or []:
+        cls_code = str(r.get("expert_label") or r.get("predicted_class") or "").strip()
+        info = get_class_info(cls_code) if cls_code else {}
+        danger = str(info.get("danger_level") or r.get("danger_level") or "").strip()
+        if danger not in ("Cao", "Khẩn cấp"):
+            continue
+        raw_farm = str(r.get("farm_name") or "").strip()
+        if not raw_farm:
+            continue
+        fkey = raw_farm.lower()
+        bucket = farms.setdefault(
+            fkey,
+            {
+                "farm_name": raw_farm,
+                "count": 0,
+                "diseases": [],
+                "latest_at": str(r.get("created_at") or ""),
+            },
+        )
+        bucket["count"] += 1
+        d_name = display_class(cls_code) if cls_code else "Bệnh nguy hiểm cao"
+        if d_name not in bucket["diseases"]:
+            bucket["diseases"].append(d_name)
+    alerts = [b for b in farms.values() if b["count"] >= max(1, int(min_cases))]
+    alerts.sort(key=lambda item: (-item["count"], item["farm_name"]))
+    return alerts
 
-    if len(urgent_cases) < 2:
+
+def build_outbreak_alert_banner(
+    records: list[dict] | None = None,
+    page: ft.Page | None = None,
+    min_farm_cases: int = 3,
+) -> ft.Control | None:
+    """
+    Cảnh báo Dịch tễ Sớm (Outbreak Warning Banner):
+    Kiểm tra bảng dbo.Inspections (hoặc danh sách records truyền vào): nếu có >= 3 ca mức độ
+    nguy hiểm 'Cao' / 'Khẩn cấp' tại cùng một trại -> hiển thị Banner cảnh báo an toàn sinh học.
+    """
+    farm_alerts = (
+        get_farm_outbreak_alerts(min_cases=min_farm_cases)
+        if records is None
+        else _extract_farm_outbreaks_from_records(records, min_cases=min_farm_cases)
+    )
+    if not farm_alerts:
         return None
 
     pal = get_theme_palette(page)
     dark = pal["IS_DARK"]
-    diseases_set = list(dict.fromkeys(d_name for _, d_name, _ in urgent_cases))
-    farms_set = list(dict.fromkeys((r.get("farm_name") or "Khu chuồng") for r, _, _ in urgent_cases))
+    top_farm = farm_alerts[0]
+    total_flagged = sum(int(a["count"]) for a in farm_alerts)
+    farm_summary = ", ".join(f"{a['farm_name']} ({a['count']} ca)" for a in farm_alerts[:3])
+    if len(farm_alerts) > 3:
+        farm_summary += f" và +{len(farm_alerts) - 3} trại khác"
+
+    all_diseases: list[str] = []
+    for a in farm_alerts:
+        for d in a.get("diseases") or []:
+            if d not in all_diseases:
+                all_diseases.append(d)
+
+    headline = (
+        f"🚨 CẢNH BÁO DỊCH TỄ SỚM: Trại '{top_farm['farm_name']}' ghi nhận {top_farm['count']} ca nguy hiểm Cao"
+        if len(farm_alerts) == 1
+        else f"🚨 CẢNH BÁO DỊCH TỄ SỚM: Phát hiện {len(farm_alerts)} trang trại có ổ dịch nguy hiểm Cao ({total_flagged} ca)"
+    )
 
     return ft.Container(
         padding=ft.padding.symmetric(horizontal=20, vertical=14),
@@ -1292,7 +1370,7 @@ def build_outbreak_alert_banner(records: list[dict], page: ft.Page | None = None
                         ft.Row(
                             [
                                 ft.Text(
-                                    f"🚨 Cảnh báo Dịch tễ Sớm: Phát hiện {len(urgent_cases)}/10 ca khám gần nhất thuộc nhóm Nguy hiểm cao",
+                                    headline,
                                     size=15,
                                     weight=ft.FontWeight.BOLD,
                                     color="#FCA5A5" if dark else "#991B1B",
@@ -1303,8 +1381,8 @@ def build_outbreak_alert_banner(records: list[dict], page: ft.Page | None = None
                                     padding=ft.padding.symmetric(horizontal=10, vertical=4),
                                     border_radius=12,
                                     content=ft.Text(
-                                        "CẦN CÁCH LY & SÁT TRÙNG",
-                                        size=12.5,
+                                        "AN TOÀN SINH HỌC KHẨN CẤP",
+                                        size=12,
                                         weight=ft.FontWeight.BOLD,
                                         color="#FFFFFF",
                                     ),
@@ -1313,8 +1391,9 @@ def build_outbreak_alert_banner(records: list[dict], page: ft.Page | None = None
                             spacing=8,
                         ),
                         ft.Text(
-                            f"Bệnh lý ghi nhận: {', '.join(diseases_set[:3])} • Khu vực: {', '.join(farms_set[:3])}. "
-                            "Khuyến nghị: Tách đàn cách ly ngay các cá thể nghi nhiễm, phun sát trùng chuồng trại và kiểm tra thân nhiệt toàn đàn.",
+                            f"Khu vực cảnh báo (≥ {min_farm_cases} ca/trại): {farm_summary} • "
+                            f"Bệnh lý ghi nhận: {', '.join(all_diseases[:4])}. "
+                            "Khuyến nghị khẩn: Phong tỏa ô chuồng nghi nhiễm, cách ly tuyệt đối, phun sát trùng toàn trại và thông báo ngay Bác sĩ Thú y.",
                             size=13.5,
                             color="#FECACA" if dark else "#7F1D1D",
                         ),
@@ -1340,56 +1419,450 @@ def _img_to_data_uri(img_path: str | None) -> str:
     return f"data:{mime};base64,{b64}"
 
 
-def _build_inline_svg_barcode(case_id: str) -> str:
-    """Generate a compact deterministic inline SVG QR + Barcode graphic for the veterinary report header."""
-    seed_bytes = hashlib.md5(case_id.encode("utf-8")).digest()
-    bars = []
-    x = 4
-    for idx, b in enumerate(seed_bytes[:14]):
-        w = 2 if (b % 3 == 0) else (3 if (b % 2 == 0) else 1.5)
-        bars.append(f'<rect x="{x:.1f}" y="4" width="{w}" height="24" rx="0.5" fill="#0F172A"/>')
-        x += w + (1.5 if idx % 2 == 0 else 2.0)
+# --- Pure-Python ISO/IEC 18004 QR Code Generator (Byte Mode, ECC Level L, Versions 1..10) ---
+_QR_GF_EXP = [1] * 512
+_QR_GF_LOG = [0] * 256
+for _qr_i in range(1, 255):
+    _qr_v = _QR_GF_EXP[_qr_i - 1] << 1
+    if _qr_v & 0x100:
+        _qr_v ^= 0x11D
+    _QR_GF_EXP[_qr_i] = _qr_v
+    _QR_GF_LOG[_qr_v] = _qr_i
+for _qr_i in range(255, 512):
+    _QR_GF_EXP[_qr_i] = _QR_GF_EXP[_qr_i - 255]
+
+_QR_VERSIONS_L: dict[int, tuple[int, list[tuple[int, int, int]], list[int]]] = {
+    1: (19, [(1, 19, 7)], []),
+    2: (34, [(1, 34, 10)], [6, 18]),
+    3: (55, [(1, 55, 15)], [6, 22]),
+    4: (80, [(1, 80, 20)], [6, 26]),
+    5: (108, [(1, 108, 26)], [6, 30]),
+    6: (136, [(2, 68, 18)], [6, 34]),
+    7: (156, [(2, 78, 20)], [6, 22, 38]),
+    8: (194, [(2, 97, 24)], [6, 24, 42]),
+    9: (232, [(2, 116, 30)], [6, 26, 46]),
+    10: (274, [(2, 68, 18), (2, 69, 18)], [6, 28, 50]),
+}
+
+
+def _qr_gf_mul(a: int, b: int) -> int:
+    return 0 if (a == 0 or b == 0) else _QR_GF_EXP[_QR_GF_LOG[a] + _QR_GF_LOG[b]]
+
+
+def _qr_rs_ec(data: list[int], ec_len: int) -> list[int]:
+    gen = [1]
+    for i in range(ec_len):
+        nxt = [0] * (len(gen) + 1)
+        a_i = _QR_GF_EXP[i]
+        for j, g in enumerate(gen):
+            nxt[j] ^= g
+            nxt[j + 1] ^= _qr_gf_mul(g, a_i)
+        gen = nxt
+    rem = list(data) + [0] * ec_len
+    for i in range(len(data)):
+        factor = rem[i]
+        if factor:
+            for j in range(1, len(gen)):
+                rem[i + j] ^= _qr_gf_mul(gen[j], factor)
+    return rem[len(data):]
+
+
+def _qr_bch(val: int, data_bits: int, total_bits: int, poly: int) -> int:
+    shift = total_bits - data_bits
+    d = val << shift
+    rem = d
+    while rem.bit_length() >= poly.bit_length():
+        rem ^= poly << (rem.bit_length() - poly.bit_length())
+    return d | rem
+
+
+def _encode_qr_matrix(payload: str) -> list[list[int]]:
+    """Encode UTF-8 payload string into a spec-compliant ISO/IEC 18004 QR boolean matrix (ECC-L)."""
+    raw_bytes = (payload or "PIGSKINTECH").encode("utf-8")
+    ver = 10
+    for v_num in range(1, 11):
+        tot_dc = _QR_VERSIONS_L[v_num][0]
+        header_bits = 4 + (8 if v_num <= 9 else 16)
+        max_bytes = (tot_dc * 8 - header_bits) // 8
+        if len(raw_bytes) <= max_bytes:
+            ver = v_num
+            break
+    else:
+        raw_bytes = raw_bytes[:271]
+
+    total_dc, blocks_spec, align_coords = _QR_VERSIONS_L[ver]
+    cc_bits = 8 if ver <= 9 else 16
+
+    bits: list[int] = [0, 1, 0, 0]  # Byte mode indicator
+    for b_idx in range(cc_bits - 1, -1, -1):
+        bits.append((len(raw_bytes) >> b_idx) & 1)
+    for byte_val in raw_bytes:
+        for b_idx in range(7, -1, -1):
+            bits.append((byte_val >> b_idx) & 1)
+
+    max_data_bits = total_dc * 8
+    bits.extend([0] * min(4, max_data_bits - len(bits)))
+    if len(bits) % 8:
+        bits.extend([0] * (8 - (len(bits) % 8)))
+
+    cw = [
+        sum(bits[i + k] << (7 - k) for k in range(8))
+        for i in range(0, len(bits), 8)
+    ]
+    pad_bytes = (0xEC, 0x11)
+    pad_i = 0
+    while len(cw) < total_dc:
+        cw.append(pad_bytes[pad_i % 2])
+        pad_i += 1
+
+    data_blocks: list[list[int]] = []
+    ec_blocks: list[list[int]] = []
+    pos = 0
+    for num_b, d_len, e_len in blocks_spec:
+        for _ in range(num_b):
+            blk = cw[pos : pos + d_len]
+            pos += d_len
+            data_blocks.append(blk)
+            ec_blocks.append(_qr_rs_ec(blk, e_len))
+
+    interleaved: list[int] = []
+    for i in range(max(len(b) for b in data_blocks)):
+        for blk in data_blocks:
+            if i < len(blk):
+                interleaved.append(blk[i])
+    for i in range(max(len(b) for b in ec_blocks)):
+        for blk in ec_blocks:
+            if i < len(blk):
+                interleaved.append(blk[i])
+
+    stream: list[int] = []
+    for byte_val in interleaved:
+        for b_idx in range(7, -1, -1):
+            stream.append((byte_val >> b_idx) & 1)
+
+    n = 17 + 4 * ver
+    mat = [[0] * n for _ in range(n)]
+    is_func = [[False] * n for _ in range(n)]
+
+    def _set_func(r: int, c: int, val: int) -> None:
+        if 0 <= r < n and 0 <= c < n:
+            mat[r][c] = val
+            is_func[r][c] = True
+
+    # 3 Finder patterns + separators
+    for fr, fc in ((0, 0), (0, n - 7), (n - 7, 0)):
+        for dr in range(-1, 8):
+            for dc in range(-1, 8):
+                r, c = fr + dr, fc + dc
+                if 0 <= r < n and 0 <= c < n:
+                    in_finder = 0 <= dr <= 6 and 0 <= dc <= 6
+                    dark = in_finder and (
+                        dr in (0, 6) or dc in (0, 6) or (2 <= dr <= 4 and 2 <= dc <= 4)
+                    )
+                    _set_func(r, c, 1 if dark else 0)
+
+    # Alignment patterns
+    for ar in align_coords:
+        for ac in align_coords:
+            if is_func[ar][ac]:
+                continue
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    dark = max(abs(dr), abs(dc)) != 1
+                    _set_func(ar + dr, ac + dc, 1 if dark else 0)
+
+    # Timing patterns
+    for i in range(8, n - 8):
+        bit = 1 if i % 2 == 0 else 0
+        if not is_func[6][i]:
+            _set_func(6, i, bit)
+        if not is_func[i][6]:
+            _set_func(i, 6, bit)
+
+    # Reserve format info + fixed dark module
+    for i in range(9):
+        if not is_func[8][i]:
+            _set_func(8, i, 0)
+        if not is_func[i][8]:
+            _set_func(i, 8, 0)
+    for i in range(n - 8, n):
+        _set_func(8, i, 0)
+        _set_func(i, 8, 0)
+    _set_func(4 * ver + 9, 8, 1)
+
+    # Version info for V7..V10
+    if ver >= 7:
+        v_bits = _qr_bch(ver, 6, 18, 0x1F25)
+        for i in range(18):
+            bit = (v_bits >> i) & 1
+            r = i // 3
+            c = n - 11 + (i % 3)
+            _set_func(r, c, bit)
+            _set_func(c, r, bit)
+
+    # Place data bits in 2-column zigzag
+    bit_i = 0
+    upward = True
+    col = n - 1
+    while col > 0:
+        if col == 6:
+            col -= 1
+        row_iter = range(n - 1, -1, -1) if upward else range(n)
+        for r in row_iter:
+            for dx in (0, 1):
+                c = col - dx
+                if not is_func[r][c]:
+                    mat[r][c] = stream[bit_i] if bit_i < len(stream) else 0
+                    bit_i += 1
+        upward = not upward
+        col -= 2
+
+    def _mask_fn(m_id: int, r: int, c: int) -> bool:
+        if m_id == 0:
+            return (r + c) % 2 == 0
+        if m_id == 1:
+            return r % 2 == 0
+        if m_id == 2:
+            return c % 3 == 0
+        if m_id == 3:
+            return (r + c) % 3 == 0
+        if m_id == 4:
+            return (r // 2 + c // 3) % 2 == 0
+        if m_id == 5:
+            return (r * c) % 2 + (r * c) % 3 == 0
+        if m_id == 6:
+            return ((r * c) % 2 + (r * c) % 3) % 2 == 0
+        return ((r + c) % 2 + (r * c) % 3) % 2 == 0
+
+    def _apply_format(grid: list[list[int]], mask_id: int) -> None:
+        fmt = _qr_bch((0b01 << 3) | mask_id, 5, 15, 0x537) ^ 0x5412
+        # Copy 1 around top-left finder
+        coords1 = (
+            [(8, c) for c in (0, 1, 2, 3, 4, 5, 7, 8)]
+            + [(r, 8) for r in (7, 5, 4, 3, 2, 1, 0)]
+        )
+        # Copy 2 bottom-left & top-right
+        coords2 = (
+            [(r, 8) for r in range(n - 1, n - 8, -1)]
+            + [(8, c) for c in range(n - 8, n)]
+        )
+        for idx, ((r1, c1), (r2, c2)) in enumerate(zip(coords1, coords2)):
+            bit = (fmt >> (14 - idx)) & 1
+            grid[r1][c1] = bit
+            grid[r2][c2] = bit
+
+    def _penalty(grid: list[list[int]]) -> int:
+        pen = 0
+        for r in range(n):
+            run = 1
+            for c in range(1, n):
+                if grid[r][c] == grid[r][c - 1]:
+                    run += 1
+                    if run == 5:
+                        pen += 3
+                    elif run > 5:
+                        pen += 1
+                else:
+                    run = 1
+        for c in range(n):
+            run = 1
+            for r in range(1, n):
+                if grid[r][c] == grid[r - 1][c]:
+                    run += 1
+                    if run == 5:
+                        pen += 3
+                    elif run > 5:
+                        pen += 1
+                else:
+                    run = 1
+        for r in range(n - 1):
+            for c in range(n - 1):
+                s = grid[r][c] + grid[r][c + 1] + grid[r + 1][c] + grid[r + 1][c + 1]
+                if s in (0, 4):
+                    pen += 3
+        dark_cnt = sum(sum(row) for row in grid)
+        pen += abs(dark_cnt * 100 // (n * n) - 50) // 5 * 10
+        return pen
+
+    best_grid = None
+    best_pen = 10**9
+    for m_id in range(8):
+        cand = [
+            [mat[r][c] ^ (1 if (not is_func[r][c] and _mask_fn(m_id, r, c)) else 0) for c in range(n)]
+            for r in range(n)
+        ]
+        _apply_format(cand, m_id)
+        p_val = _penalty(cand)
+        if p_val < best_pen:
+            best_pen = p_val
+            best_grid = cand
+    return best_grid or mat
+
+
+def _build_inline_svg_qr(payload: str, size: int = 92) -> str:
+    """Render a scannable ISO/IEC 18004 QR Code as a crisp inline SVG with 4-module quiet zone."""
+    matrix = _encode_qr_matrix(payload)
+    n = len(matrix)
+    quiet = 4
+    total = n + quiet * 2
+    path_parts = [
+        f"M{c + quiet} {r + quiet}h1v1h-1z"
+        for r in range(n)
+        for c in range(n)
+        if matrix[r][c]
+    ]
     return (
-        f'<svg width="{int(x + 4)}" height="32" viewBox="0 0 {int(x + 4)} 32" '
-        f'xmlns="http://www.w3.org/2000/svg" style="display:block;background:#F8FAFC;border:1px solid #CBD5E1;border-radius:6px;">'
-        + "".join(bars)
-        + "</svg>"
+        f'<svg width="{size}" height="{size}" viewBox="0 0 {total} {total}" '
+        f'shape-rendering="crispEdges" xmlns="http://www.w3.org/2000/svg" '
+        f'role="img" aria-label="QR xac thuc ho so" '
+        f'style="display:block;background:#FFFFFF;border:1.5px solid #059669;border-radius:8px;">'
+        f'<rect width="{total}" height="{total}" fill="#FFFFFF"/>'
+        f'<path d="{"".join(path_parts)}" fill="#0F172A"/>'
+        f"</svg>"
     )
 
 
-def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = True) -> str:
-    """
-    Export a styled 1-Page A4 Veterinary Clinical Diagnostic Report HTML file into PigSkinTech/exports/
-    and open it in the browser for instant viewing or Ctrl+P PDF printing (without file:/// URLs).
-    """
-    exports_dir = Path(__file__).resolve().parent.parent / "exports"
-    exports_dir.mkdir(parents=True, exist_ok=True)
+def _build_inline_svg_barcode(case_id: str) -> str:
+    """Backward-compatible wrapper returning a scannable inline SVG QR code."""
+    return _build_inline_svg_qr(f"PIGSKINTECH|{case_id}", size=84)
 
+
+def _strip_vietnamese_accents(text: str) -> str:
+    """Convert Vietnamese text to clean ASCII for compact, 100%-scannable QR payloads."""
+    raw = str(text or "").replace("đ", "d").replace("Đ", "D")
+    decomposed = unicodedata.normalize("NFD", raw)
+    stripped = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return " ".join(stripped.split())
+
+
+def _default_downloads_dir() -> Path:
+    """Return user's ~/Downloads directory (fallback to PigSkinTech/exports if unavailable)."""
+    downloads = Path(os.path.join(os.path.expanduser("~"), "Downloads"))
+    try:
+        downloads.mkdir(parents=True, exist_ok=True)
+        if downloads.is_dir():
+            return downloads
+    except OSError:
+        pass
+    fallback = Path(__file__).resolve().parent.parent / "exports"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
+def build_qr_payload(case_data: dict) -> str:
+    """
+    Build a concise, high-readability QR payload (< 180 chars) so iPhone, Android,
+    Zalo, and OpenCV cameras decode it instantaneously.
+    """
+    case_id = _strip_vietnamese_accents(
+        str(case_data.get("case_id") or f"PS-{int(case_data.get('record_id') or 1):06d}")
+    )[:20]
+    animal_id = _strip_vietnamese_accents(str(case_data.get("animal_id") or "PIG-101"))[:20]
+    raw_disease = str(
+        case_data.get("disease_name")
+        or (display_class(case_data.get("predicted_class")) if case_data.get("predicted_class") else "Chua xac dinh")
+    )
+    disease_ascii = _strip_vietnamese_accents(raw_disease)[:34]
+    confidence_pct = float(case_data.get("confidence") or 0.0) * 100.0
+
+    rev_status = str(case_data.get("review_status") or "").strip().lower()
+    reviewed_by = str(case_data.get("reviewed_by") or "").strip()
+    is_reviewed = rev_status == "reviewed" or bool(
+        case_data.get("expert_label")
+        and reviewed_by
+        and "pigskin ai" not in reviewed_by.lower()
+    )
+    status_str = "Da tham dinh" if is_reviewed else "Cho tham dinh"
+
+    raw_date = str(case_data.get("created_at") or datetime.now().strftime("%Y-%m-%d"))
+    date_str = _strip_vietnamese_accents(raw_date)[:10]
+
+    payload = (
+        "PIGSKINTECH - HO SO BENH AN\n"
+        f"Ma ca: {case_id}\n"
+        f"Ma heo: {animal_id}\n"
+        f"Chan doan: {disease_ascii}\n"
+        f"Do tin cay: {confidence_pct:.1f}%\n"
+        f"Trang thai: {status_str}\n"
+        f"Ngay: {date_str}"
+    )
+    if len(payload) >= 180:
+        over = len(payload) - 175
+        disease_ascii = disease_ascii[: max(8, len(disease_ascii) - over)]
+        payload = (
+            "PIGSKINTECH - HO SO BENH AN\n"
+            f"Ma ca: {case_id}\n"
+            f"Ma heo: {animal_id}\n"
+            f"Chan doan: {disease_ascii}\n"
+            f"Do tin cay: {confidence_pct:.1f}%\n"
+            f"Trang thai: {status_str}\n"
+            f"Ngay: {date_str}"
+        )
+    return payload
+
+
+def generate_qr_png_base64(payload: str) -> str:
+    """
+    Generate a high-contrast PNG QR code encoded as base64 using the standard `qrcode` + `Pillow`
+    libraries (`ERROR_CORRECT_M`, `box_size=8`, `border=4`, black modules on pure white background).
+    """
+    try:
+        import qrcode
+    except ImportError as exc:
+        raise RuntimeError(
+            "Thiếu thư viện 'qrcode[pil]'. Vui lòng cài đặt bằng lệnh: pip install \"qrcode[pil]\""
+        ) from exc
+
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=8,
+        border=4,
+    )
+    qr.add_data(payload)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def build_vet_report_html_doc(case_data: dict) -> tuple[str, str, str]:
+    """Build the 1-Page A4 Veterinary Report HTML document, returning (html_doc, case_id, qr_payload)."""
     case_id = str(case_data.get("case_id") or f"PS-{int(case_data.get('record_id') or 1):06d}")
-    ts_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_file = exports_dir / f"PhieuKham_{case_id}_{ts_slug}.html"
-
     img_path = case_data.get("image_path") or ""
     orig_uri = _img_to_data_uri(img_path)
     heat_path = generate_lesion_heatmap(img_path) if img_path else ""
     heat_uri = _img_to_data_uri(heat_path)
 
-    raw_disease = case_data.get("disease_name") or (
-        display_class(case_data.get("predicted_class")) if case_data.get("predicted_class") else "Chưa xác định"
+    raw_disease = str(
+        case_data.get("disease_name")
+        or (display_class(case_data.get("predicted_class")) if case_data.get("predicted_class") else "Chưa xác định")
     )
-    disease_name = html.escape(str(raw_disease))
+    raw_animal_id = str(case_data.get("animal_id") or "PIG-101")
+    raw_treatment = str(case_data.get("treatment_guide") or "Tham khảo phác đồ Bác sĩ Thú y.")
+    disease_name = html.escape(raw_disease)
     danger_level = html.escape(str(case_data.get("danger_level") or "Trung bình"))
     confidence_pct = float(case_data.get("confidence") or 0.0) * 100.0
-    animal_id = html.escape(str(case_data.get("animal_id") or "PIG-101"))
+    animal_id = html.escape(raw_animal_id)
     farm_name = html.escape(str(case_data.get("farm_name") or "Trang trại chăn nuôi"))
     user_name = html.escape(str(case_data.get("user_name") or "Người chăn nuôi"))
     symptoms = html.escape(str(case_data.get("symptoms") or "Không có ghi chú triệu chứng"))
     isolation = html.escape(str(case_data.get("isolation_guide") or "Cách ly cá thể nghi nhiễm và sát trùng chuồng trại."))
-    treatment = html.escape(str(case_data.get("treatment_guide") or "Tham khảo phác đồ Bác sĩ Thú y."))
+    treatment = html.escape(raw_treatment)
     expert_note = html.escape(str(case_data.get("expert_note") or "Đang chờ hoặc theo phác đồ khuyến nghị chuẩn."))
     reviewed_by = html.escape(str(case_data.get("reviewed_by") or "Hệ thống Trí tuệ nhân tạo PigSkin AI & BS. Thú y"))
     created_at = html.escape(str(case_data.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    svg_barcode = _build_inline_svg_barcode(case_id)
+
+    qr_payload = build_qr_payload(case_data)
+    verify_hash = hashlib.sha256(qr_payload.encode("utf-8")).hexdigest()[:8].upper()
+    qr_b64 = generate_qr_png_base64(qr_payload)
+    qr_img_html = (
+        f'<img id="pigskin-qr-img" src="data:image/png;base64,{qr_b64}" '
+        f'alt="QR xac thuc ho so {html.escape(case_id)}" '
+        f'style="width: 150px; height: 150px; image-rendering: pixelated; '
+        f'background: #ffffff; padding: 6px; border: 1px solid #e2e8f0; border-radius: 6px; display: block;" />'
+    )
 
     raw_scores = case_data.get("scores") or []
     if isinstance(raw_scores, dict):
@@ -1407,19 +1880,19 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
         pct = float(sc.get("confidence") or 0.0) * 100.0
         bar_col = "#059669" if idx == 1 else ("#0284C7" if idx == 2 else "#D97706")
         scores_html += f"""
-        <div style="margin-bottom:6px;">
-          <div style="display:flex;justify-content:space-between;font-size:12.5px;font-weight:600;margin-bottom:2px;">
+        <div style="margin-bottom:5px;">
+          <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:600;margin-bottom:2px;">
             <span>#{idx}. {lbl}</span>
             <span style="color:{bar_col};">{pct:.1f}%</span>
           </div>
-          <div style="height:7px;background:#E2E8F0;border-radius:4px;overflow:hidden;">
+          <div style="height:6px;background:#E2E8F0;border-radius:4px;overflow:hidden;">
             <div style="width:{min(100.0, max(2.0, pct)):.1f}%;height:100%;background:{bar_col};"></div>
           </div>
         </div>
         """
     if not scores_html:
         scores_html = f"""
-        <div style="font-size:13px;font-weight:600;color:#059669;">
+        <div style="font-size:12.5px;font-weight:600;color:#059669;">
           Kết quả dự đoán chính: {disease_name} ({confidence_pct:.1f}%)
         </div>
         """
@@ -1427,19 +1900,19 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
     if orig_uri:
         images_html = f"""
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-          <div style="border:1px solid #E2E8F0;border-radius:10px;padding:8px;text-align:center;background:#F8FAFC;">
-            <div style="font-weight:700;font-size:11.5px;color:#475569;margin-bottom:5px;">Ảnh gốc tại chuồng</div>
-            <img src="{orig_uri}" style="width:100%;height:135px;object-fit:cover;border-radius:8px;display:block;" />
+          <div style="border:1px solid #E2E8F0;border-radius:10px;padding:7px;text-align:center;background:#F8FAFC;">
+            <div style="font-weight:700;font-size:11.5px;color:#475569;margin-bottom:4px;">Ảnh gốc tại chuồng</div>
+            <img src="{orig_uri}" style="width:100%;height:122px;object-fit:cover;border-radius:8px;display:block;" />
           </div>
-          <div style="border:1px solid #E2E8F0;border-radius:10px;padding:8px;text-align:center;background:#F8FAFC;">
-            <div style="font-weight:700;font-size:11.5px;color:#059669;margin-bottom:5px;">Ảnh soi vùng tổn thương AI</div>
-            <img src="{heat_uri or orig_uri}" style="width:100%;height:135px;object-fit:cover;border-radius:8px;display:block;" />
+          <div style="border:1px solid #E2E8F0;border-radius:10px;padding:7px;text-align:center;background:#F8FAFC;">
+            <div style="font-weight:700;font-size:11.5px;color:#059669;margin-bottom:4px;">Ảnh soi vùng tổn thương AI</div>
+            <img src="{heat_uri or orig_uri}" style="width:100%;height:122px;object-fit:cover;border-radius:8px;display:block;" />
           </div>
         </div>
         """
     else:
         images_html = """
-        <div style="border:1px dashed #CBD5E1;border-radius:10px;height:155px;display:flex;align-items:center;justify-content:center;color:#64748B;font-size:12px;">
+        <div style="border:1px dashed #CBD5E1;border-radius:10px;height:142px;display:flex;align-items:center;justify-content:center;color:#64748B;font-size:12px;">
           Không có hình ảnh đính kèm
         </div>
         """
@@ -1452,7 +1925,7 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
   <style>
     @page {{
         size: A4 portrait;
-        margin: 0mm !important; /* CỰC KỲ QUAN TRỌNG: Ép margin = 0 ở @page để trình duyệt Chrome/Edge tự động ẩn hoàn toàn đường dẫn ổ đĩa file:///C:/... ở chân trang và ngày giờ ở đầu trang */
+        margin: 0mm !important;
     }}
     html, body {{
         width: 210mm;
@@ -1471,7 +1944,7 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
         width: 210mm;
         height: 296mm;
         max-height: 296mm;
-        padding: 12mm 14mm; /* Dùng padding của khung .a4-sheet thay cho margin của @page */
+        padding: 10mm 13mm;
         page-break-after: avoid;
         page-break-inside: avoid;
         display: flex;
@@ -1485,6 +1958,7 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
         align-items: center;
         border-bottom: 2px solid #10B981;
         padding-bottom: 10px;
+        gap: 12px;
     }}
     .brand-row {{
         display: flex;
@@ -1492,8 +1966,8 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
         gap: 10px;
     }}
     .logo-box {{
-        width: 38px;
-        height: 38px;
+        width: 40px;
+        height: 40px;
         border-radius: 10px;
         background: linear-gradient(135deg, #10B981, #059669);
         color: #FFFFFF;
@@ -1501,7 +1975,8 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
         align-items: center;
         justify-content: center;
         font-weight: 800;
-        font-size: 18px;
+        font-size: 19px;
+        flex-shrink: 0;
     }}
     .info-image-row {{
         display: grid;
@@ -1513,21 +1988,21 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
         background: #F8FAFC;
         border: 1px solid #E2E8F0;
         border-radius: 10px;
-        padding: 10px 12px;
-        font-size: 12.5px;
+        padding: 9px 12px;
+        font-size: 12px;
         display: flex;
         flex-direction: column;
         justify-content: space-between;
     }}
     .info-line {{
-        margin-bottom: 5px;
-        line-height: 1.4;
+        margin-bottom: 4px;
+        line-height: 1.38;
     }}
     .ai-box {{
         background: #ECFDF5;
         border: 1px solid #A7F3D0;
         border-radius: 10px;
-        padding: 10px 14px;
+        padding: 9px 14px;
     }}
     .protocol-grid {{
         display: grid;
@@ -1537,14 +2012,14 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
     .protocol-card {{
         border: 1px solid #E2E8F0;
         border-radius: 10px;
-        padding: 10px 12px;
+        padding: 9px 12px;
         background: #FFFFFF;
     }}
     .footer-sign {{
         border: 1px solid #CBD5E1;
         background: #F8FAFC;
         border-radius: 10px;
-        padding: 10px 14px;
+        padding: 9px 14px;
         display: flex;
         justify-content: space-between;
         align-items: center;
@@ -1560,12 +2035,15 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
         background: #059669;
         color: #FFFFFF;
         border: none;
-        padding: 9px 16px;
-        border-radius: 20px;
+        padding: 10px 18px;
+        border-radius: 22px;
         font-weight: 700;
-        font-size: 13px;
+        font-size: 13.5px;
         cursor: pointer;
-        box-shadow: 0 4px 14px rgba(5, 150, 105, 0.3);
+        box-shadow: 0 4px 14px rgba(5, 150, 105, 0.35);
+    }}
+    .print-btn:hover {{
+        background: #047857;
     }}
     @media print {{
         .no-print {{ display: none !important; }}
@@ -1574,25 +2052,31 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
 </head>
 <body>
   <div class="no-print print-toolbar">
-    <button class="print-btn" onclick="window.print()">🖨️ In Phiếu A4 / Lưu PDF (Ctrl + P)</button>
+    <button class="print-btn" onclick="window.print()">🖨️ In phiếu / Lưu thành PDF</button>
   </div>
 
   <div class="a4-sheet">
-    <!-- 1. HEADER -->
+    <!-- 1. HEADER + MA QR QUET NGAY TREN IPHONE/ANDROID/ZALO -->
     <div class="header-bar">
-      <div class="brand-row">
-        <div class="logo-box">🐖</div>
-        <div>
-          <div style="font-size:11px;font-weight:800;color:#059669;letter-spacing:0.8px;">HỆ THỐNG CHẨN ĐOÁN THÚ Y THÔNG MINH</div>
-          <div style="font-size:16px;font-weight:800;color:#0F172A;margin-top:2px;">PIGSKINTECH AI — PHIẾU KẾT QUẢ CHẨN ĐOÁN THÚ Y</div>
+      <div style="flex:1;">
+        <div class="brand-row">
+          <div class="logo-box">🐖</div>
+          <div>
+            <div style="font-size:11px;font-weight:800;color:#059669;letter-spacing:0.8px;">HỆ THỐNG CHẨN ĐOÁN THÚ Y THÔNG MINH</div>
+            <div style="font-size:16px;font-weight:800;color:#0F172A;margin-top:2px;">PIGSKINTECH AI — PHIẾU KẾT QUẢ CHẨN ĐOÁN THÚ Y</div>
+          </div>
+        </div>
+        <div style="margin-top:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+          <span style="font-size:12.5px;font-weight:800;color:#059669;">Mã hồ sơ: {case_id}</span>
+          <span style="font-size:11.5px;color:#64748B;">Thời gian: {created_at}</span>
+          <span style="display:inline-block;padding:2px 8px;background:#ECFDF5;border:1px solid #10B981;border-radius:10px;font-size:10.5px;font-weight:800;color:#047857;">
+            ✓ TEM SỐ #{verify_hash}
+          </span>
         </div>
       </div>
-      <div style="display:flex;align-items:center;gap:10px;text-align:right;">
-        <div>
-          <div style="font-size:12.5px;font-weight:800;color:#059669;">Mã hồ sơ: {case_id}</div>
-          <div style="font-size:11px;color:#64748B;margin-top:2px;">Thời gian: {created_at}</div>
-        </div>
-        {svg_barcode}
+      <div style="text-align:center;flex-shrink:0;" data-qr-payload="{html.escape(qr_payload, quote=True)}">
+        {qr_img_html}
+        <div style="font-size:10px;color:#475569;font-weight:600;margin-top:3px;">Quét QR xem nhanh hồ sơ</div>
       </div>
     </div>
 
@@ -1600,7 +2084,7 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
     <div class="info-image-row">
       <div class="info-table">
         <div>
-          <div style="font-size:12px;font-weight:800;color:#0F172A;text-transform:uppercase;margin-bottom:6px;border-bottom:1px solid #E2E8F0;padding-bottom:4px;">
+          <div style="font-size:11.5px;font-weight:800;color:#0F172A;text-transform:uppercase;margin-bottom:5px;border-bottom:1px solid #E2E8F0;padding-bottom:4px;">
             📋 Thông tin Hồ sơ &amp; Lâm sàng
           </div>
           <div class="info-line"><strong>Chủ trại / Người gửi:</strong> {user_name}</div>
@@ -1617,12 +2101,12 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
 
     <!-- 3. KẾT LUẬN AI & TOP-3 KHẢ NĂNG -->
     <div class="ai-box">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
         <div>
-          <div style="font-size:11px;color:#065F46;font-weight:800;letter-spacing:0.5px;">KẾT LUẬN CHẨN ĐOÁN TỪ TRÍ TUỆ NHÂN TẠO PIGSKIN AI</div>
-          <div style="font-size:18px;font-weight:800;color:#059669;margin-top:2px;">{disease_name}</div>
+          <div style="font-size:10.5px;color:#065F46;font-weight:800;letter-spacing:0.5px;">KẾT LUẬN CHẨN ĐOÁN TỪ TRÍ TUỆ NHÂN TẠO PIGSKIN AI</div>
+          <div style="font-size:17px;font-weight:800;color:#059669;margin-top:2px;">{disease_name}</div>
         </div>
-        <div style="background:#059669;color:#FFFFFF;padding:5px 12px;border-radius:16px;font-size:13px;font-weight:800;">
+        <div style="background:#059669;color:#FFFFFF;padding:5px 12px;border-radius:16px;font-size:12.5px;font-weight:800;">
           Độ tin cậy: {confidence_pct:.1f}%
         </div>
       </div>
@@ -1632,35 +2116,49 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
     <!-- 4. PHÁC ĐỒ 2 CỘT NGANG -->
     <div class="protocol-grid">
       <div class="protocol-card">
-        <div style="font-size:13px;font-weight:800;color:#0369A1;margin-bottom:6px;">🛡️ Biện pháp Cách ly &amp; An toàn Sinh học</div>
-        <div style="font-size:12.5px;line-height:1.48;color:#1E293B;">{isolation}</div>
+        <div style="font-size:12.5px;font-weight:800;color:#0369A1;margin-bottom:5px;">🛡️ Biện pháp Cách ly &amp; An toàn Sinh học</div>
+        <div style="font-size:12px;line-height:1.45;color:#1E293B;">{isolation}</div>
       </div>
       <div class="protocol-card">
-        <div style="font-size:13px;font-weight:800;color:#059669;margin-bottom:6px;">💊 Phác đồ Điều trị &amp; Thuốc Thú y Tham khảo</div>
-        <div style="font-size:12.5px;line-height:1.48;color:#1E293B;">{treatment}</div>
+        <div style="font-size:12.5px;font-weight:800;color:#059669;margin-bottom:5px;">💊 Phác đồ Điều trị &amp; Thuốc Thú y Tham khảo</div>
+        <div style="font-size:12px;line-height:1.45;color:#1E293B;">{treatment}</div>
       </div>
     </div>
 
     <!-- 5. NHẬN XÉT BÁC SĨ THÚ Y & CHỮ KÝ SỐ Ở ĐÁY TRANG A4 -->
     <div class="footer-sign">
       <div style="flex:1;">
-        <div style="font-size:12.5px;font-weight:800;color:#0F172A;margin-bottom:4px;">
+        <div style="font-size:12px;font-weight:800;color:#0F172A;margin-bottom:3px;">
           👨‍⚕️ Nhận xét &amp; Thẩm định của Bác sĩ Thú y ({reviewed_by})
         </div>
-        <div style="font-size:12px;line-height:1.45;color:#334155;">{expert_note}</div>
+        <div style="font-size:11.5px;line-height:1.42;color:#334155;">{expert_note}</div>
       </div>
-      <div style="min-width:165px;text-align:center;border-left:1px dashed #CBD5E1;padding-left:14px;">
-        <div style="font-size:10.5px;font-weight:700;color:#64748B;">XÁC THỰC CHỮ KÝ SỐ</div>
-        <div style="margin:4px auto;display:inline-block;padding:3px 10px;border:1.5px solid #059669;border-radius:6px;color:#059669;font-size:11px;font-weight:800;">
+      <div style="min-width:160px;text-align:center;border-left:1px dashed #CBD5E1;padding-left:14px;">
+        <div style="font-size:10px;font-weight:700;color:#64748B;">XÁC THỰC CHỮ KÝ SỐ</div>
+        <div style="margin:4px auto;display:inline-block;padding:3px 10px;border:1.5px solid #059669;border-radius:6px;color:#059669;font-size:10.5px;font-weight:800;">
           ✓ PIGSKINTECH VERIFIED
         </div>
-        <div style="font-size:10.5px;color:#475569;font-weight:600;">{created_at[:10]}</div>
+        <div style="font-size:10px;color:#475569;font-weight:600;">{created_at[:10]}</div>
       </div>
     </div>
   </div>
 </body>
 </html>
 """
+    return html_doc, case_id, qr_payload
+
+
+def _write_and_open_vet_report(
+    page: ft.Page | None,
+    html_doc: str,
+    target_path: Path,
+    case_id: str,
+    open_browser: bool = True,
+) -> str:
+    out_file = Path(target_path)
+    if out_file.suffix.lower() not in (".html", ".htm"):
+        out_file = out_file.with_suffix(".html")
+    out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(html_doc, encoding="utf-8")
     resolved = str(out_file.resolve())
     if open_browser:
@@ -1668,8 +2166,89 @@ def export_vet_report_html(page: ft.Page, case_data: dict, open_browser: bool = 
             webbrowser.open(out_file.resolve().as_uri())
         except Exception:
             pass
-    show_snack(page, f"Đã xuất Phiếu Khám Thú Y chuẩn 1 trang A4 ({case_id})!", "#059669")
+    if page is not None:
+        show_snack(page, f"✅ Đã lưu Phiếu Khám A4 ({case_id}) tại: {resolved}", "#059669")
     return resolved
+
+
+def export_vet_report_html(
+    page: ft.Page | None,
+    case_data: dict,
+    open_browser: bool = True,
+    save_path: str | Path | None = None,
+) -> str:
+    """
+    Export a styled 1-Page A4 Veterinary Clinical Diagnostic Report HTML file directly into
+    `save_path` (or default `~/Downloads/PhieuKham_<case_id>.html`) and open it in the browser.
+    """
+    html_doc, case_id, _ = build_vet_report_html_doc(case_data)
+    safe_case_id = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in case_id)
+    target = Path(save_path) if save_path else (_default_downloads_dir() / f"PhieuKham_{safe_case_id}.html")
+    return _write_and_open_vet_report(page, html_doc, target, case_id, open_browser=open_browser)
+
+
+async def save_vet_report_with_picker(
+    page: ft.Page,
+    case_data: dict,
+    save_picker: ft.FilePicker | None = None,
+    open_browser: bool = True,
+) -> str | None:
+    """
+    Open Flet's native Save File dialog (`ft.FilePicker.save_file()`) pre-pointed at ~/Downloads
+    with default filename `PhieuKham_<case_id>.html`. Automatically writes the HTML report and
+    opens it in the user's default browser upon save; falls back to ~/Downloads when FilePicker is unavailable.
+    """
+    html_doc, case_id, _ = build_vet_report_html_doc(case_data)
+    safe_case_id = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in case_id)
+    default_name = f"PhieuKham_{safe_case_id}.html"
+    downloads_dir = _default_downloads_dir()
+
+    picker = save_picker
+    if picker is None:
+        try:
+            picker = create_file_picker(page)
+            page.update()
+        except Exception:
+            picker = None
+
+    if picker is None or not hasattr(picker, "save_file"):
+        return _write_and_open_vet_report(page, html_doc, downloads_dir / default_name, case_id, open_browser=open_browser)
+
+    try:
+        if inspect.iscoroutinefunction(picker.save_file):
+            chosen = await picker.save_file(
+                dialog_title="Lưu Phiếu Kết Quả Chẩn Đoán A4 (HTML/PDF)",
+                file_name=default_name,
+                initial_directory=str(downloads_dir),
+                file_type=ft.FilePickerFileType.CUSTOM,
+                allowed_extensions=["html"],
+            )
+            if not chosen:
+                show_snack(page, "Đã hủy lưu Phiếu Khám.", "#64748B")
+                return None
+            return _write_and_open_vet_report(page, html_doc, Path(chosen), case_id, open_browser=open_browser)
+
+        def _on_save_result(e):
+            chosen_path = getattr(e, "path", None)
+            if not chosen_path:
+                show_snack(page, "Đã hủy lưu Phiếu Khám.", "#64748B")
+                return
+            try:
+                _write_and_open_vet_report(page, html_doc, Path(chosen_path), case_id, open_browser=open_browser)
+            except Exception as err:
+                show_snack(page, f"Không thể lưu Phiếu Khám: {err}", "#DC2626")
+
+        picker.on_result = _on_save_result
+        picker.save_file(
+            dialog_title="Lưu Phiếu Kết Quả Chẩn Đoán A4 (HTML/PDF)",
+            file_name=default_name,
+            initial_directory=str(downloads_dir),
+            file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=["html"],
+        )
+        return None
+    except Exception:
+        return _write_and_open_vet_report(page, html_doc, downloads_dir / default_name, case_id, open_browser=open_browser)
 
 
 def export_inspections_csv(

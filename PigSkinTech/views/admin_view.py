@@ -27,6 +27,7 @@ from services.clinical_widgets import (
     _empty_chart_box,
     build_clinical_charts_section,
     build_disease_catalog_crud_card,
+    build_model_evaluation_lab_card,
     open_disease_editor_modal,
 )
 from services.config_store import read_settings, save_settings
@@ -49,7 +50,7 @@ from services.store import (
     toggle_user_lock,
     update_user_role,
 )
-from theme import PRIMARY, css_input, make_smooth_animation
+from theme import PRIMARY, css_input, get_theme_palette, make_smooth_animation
 
 
 def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
@@ -243,7 +244,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             header_stat_pill("Đồng thuận AI", f"{stats['ai_accuracy_vs_expert']:.1f}%", ft.Icons.VERIFIED_ROUNDED, "#D97706", t["AMBER_SOFT"], f"{stats['agreed_count']}/{stats['reviewed_count']} ca duyệt", page=page),
         ]
 
-        outbreak = build_outbreak_alert_banner(recent(""), page=page)
+        outbreak = build_outbreak_alert_banner(page=page)
         return [
             tech_banner(
                 "Tổng quan Quản trị Hệ thống",
@@ -830,10 +831,55 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             on_changed=refresh_config_header,
         )
 
+        subtab_state = {"active": "config"}
+        subtab_bar = ft.Row(spacing=10, wrap=True)
+        subtab_body = ft.Container()
+
+        def render_config_subtab(e=None):
+            cur_t = theme_tokens(page)
+            cur_mode = subtab_state["active"]
+            subtab_bar.controls.clear()
+            for key, lbl, icon_name in (
+                ("config", "⚙️ Cấu hình Model & Danh mục Bệnh lý", ft.Icons.TUNE_ROUNDED),
+                ("eval_lab", "🧪 Đánh giá & Đối chứng Mô hình (Model Evaluation Lab)", ft.Icons.ANALYTICS_ROUNDED),
+            ):
+                is_sel = cur_mode == key
+                subtab_bar.controls.append(
+                    ft.Container(
+                        bgcolor="#059669" if is_sel else cur_t["SURFACE"],
+                        border=ft.border.all(1.5 if is_sel else 1, "#059669" if is_sel else cur_t["BORDER"]),
+                        padding=ft.padding.symmetric(horizontal=16, vertical=10),
+                        border_radius=12,
+                        ink=True,
+                        on_click=lambda ev, k=key: (subtab_state.update({"active": k}), render_config_subtab(ev)),
+                        content=ft.Row(
+                            [
+                                ft.Icon(icon_name, size=18, color="#FFFFFF" if is_sel else cur_t["CYAN"]),
+                                ft.Text(
+                                    lbl,
+                                    size=13.5,
+                                    weight=ft.FontWeight.BOLD,
+                                    color="#FFFFFF" if is_sel else cur_t["TEXT"],
+                                ),
+                            ],
+                            spacing=8,
+                            tight=True,
+                        ),
+                    )
+                )
+            if cur_mode == "eval_lab":
+                subtab_body.content = build_model_evaluation_lab_card(page)
+            else:
+                subtab_body.content = ft.Column([model_card, crud_card], spacing=16)
+            if e is not None:
+                page.update()
+
+        render_config_subtab()
+
         return [
             config_header_host,
-            model_card,
-            crud_card,
+            subtab_bar,
+            subtab_body,
         ]
 
     # Tab 4: Test the currently active checkpoint without saving a case.
@@ -895,11 +941,33 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                     subtitle="Chọn một ảnh da heo ở khung bên trái và nhấn 'Dự đoán ảnh' để xem phân phối xác suất Softmax.",
                 )
                 return
-            if result.get("mode") != "ai":
-                result_host.content = ft.Text(
-                    result.get("message", "Model không trả về dự đoán."),
-                    color=t["RED"],
-                    size=13,
+            if result.get("mode") != "ai" or result.get("is_valid_pig") is False:
+                reason = result.get("validation_reason") or ""
+                result_host.content = ft.Container(
+                    padding=18,
+                    border_radius=12,
+                    bgcolor=t["RED_SOFT"],
+                    border=ft.border.all(1.5, "#EF4444"),
+                    content=ft.Column(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color="#DC2626", size=24),
+                                    ft.Text(
+                                        result.get("display_label") or "Ảnh không hợp lệ / Không thể dự đoán",
+                                        color="#DC2626",
+                                        size=15,
+                                        weight=ft.FontWeight.BOLD,
+                                        expand=True,
+                                    ),
+                                ],
+                                spacing=8,
+                            ),
+                            ft.Text(result.get("message", "Model không trả về dự đoán."), color=t["TEXT"], size=13.5),
+                            *([ft.Text(f"Chi tiết bộ lọc: {reason}", color=t["SECONDARY"], size=12.5)] if reason else []),
+                        ],
+                        spacing=6,
+                    ),
                 )
                 return
 
@@ -1053,9 +1121,11 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             ),
         ]
 
-    # Tab 4: System Settings (SQL Server, Google OAuth 2.0 & AI Chatbot)
+    # Tab 4: System Settings (SQL Server, Google OAuth 2.0 & AI Chatbot) — Modern Medical Dashboard
     def build_system_settings_tab():
         t = theme_tokens(page)
+        pal = get_theme_palette(page)
+        dark = bool(pal["IS_DARK"])
         cfg = read_settings()
         db_stat = get_db_status()
 
@@ -1069,22 +1139,6 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             expand=True,
             page=page,
         )
-        db_server_field = css_input(
-            label="Tên máy chủ / SQL Server instance",
-            value=cfg.get("DB_SERVER") or cfg.get("SQLSERVER_HOST", "localhost"),
-            hint_text=r"VD: TEN-MAY\SQLEXPRESS hoặc 192.168.1.10",
-            prefix_icon=ft.Icons.DNS_ROUNDED,
-            expand=True,
-            page=page,
-        )
-        db_port_field = css_input(
-            label="Cổng SQL Server",
-            value=cfg.get("SQLSERVER_PORT", "1433"),
-            hint_text="1433 (bỏ qua nếu nhập dạng TEN-MAY\\INSTANCE)",
-            prefix_icon=ft.Icons.CABLE_ROUNDED,
-            width=220,
-            page=page,
-        )
         db_name_field = css_input(
             label="DB_NAME (Tên Database)",
             value=cfg.get("DB_NAME") or cfg.get("SQLSERVER_DATABASE", "PigSkinTechDB"),
@@ -1092,20 +1146,39 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             expand=True,
             page=page,
         )
+        db_server_field = css_input(
+            label="Tên máy chủ / SQL Server instance",
+            value=cfg.get("DB_SERVER") or cfg.get("SQLSERVER_HOST", "localhost"),
+            hint_text=r"VD: .\SQLEXPRESS hoặc 192.168.1.10",
+            prefix_icon=ft.Icons.DNS_ROUNDED,
+            expand=7,
+            page=page,
+        )
+        db_port_field = css_input(
+            label="Cổng SQL Server",
+            value=cfg.get("SQLSERVER_PORT", "1433"),
+            hint_text="1433",
+            prefix_icon=ft.Icons.CABLE_ROUNDED,
+            expand=3,
+            page=page,
+        )
         auth_info = ft.Container(
-            padding=ft.padding.symmetric(horizontal=12, vertical=10),
+            padding=ft.padding.symmetric(horizontal=14, vertical=10),
             border_radius=10,
-            bgcolor=t["EMERALD_SOFT"],
+            bgcolor=pal["BG_SUB"],
+            border=ft.border.all(1, pal["BORDER_LIGHT"]),
             content=ft.Row(
                 [
-                    ft.Icon(ft.Icons.SECURITY_ROUNDED, color=t["EMERALD"], size=19),
+                    ft.Icon(ft.Icons.SECURITY_ROUNDED, color="#10B981" if dark else "#0F766E", size=18),
                     ft.Text(
-                        "Windows Integrated Authentication — dùng tài khoản Windows hiện tại, không gửi user/password SQL.",
+                        "Windows Integrated Authentication — dùng tài khoản Windows hiện tại, không lưu hay truyền mật khẩu SQL.",
                         size=12.5,
-                        color=t["TEXT"],
+                        color=pal["TEXT_SECONDARY"],
+                        expand=True,
                     ),
                 ],
-                spacing=8,
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
         )
 
@@ -1135,14 +1208,14 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             password=True,
             can_reveal_password=True,
             prefix_icon=ft.Icons.AUTO_AWESOME_ROUNDED,
-            expand=True,
+            expand=65,
             page=page,
         )
         gemini_model_field = css_input(
             label="GEMINI_MODEL",
             value=cfg.get("GEMINI_MODEL", "gemini-2.5-flash"),
             prefix_icon=ft.Icons.PSYCHOLOGY_ROUNDED,
-            expand=True,
+            expand=35,
             page=page,
         )
         ai_provider_dd = make_dropdown(
@@ -1163,15 +1236,6 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             expand=True,
             page=page,
         )
-        ai_key_field = css_input(
-            label="AI_API_KEY",
-            value=cfg.get("AI_API_KEY", ""),
-            password=True,
-            can_reveal_password=True,
-            prefix_icon=ft.Icons.VPN_KEY_ROUNDED,
-            expand=True,
-            page=page,
-        )
         ai_model_field = css_input(
             label="AI_MODEL",
             value=cfg.get("AI_MODEL", "gpt-4o-mini"),
@@ -1179,21 +1243,69 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
             expand=True,
             page=page,
         )
+        ai_key_field = css_input(
+            label="AI_API_KEY (Dự phòng cho OpenAI / DeepSeek / Groq)",
+            value=cfg.get("AI_API_KEY", ""),
+            hint_text="sk-... (để trống nếu dùng Gemini API)",
+            password=True,
+            can_reveal_password=True,
+            prefix_icon=ft.Icons.VPN_KEY_ROUNDED,
+            expand=True,
+            page=page,
+        )
         ai_prompt_field = css_input(
             label="AI_SYSTEM_PROMPT",
             value=cfg.get("AI_SYSTEM_PROMPT", ""),
+            hint_text="Tùy chỉnh hướng dẫn bổ sung cho Trợ lý AI Thú y (tùy chọn)...",
             multiline=True,
-            min_lines=2,
-            max_lines=3,
+            min_lines=3,
+            max_lines=4,
             expand=True,
             page=page,
         )
 
+        # Prominent SQL Connection Status Banner (green = SQL Server connected, amber = SQLite fallback, red = error)
+        status_dot = ft.Container(width=10, height=10, border_radius=5, bgcolor="#10B981")
         status_text = ft.Text(
-            f"Trạng thái hiện tại: {db_stat.get('engine')} — {db_stat.get('status')}",
-            size=13,
+            "",
+            size=13.5,
             weight=ft.FontWeight.W_600,
-            color=t["EMERALD"],
+            expand=True,
+        )
+        status_banner = ft.Container(
+            padding=ft.padding.symmetric(horizontal=14, vertical=12),
+            border_radius=12,
+            content=ft.Row(
+                [status_dot, status_text],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+
+        def _apply_status_banner(message: str, level: str) -> None:
+            cur_pal = get_theme_palette(page)
+            cur_dark = bool(cur_pal["IS_DARK"])
+            if level == "ok":
+                status_banner.bgcolor = cur_pal["SOFT_EMERALD"]
+                status_banner.border = ft.border.all(1, cur_pal["PROTOCOL_BORDER"])
+                status_dot.bgcolor = "#10B981"
+                status_text.color = "#6EE7B7" if cur_dark else "#065F46"
+            elif level == "fallback":
+                status_banner.bgcolor = cur_pal["SOFT_AMBER"]
+                status_banner.border = ft.border.all(1, "#D97706" if cur_dark else "#FCD34D")
+                status_dot.bgcolor = "#F59E0B"
+                status_text.color = "#FCD34D" if cur_dark else "#92400E"
+            else:
+                status_banner.bgcolor = cur_pal["SOFT_RED"]
+                status_banner.border = ft.border.all(1, "#EF4444" if cur_dark else "#FCA5A5")
+                status_dot.bgcolor = "#EF4444"
+                status_text.color = "#FCA5A5" if cur_dark else "#991B1B"
+            status_text.value = message
+
+        is_sql_active = "SQL Server" in str(db_stat.get("engine") or "")
+        _apply_status_banner(
+            f"Trạng thái hiện tại: {db_stat.get('engine')} — {db_stat.get('status')}",
+            "ok" if is_sql_active else "fallback",
         )
 
         def handle_test_sql(e):
@@ -1206,8 +1318,6 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 "Trusted_Connection": "yes",
             })
             if res["ok"]:
-                # The connection test also provisions the selected DB and saves
-                # the endpoint so the app initializes its tables on this server.
                 try:
                     save_settings({
                         "DATABASE_ENGINE": "sqlserver",
@@ -1234,8 +1344,7 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                         "ok": False,
                         "message": f"Kết nối SQL Server thành công nhưng lưu cấu hình/khởi tạo database gặp lỗi: {exc}",
                     }
-            status_text.value = res["message"]
-            status_text.color = "#059669" if res["ok"] else "#DC2626"
+            _apply_status_banner(res["message"], "ok" if res["ok"] else "error")
             show_snack(page, res["message"], "#059669" if res["ok"] else "#DC2626")
             page.update()
 
@@ -1262,85 +1371,200 @@ def build_admin_view(page: ft.Page, user: dict) -> ft.Control:
                 "AI_SYSTEM_PROMPT": ai_prompt_field.value or "",
             })
             new_stat = get_db_status()
-            status_text.value = f"Đã lưu cấu hình vào database.json và .env! {new_stat.get('engine')} — {new_stat.get('status')}"
-            status_text.color = "#059669"
+            sql_connected = "SQL Server" in str(new_stat.get("engine") or "")
+            _apply_status_banner(
+                f"Đã lưu cấu hình vào database.json và .env! {new_stat.get('engine')} — {new_stat.get('status')}",
+                "ok" if sql_connected else "fallback",
+            )
             show_snack(page, "Đã lưu cấu hình máy chủ vào database.json và các cấu hình khác vào .env!", "#059669")
             page.update()
 
+        def _settings_card_header(
+            icon_name: object,
+            title_text: str,
+            subtitle_text: str,
+            icon_color: str,
+            soft_bg: str,
+            trailing: ft.Control | None = None,
+        ) -> ft.Control:
+            row_items: list[ft.Control] = [
+                ft.Container(
+                    width=40,
+                    height=40,
+                    border_radius=10,
+                    bgcolor=soft_bg,
+                    alignment=ft.alignment.center,
+                    content=ft.Icon(icon_name, color=icon_color, size=21),
+                ),
+                ft.Column(
+                    [
+                        ft.Text(title_text, size=16, weight=ft.FontWeight.BOLD, color=pal["TEXT_PRIMARY"]),
+                        ft.Text(subtitle_text, size=13, color=pal["TEXT_SECONDARY"]),
+                    ],
+                    spacing=2,
+                    tight=True,
+                    expand=True,
+                ),
+            ]
+            if trailing is not None:
+                row_items.append(trailing)
+            return ft.Row(
+                row_items,
+                spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+
+        primary_save_btn_style = ft.ButtonStyle(
+            bgcolor="#0F766E",
+            color="#FFFFFF",
+            icon_color="#FFFFFF",
+            padding=ft.padding.symmetric(horizontal=22, vertical=13),
+            shape=ft.RoundedRectangleBorder(radius=10),
+            text_style=ft.TextStyle(size=14, weight=ft.FontWeight.W_600),
+        )
+
+        # Card 1: SQL Server Connection (database.json)
         sql_card = tech_card(
             page=page,
             padding=24,
             content=ft.Column(
                 [
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.STORAGE_ROUNDED, color=t["EMERALD"], size=22),
-                            ft.Text("1. Kết nối Cơ sở dữ liệu SQL Server (database.json)", size=18, weight=ft.FontWeight.BOLD, color=t["TEXT"], expand=True),
-                            ft.OutlinedButton("🔌 Kiểm tra & tạo database", icon=ft.Icons.CABLE_ROUNDED, on_click=handle_test_sql),
-                        ],
-                        spacing=8,
+                    _settings_card_header(
+                        ft.Icons.STORAGE_ROUNDED,
+                        "1. Kết nối Cơ sở dữ liệu SQL Server (database.json)",
+                        "Cấu hình máy chủ cơ sở dữ liệu dùng chung cho hồ sơ khám, người dùng và đồng bộ AI.",
+                        "#14B8A6" if dark else "#0F766E",
+                        pal["SOFT_EMERALD"],
+                        trailing=ft.OutlinedButton(
+                            "Kiểm tra & tạo database",
+                            icon=ft.Icons.CABLE_ROUNDED,
+                            style=ft.ButtonStyle(
+                                padding=ft.padding.symmetric(horizontal=16, vertical=11),
+                                shape=ft.RoundedRectangleBorder(radius=10),
+                                text_style=ft.TextStyle(size=13.5, weight=ft.FontWeight.W_600),
+                            ),
+                            on_click=handle_test_sql,
+                        ),
                     ),
-                    status_text,
-                    ft.Row([db_engine_dd, db_server_field, db_port_field], spacing=12),
-                    ft.Row([db_name_field], spacing=12),
+                    ft.Divider(height=6, color=pal["BORDER_LIGHT"]),
+                    status_banner,
+                    # Row 1: 50/50 Database Engine | DB_NAME
+                    ft.Row([db_engine_dd, db_name_field], spacing=16),
+                    # Row 2: 70/30 Server Instance | Port
+                    ft.Row([db_server_field, db_port_field], spacing=16),
                     ft.Text(
-                        r"Nhập đúng tên máy trong SQL Server Configuration Manager, ví dụ .\SQLEXPRESS hoặc TEN-MAY\INSTANCE. Nếu kết nối qua IP, nhập IP ở ô máy chủ và cổng TCP ở ô cổng. Máy SQL Server cần bật dịch vụ và cho phép TCP/IP; app dùng Windows Authentication.",
+                        r"Nhập đúng tên máy chủ trong SQL Server Configuration Manager (VD: .\SQLEXPRESS hoặc TEN-MAY\INSTANCE). Nếu kết nối qua IP, nhập IP ở ô máy chủ và cổng TCP ở ô cổng. Nút kiểm tra sẽ tự tạo database và các bảng nếu chưa có.",
                         size=12.5,
-                        color=t["MUTED"],
-                    ),
-                    ft.Text(
-                        "Nút kiểm tra sẽ tự tạo database nếu chưa có, khởi tạo các bảng của ứng dụng và lưu cấu hình máy chủ.",
-                        size=12.5,
-                        color=t["MUTED"],
+                        color=pal["TEXT_MUTED"],
                     ),
                     auth_info,
                 ],
-                spacing=12,
+                spacing=14,
+                tight=True,
             ),
         )
 
-        oauth_ai_card = tech_card(
+        # Card 2A: Google OAuth 2.0 Authentication
+        oauth_card = tech_card(
             page=page,
             padding=24,
             content=ft.Column(
                 [
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.SECURITY_ROUNDED, color=t["CYAN"], size=22),
-                            ft.Text("2. Google OAuth 2.0 (127.0.0.1:8765/callback) & Trợ lý AI Thú y (Gemini / LLM)", size=18, weight=ft.FontWeight.BOLD, color=t["TEXT"]),
-                        ],
-                        spacing=8,
+                    _settings_card_header(
+                        ft.Icons.VERIFIED_USER_OUTLINED,
+                        "2. Xác thực Google OAuth 2.0",
+                        "Đăng nhập một chạm bằng tài khoản Google với Redirect URI: http://127.0.0.1:8765/callback",
+                        "#38BDF8" if dark else "#0284C7",
+                        pal["SOFT_BLUE"],
+                        trailing=ft.Container(
+                            padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                            border_radius=20,
+                            bgcolor=pal["SOFT_BLUE"],
+                            border=ft.border.all(1, "#0284C7" if dark else "#BAE6FD"),
+                            content=ft.Text(
+                                "127.0.0.1:8765/callback",
+                                size=11.5,
+                                weight=ft.FontWeight.W_600,
+                                color="#38BDF8" if dark else "#0369A1",
+                            ),
+                        ),
                     ),
-                    ft.Row([google_cid_field, google_csec_field], spacing=12),
-                    ft.Divider(height=10, color=t["BORDER"]),
-                    ft.Row([gemini_key_field, gemini_model_field], spacing=12),
-                    ft.Row([ai_provider_dd, ai_base_field, ai_model_field], spacing=12),
-                    ft.Row([ai_key_field]),
-                    ft.Row([ai_prompt_field]),
-                    ft.Row(
-                        [
-                            ft.FilledButton(
-                                "💾 Lưu Toàn Bộ Cấu Hình Hệ Thống (.env)",
-                                icon=ft.Icons.SAVE_ROUNDED,
-                                on_click=handle_save_all_settings,
-                            )
-                        ]
-                    ),
+                    ft.Divider(height=6, color=pal["BORDER_LIGHT"]),
+                    # 1 Row 50/50: GOOGLE_CLIENT_ID | GOOGLE_CLIENT_SECRET
+                    ft.Row([google_cid_field, google_csec_field], spacing=16),
                 ],
-                spacing=12,
+                spacing=14,
+                tight=True,
             ),
         )
 
-        return [
-            tech_banner(
-                "Cấu hình Hệ thống & Kết nối Thực tế",
-                "Quản lý kết nối SQL Server (PigSkinTechDB), Google OAuth 2.0 Authorization Code và Chatbot AI Thú y",
-                badge_text="SQL Server • OAuth 2.0 • AI API",
-                page=page,
+        # Card 2B: Veterinary AI Assistant (Gemini / LLM)
+        ai_card = tech_card(
+            page=page,
+            padding=24,
+            content=ft.Column(
+                [
+                    _settings_card_header(
+                        ft.Icons.PSYCHOLOGY_ROUNDED,
+                        "3. Cấu hình Trợ lý AI Thú y (Gemini / LLM)",
+                        "Thiết lập khóa API Google Gemini mặc định và các nhà cung cấp LLM dự phòng cho Chatbot Thú y.",
+                        "#34D399" if dark else "#059669",
+                        pal["SOFT_EMERALD"],
+                    ),
+                    ft.Divider(height=6, color=pal["BORDER_LIGHT"]),
+                    # Row 1 (65/35): GEMINI_API_KEY | GEMINI_MODEL
+                    ft.Row([gemini_key_field, gemini_model_field], spacing=16),
+                    # Row 2 (3 equal columns): AI Provider | AI_BASE_URL | AI_MODEL
+                    ft.Row([ai_provider_dd, ai_base_field, ai_model_field], spacing=16),
+                    # Row 3: Fallback AI_API_KEY
+                    ft.Row([ai_key_field]),
+                    # Row 4: Multiline AI_SYSTEM_PROMPT
+                    ft.Row([ai_prompt_field]),
+                ],
+                spacing=14,
+                tight=True,
             ),
-            sql_card,
-            oauth_ai_card,
-        ]
+        )
+
+        save_footer = ft.Row(
+            [
+                ft.FilledButton(
+                    "Lưu Toàn Bộ Cấu Hình Hệ Thống (.env)",
+                    icon=ft.Icons.SAVE_ROUNDED,
+                    style=primary_save_btn_style,
+                    on_click=handle_save_all_settings,
+                )
+            ],
+            alignment=ft.MainAxisAlignment.END,
+        )
+
+        page_w = getattr(page, "width", None) or 1440
+        max_frame_w = 1160 if (int(page_w) - 318) > 1160 else None
+
+        centered_settings = ft.Container(
+            alignment=ft.alignment.top_center,
+            content=ft.Container(
+                width=max_frame_w,
+                content=ft.Column(
+                    [
+                        tech_banner(
+                            "Cấu hình Hệ thống & Kết nối Thực tế",
+                            "Quản lý kết nối SQL Server (PigSkinTechDB), Google OAuth 2.0 Authorization Code và Chatbot AI Thú y",
+                            badge_text="SQL Server • OAuth 2.0 • AI API",
+                            page=page,
+                        ),
+                        sql_card,
+                        oauth_card,
+                        ai_card,
+                        save_footer,
+                    ],
+                    spacing=20,
+                    tight=True,
+                ),
+            ),
+        )
+
+        return [centered_settings]
 
     destinations = [
         ("Tổng quan hệ thống", ft.Icons.DASHBOARD_OUTLINED, ft.Icons.DASHBOARD_ROUNDED),

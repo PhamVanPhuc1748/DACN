@@ -59,8 +59,9 @@ def main():
     print("-" * 72)
 
     cmd = [python_bin, "main.py"]
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     try:
-        subprocess.run(cmd, cwd=str(PIGSKIN_DIR), check=True)
+        subprocess.run(cmd, cwd=str(PIGSKIN_DIR), env=env, check=True)
     except KeyboardInterrupt:
         print("\n[!] Da dung ung dung.")
     except Exception as e:

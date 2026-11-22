@@ -49,6 +49,7 @@ DEFAULTS = {
     "GOOGLE_REDIRECT_URI": "http://127.0.0.1:8765/callback",
     "GEMINI_API_KEY": "",
     "GEMINI_MODEL": "gemini-2.5-flash",
+    "ADMIN_API_TOKEN": "",
     "API_BASE_URL": "http://127.0.0.1:8000",
     "AI_PROVIDER": "openai_compatible",
     "AI_BASE_URL": "https://api.openai.com/v1",

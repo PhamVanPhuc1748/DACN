@@ -33,14 +33,24 @@ CLASS_NAMES_VI = {
 
 
 def load_classes_config() -> dict:
-    """Load disease class metadata and treatment protocols from models/classes.json."""
+    """Load disease class metadata and treatment protocols from models/classes.json (with SQL DiseaseCatalog fallback)."""
     if CLASSES_JSON_PATH.is_file():
         try:
             data = json.loads(CLASSES_JSON_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
+            if isinstance(data, dict) and data:
                 return data
         except (OSError, json.JSONDecodeError):
             pass
+    try:
+        from services.store import load_disease_catalog_from_sql
+
+        sql_catalog = load_disease_catalog_from_sql()
+        if sql_catalog:
+            CLASSES_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CLASSES_JSON_PATH.write_text(json.dumps(sql_catalog, ensure_ascii=False, indent=2), encoding="utf-8")
+            return sql_catalog
+    except Exception:
+        pass
     return {
         code: {
             "code": code,
@@ -54,13 +64,13 @@ def load_classes_config() -> dict:
     }
 
 
-def save_classes_config(data: dict) -> None:
+def save_classes_config(data: dict, updated_by: str = "", deleted_codes: list[str] | None = None) -> None:
     CLASSES_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
     CLASSES_JSON_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
         from services.store import sync_disease_catalog_to_sql
 
-        sync_disease_catalog_to_sql(data)
+        sync_disease_catalog_to_sql(data, updated_by=updated_by, deleted_codes=deleted_codes)
     except Exception:
         pass
 
@@ -88,7 +98,15 @@ def get_class_info(name: str) -> dict:
     }
 
 
-def upsert_class_info(code: str, name_vi: str, danger_level: str, symptoms: str, prevention: str, treatment: str) -> dict:
+def upsert_class_info(
+    code: str,
+    name_vi: str,
+    danger_level: str,
+    symptoms: str,
+    prevention: str,
+    treatment: str,
+    updated_by: str = "",
+) -> dict:
     code = code.strip()
     if not code:
         raise ValueError("Mã lớp bệnh (class code) không được để trống.")
@@ -101,16 +119,16 @@ def upsert_class_info(code: str, name_vi: str, danger_level: str, symptoms: str,
         "prevention": prevention.strip(),
         "treatment": treatment.strip(),
     }
-    save_classes_config(cfg)
+    save_classes_config(cfg, updated_by=updated_by)
     return cfg[code]
 
 
-def delete_class_info(code: str) -> bool:
+def delete_class_info(code: str, updated_by: str = "") -> bool:
     cfg = load_classes_config()
     if code not in cfg:
         return False
     del cfg[code]
-    save_classes_config(cfg)
+    save_classes_config(cfg, updated_by=updated_by, deleted_codes=[code])
     return True
 
 
@@ -213,6 +231,9 @@ def list_model_runs() -> list[dict]:
             "model_label": display_arch,
             "display_name": f"{display_arch} ({folder.name})",
             "fingerprint": fingerprint,
+            "seed": cfg.get("seed"),
+            "size_mb": round(st.st_size / (1024 * 1024), 2),
+            "has_history": (folder / "history.csv").is_file(),
             "classes_count": len(cfg.get("classes", [])),
             "val_f1": metrics.get("best_val_macro_f1"),
             "test_acc": metrics.get("test_metrics", {}).get("accuracy"),
@@ -315,6 +336,12 @@ def set_active_checkpoint(checkpoint_path: str) -> dict:
         ),
         encoding="utf-8",
     )
+    try:
+        from services.inference import clear_model_cache
+
+        clear_model_cache(keep_key=str(p))
+    except Exception:
+        pass
     try:
         from services.store import sync_model_version_to_sql
 
@@ -443,6 +470,94 @@ def active_run(run_name: str | None = None):
         "config": config,
         "metrics": metrics,
         "data": data,
+    }
+
+
+def load_run_evaluation(run_name: str | None = None) -> dict | None:
+    """
+    Đọc trọn bộ dữ liệu đánh giá thực tế của một run trong models/runs/:
+    config.json, final_metrics.json (confusion_matrix 10x10, per_class, top_confusions),
+    dung lượng best_model.pt (MB) và đường cong huấn luyện từ history.csv (nếu có).
+    """
+    run = active_run(run_name)
+    if not run:
+        return None
+    folder = Path(run["directory"])
+    ckpt = Path(run["checkpoint"])
+    config = run.get("config") or {}
+    metrics = run.get("metrics") or {}
+    test_m = metrics.get("test_metrics") or {}
+    classes = list(config.get("classes") or list_class_keys())
+    cm = test_m.get("confusion_matrix") or []
+    per_class = test_m.get("per_class") or {}
+
+    top_confusions: list[dict] = []
+    if isinstance(cm, list):
+        for i, row in enumerate(cm):
+            if not isinstance(row, list) or i >= len(classes):
+                continue
+            for j, raw_val in enumerate(row):
+                if i == j or j >= len(classes):
+                    continue
+                cnt = int(raw_val or 0)
+                if cnt > 0:
+                    top_confusions.append(
+                        {
+                            "true_code": classes[i],
+                            "true_name": display_class(classes[i]),
+                            "pred_code": classes[j],
+                            "pred_name": display_class(classes[j]),
+                            "count": cnt,
+                        }
+                    )
+        top_confusions.sort(key=lambda item: (-item["count"], item["true_code"], item["pred_code"]))
+
+    history: list[dict] = []
+    hist_path = folder / "history.csv"
+    if hist_path.is_file():
+        try:
+            with hist_path.open("r", encoding="utf-8-sig", newline="") as f:
+                for row in csv.DictReader(f):
+                    try:
+                        ep = int(float(row.get("epoch") or 0))
+                        if ep <= 0:
+                            continue
+                        history.append(
+                            {
+                                "epoch": ep,
+                                "train_loss": float(row.get("train_loss") or 0.0),
+                                "val_loss": float(row.get("val_loss") or 0.0),
+                                "val_accuracy": float(row.get("val_accuracy") or 0.0),
+                                "val_macro_f1": float(row.get("val_macro_f1") or 0.0),
+                            }
+                        )
+                    except (TypeError, ValueError):
+                        continue
+            history.sort(key=lambda r: r["epoch"])
+        except (OSError, csv.Error):
+            history = []
+
+    size_mb = round(ckpt.stat().st_size / (1024 * 1024), 2) if ckpt.is_file() else 0.0
+    cur_active = active_run()
+    is_active = bool(cur_active and Path(cur_active["checkpoint"]).resolve() == ckpt.resolve())
+    return {
+        "run_name": folder.name,
+        "model": run.get("model", config.get("model", "mobilenet_v2")),
+        "model_label": run.get("model_label", APP_MODEL_NAMES.get(config.get("model", ""), "Model")),
+        "seed": config.get("seed"),
+        "size_mb": size_mb,
+        "is_active": is_active,
+        "best_epoch": metrics.get("best_epoch"),
+        "best_val_macro_f1": metrics.get("best_val_macro_f1"),
+        "test_accuracy": test_m.get("accuracy"),
+        "test_macro_f1": test_m.get("macro_f1"),
+        "test_loss": test_m.get("loss"),
+        "classes": classes,
+        "confusion_matrix": cm,
+        "per_class": per_class,
+        "top_confusions": top_confusions,
+        "has_history": bool(history),
+        "history": history,
     }
 
 

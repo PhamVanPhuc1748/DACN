@@ -23,6 +23,7 @@ from services.project_data import (
 ROOT = Path(__file__).resolve().parents[1]
 MAX_BYTES = 10 * 1024 * 1024
 WORKER = ROOT / "services" / "inference_worker.py"
+IMAGE_GATE = ROOT / "services" / "image_gate.py"
 
 _MODEL_CACHE_LOCK = threading.Lock()
 _MODEL_RUNTIME_CACHE: dict[str, dict] = {}
@@ -190,6 +191,22 @@ def _predict_inprocess(image_path: str | Path, run: dict) -> dict | None:
 def predict(path, run_name: str | None = None):
     """Run the matching model in the training environment and return 100% real tensor softmax scores."""
     info = inspect_image(path)
+    python = torch_python()
+    if not python:
+        raise RuntimeError("Không tìm thấy môi trường Python để kiểm tra ảnh da heo.")
+    gate = subprocess.run(
+        [str(python), str(IMAGE_GATE), "check", str(info["path"])],
+        cwd=ROOT.parent, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=180,
+    )
+    if gate.returncode:
+        raise RuntimeError(gate.stderr.strip()[-1000:] or "Không thể kiểm tra ảnh da heo.")
+    try:
+        gate_result = json.loads(gate.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Bộ lọc ảnh trả về kết quả không hợp lệ.") from exc
+    if not gate_result.get("accepted"):
+        raise ValueError("Ảnh không đủ dấu hiệu là da heo. Hãy chọn ảnh rõ vùng da heo để phân tích.")
     run = _current_run(run_name)
     if not run:
         return {

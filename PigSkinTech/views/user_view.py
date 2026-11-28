@@ -29,6 +29,7 @@ from services.project_data import (
     load_classes_config,
 )
 from services.store import (
+    get_db_status,
     get_sample_gallery,
     list_user_inspections,
     request_expert_review,
@@ -107,15 +108,15 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
     )
 
     animal_field = css_input(
-        label="Mã đàn / cá thể",
+        label="Mã cá thể vật nuôi",
         hint_text="VD: PIG-101",
         prefix_icon=ft.Icons.PETS_ROUNDED,
         expand=True,
         page=page,
     )
     farm_field = css_input(
-        label="Khu chuồng",
-        hint_text="VD: Khu A - Chuồng 02",
+        label="Trang trại",
+        hint_text="VD: Trại An Phú",
         prefix_icon=ft.Icons.HOME_WORK_OUTLINED,
         expand=True,
         page=page,
@@ -144,6 +145,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
     def refresh_page_header():
         p = get_theme_palette(page)
         records = list_user_inspections(user.get("email", ""))
+        engine = get_db_status().get("engine")
         total_scans = len(records)
         confs = [float(r["confidence"]) for r in records if r.get("confidence") is not None]
         avg_conf = (sum(confs) / len(confs) * 100.0) if confs else 0.0
@@ -154,16 +156,16 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         pills = [
             header_stat_pill(
                 "Tổng lượt khám",
-                f"{total_scans} ca",
+                f"{total_scans} lượt",
                 ft.Icons.QR_CODE_SCANNER_ROUNDED,
                 accent="#10B981" if p["IS_DARK"] else PRIMARY_DARK,
                 soft_bg=p["SOFT_EMERALD"],
-                badge_text="Dữ liệu SQL thật" if total_scans > 0 else "Chưa có ca khám",
+                badge_text=engine or "Chưa rõ cơ sở dữ liệu",
                 page=page,
                 col={"xs": 12, "sm": 6, "lg": 3},
             ),
             header_stat_pill(
-                "Điểm softmax",
+                "Điểm Softmax",
                 f"{avg_conf:.1f}%",
                 ft.Icons.AUTO_GRAPH_ROUNDED,
                 accent="#38BDF8" if p["IS_DARK"] else "#0284C7",
@@ -195,7 +197,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
         ]
         banner = tech_banner(
             "Chẩn đoán Bệnh Da Heo",
-            "Phân tích hình ảnh tổn thương da bằng Trí tuệ nhân tạo PigSkin AI & nhận phác đồ thú y",
+            "AI hỗ trợ nhận diện tổn thương da. Kết quả cần bác sĩ thú y thẩm định.",
             pills=pills,
             page=page,
         )
@@ -577,8 +579,8 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 "danger_level": res.get("danger_level", "Trung bình"),
                 "confidence": float(res.get("confidence") or 0.0),
                 "scores": res.get("scores") or [],
-                "animal_id": animal_field.value or "PIG-101",
-                "farm_name": farm_field.value or "Trại chăn nuôi",
+                "animal_id": (animal_field.value or "").strip(),
+                "farm_name": (farm_field.value or "").strip(),
                 "user_name": user.get("full_name", "Người chăn nuôi"),
                 "symptoms": symptoms_field.value or "",
                 "isolation_guide": cls_info.get("prevention") or "",
@@ -645,7 +647,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                                         overflow=ft.TextOverflow.ELLIPSIS,
                                     ),
                                     ft.Text(
-                                        f"Mã đàn: {rec.get('animal_id') or '—'} • Điểm softmax: {conf*100:.1f}%",
+                                        f"Mã cá thể: {rec.get('animal_id') or '—'} • Điểm Softmax: {conf*100:.1f}%",
                                         size=12.5,
                                         color=p["TEXT_SECONDARY"],
                                     ),
@@ -910,8 +912,8 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
             page.data["active_scan_result"] = res
             opener = page.data.get("open_vet_chat")
             prompt = (
-                f"Mô hình {res.get('architecture', 'AI')} vừa chẩn đoán '{disease_name}' "
-                f"(điểm softmax {main_conf*100:.1f}%). "
+                f"Mô hình {res.get('architecture', 'AI')} gợi ý '{disease_name}' "
+                f"(điểm Softmax {main_conf*100:.1f}%). "
                 "Hãy tư vấn chi tiết triệu chứng, liều lượng thuốc điều trị và cách ly cho ca này?"
             )
             if callable(opener):
@@ -956,7 +958,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     ft.Row(
                         [
                             ft.Icon(ft.Icons.MEDICAL_INFORMATION_ROUNDED, color=PRIMARY, size=22),
-                            ft.Text("Kết quả Phân tích & Phác đồ Thú y", size=18, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"], expand=True),
+                            ft.Text("Kết quả nhận diện AI", size=18, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"], expand=True),
                             ft.Container(
                                 bgcolor=badge_bg,
                                 border=ft.border.all(1, badge_fg),
@@ -970,7 +972,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                     ft.Column(
                         [
                             ft.Text(
-                                f"Kết luận từ Tensor Softmax ({arch_txt} • {run_txt} • {ms_txt} ms):",
+                                f"Gợi ý từ {arch_txt} • {run_txt} • {ms_txt} ms",
                                 size=13,
                                 weight=ft.FontWeight.W_600,
                                 color=p["TEXT_SECONDARY"],
@@ -985,7 +987,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                                         border=ft.border.all(1, PRIMARY),
                                         content=ft.Row(
                                             [
-                                                ft.Text("Điểm softmax:", size=12.5, weight=ft.FontWeight.W_600, color=p["TEXT_SECONDARY"]),
+                                                ft.Text("Điểm Softmax:", size=12.5, weight=ft.FontWeight.W_600, color=p["TEXT_SECONDARY"]),
                                                 main_conf_text,
                                             ],
                                             spacing=6,
@@ -998,6 +1000,12 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                         ],
                         spacing=2,
                     ),
+                    ft.Text(
+                        "Điểm Softmax thể hiện mức ưu tiên của mô hình cho từng lớp. "
+                        "Kết quả AI chỉ hỗ trợ nhận diện và cần bác sĩ thú y thẩm định.",
+                        size=13.5,
+                        color=p["TEXT_SECONDARY"],
+                    ),
                     ft.Container(
                         padding=14,
                         bgcolor=p["BG_SUB"],
@@ -1005,7 +1013,7 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                         border=ft.border.all(1, p["BORDER_LIGHT"]),
                         content=ft.Column(
                             [
-                                ft.Text("Biểu đồ Top-3 Khả năng:", size=14, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
+                                ft.Text("Top 3 theo điểm Softmax", size=14, weight=ft.FontWeight.BOLD, color=p["TEXT_PRIMARY"]),
                                 *top3_bars,
                             ],
                             spacing=8,
@@ -1133,8 +1141,8 @@ def build_user_view(page: ft.Page, user: dict) -> ft.Control:
                 info,
                 res,
                 case={
-                    "animal_id": animal_field.value or "PIG-NEW",
-                    "farm_name": farm_field.value or "Trại chăn nuôi",
+                    "animal_id": (animal_field.value or "").strip(),
+                    "farm_name": (farm_field.value or "").strip(),
                     "symptoms": symptoms_field.value or "",
                     "user_id": user.get("user_id", 1),
                     "user_email": user.get("email", ""),

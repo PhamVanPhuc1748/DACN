@@ -57,6 +57,9 @@ with patch.object(config_store, 'read_settings', return_value={'DATABASE_ENGINE'
                     self.assertTrue(any(row["id"] == record for row in store.list_user_inspections(demo[0][0])))
                     store.request_expert_review(record)
                     self.assertIn(record, {row["id"] for row in store.list_review_queue()})
+                    with self.assertRaises(ValueError):
+                        store.submit_expert_review(record, False, "", "QA fixture", demo[1][0])
+                    self.assertIn(record, {row["id"] for row in store.list_review_queue()})
                     store.submit_expert_review(record, True, "Healthy", "QA fixture", demo[1][0])
                     self.assertNotIn(record, {row["id"] for row in store.list_review_queue()})
                 finally:

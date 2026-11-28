@@ -1,0 +1,182 @@
+{
+  "legacy_2017": {
+    "manifest_sha256": "a0495be4d254b981442ede9d8e481465ed72a70dd3597d7a6ca07eda81a6416c",
+    "summary": {
+      "rows": 2017,
+      "split_counts": {
+        "test": 201,
+        "train": 1576,
+        "val": 240
+      },
+      "class_counts": {
+        "train": {
+          "Healthy": 202,
+          "Infected_Bacterial_Erysipelas": 151,
+          "Infected_Bacterial_Greasy_Pig_Disease": 159,
+          "Infected_Environmental_Dermatitis": 136,
+          "Infected_Environmental_Sunburn": 154,
+          "Infected_Fungal_Pityriasis_Rosea": 168,
+          "Infected_Fungal_Ringworm": 146,
+          "Infected_Parasitic_Mange": 189,
+          "Infected_Viral_Foot_and_Mouth_Disease": 132,
+          "Infected_Viral_Swinepox": 139
+        },
+        "val": {
+          "Healthy": 31,
+          "Infected_Bacterial_Erysipelas": 30,
+          "Infected_Bacterial_Greasy_Pig_Disease": 17,
+          "Infected_Environmental_Dermatitis": 25,
+          "Infected_Environmental_Sunburn": 24,
+          "Infected_Fungal_Pityriasis_Rosea": 17,
+          "Infected_Fungal_Ringworm": 24,
+          "Infected_Parasitic_Mange": 24,
+          "Infected_Viral_Foot_and_Mouth_Disease": 27,
+          "Infected_Viral_Swinepox": 21
+        },
+        "test": {
+          "Healthy": 26,
+          "Infected_Bacterial_Erysipelas": 14,
+          "Infected_Bacterial_Greasy_Pig_Disease": 31,
+          "Infected_Environmental_Dermatitis": 21,
+          "Infected_Environmental_Sunburn": 13,
+          "Infected_Fungal_Pityriasis_Rosea": 26,
+          "Infected_Fungal_Ringworm": 13,
+          "Infected_Parasitic_Mange": 20,
+          "Infected_Viral_Foot_and_Mouth_Disease": 21,
+          "Infected_Viral_Swinepox": 16
+        }
+      },
+      "groups": 2017,
+      "cross_split_group_leaks": 0,
+      "cross_split_exact_hash_leaks": 0,
+      "split_sha256": {
+        "train": "00d3d5f1f2577c9ef5099c3855923fb257149c72f92a0d66632c01ab306922ef",
+        "val": "0d6134a890bc060bd0605df3fbae700be0b3c734dc1fbbe1c71a3955f7da662a",
+        "test": "a4eb99679b1b1c276dd16b249200bb182964e066a68edfb064337361167a44cb"
+      }
+    },
+    "all_split_fingerprints_match_training_config": false,
+    "exact_query_matches": {},
+    "query_visual_candidates": {}
+  },
+  "curated_2016": {
+    "manifest_sha256": "dba25e5585884d3bcb7039e1e6bd921ab73e123cf53334792e973742efe9ea99",
+    "summary": {
+      "rows": 2016,
+      "split_counts": {
+        "test": 201,
+        "train": 1575,
+        "val": 240
+      },
+      "class_counts": {
+        "train": {
+          "Healthy": 202,
+          "Infected_Bacterial_Erysipelas": 150,
+          "Infected_Bacterial_Greasy_Pig_Disease": 159,
+          "Infected_Environmental_Dermatitis": 136,
+          "Infected_Environmental_Sunburn": 154,
+          "Infected_Fungal_Pityriasis_Rosea": 168,
+          "Infected_Fungal_Ringworm": 146,
+          "Infected_Parasitic_Mange": 189,
+          "Infected_Viral_Foot_and_Mouth_Disease": 132,
+          "Infected_Viral_Swinepox": 139
+        },
+        "val": {
+          "Healthy": 31,
+          "Infected_Bacterial_Erysipelas": 30,
+          "Infected_Bacterial_Greasy_Pig_Disease": 17,
+          "Infected_Environmental_Dermatitis": 25,
+          "Infected_Environmental_Sunburn": 24,
+          "Infected_Fungal_Pityriasis_Rosea": 17,
+          "Infected_Fungal_Ringworm": 24,
+          "Infected_Parasitic_Mange": 24,
+          "Infected_Viral_Foot_and_Mouth_Disease": 27,
+          "Infected_Viral_Swinepox": 21
+        },
+        "test": {
+          "Healthy": 26,
+          "Infected_Bacterial_Erysipelas": 14,
+          "Infected_Bacterial_Greasy_Pig_Disease": 31,
+          "Infected_Environmental_Dermatitis": 21,
+          "Infected_Environmental_Sunburn": 13,
+          "Infected_Fungal_Pityriasis_Rosea": 26,
+          "Infected_Fungal_Ringworm": 13,
+          "Infected_Parasitic_Mange": 20,
+          "Infected_Viral_Foot_and_Mouth_Disease": 21,
+          "Infected_Viral_Swinepox": 16
+        }
+      },
+      "groups": 2016,
+      "cross_split_group_leaks": 0,
+      "cross_split_exact_hash_leaks": 0,
+      "split_sha256": {
+        "train": "c06f1be5b14754815b1257b397b764dcf988dad8de22148a060b45178d6e1da9",
+        "val": "0d6134a890bc060bd0605df3fbae700be0b3c734dc1fbbe1c71a3955f7da662a",
+        "test": "a4eb99679b1b1c276dd16b249200bb182964e066a68edfb064337361167a44cb"
+      }
+    },
+    "all_split_fingerprints_match_training_config": false,
+    "exact_query_matches": {},
+    "query_visual_candidates": {}
+  },
+  "rf_v1": {
+    "manifest_sha256": "d07aa8d72568457ae5ab97c1b9b1634111442cf6ab1af021edee77b9c2434300",
+    "summary": {
+      "rows": 4413,
+      "split_counts": {
+        "test": 423,
+        "train": 3152,
+        "val": 838
+      },
+      "class_counts": {
+        "train": {
+          "Healthy": 340,
+          "Infected_Bacterial_Erysipelas": 275,
+          "Infected_Bacterial_Greasy_Pig_Disease": 316,
+          "Infected_Environmental_Dermatitis": 309,
+          "Infected_Environmental_Sunburn": 317,
+          "Infected_Fungal_Pityriasis_Rosea": 337,
+          "Infected_Fungal_Ringworm": 320,
+          "Infected_Parasitic_Mange": 332,
+          "Infected_Viral_Foot_and_Mouth_Disease": 284,
+          "Infected_Viral_Swinepox": 322
+        },
+        "val": {
+          "Healthy": 90,
+          "Infected_Bacterial_Erysipelas": 83,
+          "Infected_Bacterial_Greasy_Pig_Disease": 88,
+          "Infected_Environmental_Dermatitis": 86,
+          "Infected_Environmental_Sunburn": 86,
+          "Infected_Fungal_Pityriasis_Rosea": 73,
+          "Infected_Fungal_Ringworm": 82,
+          "Infected_Parasitic_Mange": 90,
+          "Infected_Viral_Foot_and_Mouth_Disease": 77,
+          "Infected_Viral_Swinepox": 83
+        },
+        "test": {
+          "Healthy": 39,
+          "Infected_Bacterial_Erysipelas": 45,
+          "Infected_Bacterial_Greasy_Pig_Disease": 36,
+          "Infected_Environmental_Dermatitis": 43,
+          "Infected_Environmental_Sunburn": 59,
+          "Infected_Fungal_Pityriasis_Rosea": 46,
+          "Infected_Fungal_Ringworm": 43,
+          "Infected_Parasitic_Mange": 34,
+          "Infected_Viral_Foot_and_Mouth_Disease": 28,
+          "Infected_Viral_Swinepox": 50
+        }
+      },
+      "groups": 4413,
+      "cross_split_group_leaks": 0,
+      "cross_split_exact_hash_leaks": 0,
+      "split_sha256": {
+        "train": "f257f77187030851b0db0f419a4ee5983d8a2e7817945cb650045168c3a8feed",
+        "val": "b5d9c870a9af894dd77ee96d94d9969c6b74b6667bbfefa396b396f7f4e9da7c",
+        "test": "ae5c41478680c47c76fbd5bea09258082a349ee11ee5d9d4b2c7f564ae539cc8"
+      }
+    },
+    "all_split_fingerprints_match_training_config": true,
+    "exact_query_matches": {},
+    "query_visual_candidates": {}
+  }
+}

@@ -1,0 +1,9 @@
+﻿model,cold_end_to_end_ms,classifier_app_ms,max_abs_probability_difference
+20261029_161050,6244.46,30.86,0.0
+20261103_125653,5850.14,15.15,0.0
+rf_v1_conservative_baseline_01,5457.36,18.03,0.0
+20261103_125004,5338.88,29.88,0.0
+rf_v1_E07-A,5513.1,38.26,0.0
+rf_v1_efficientnet_b0_E03_ls01,5363.36,19.21,0.0
+rf_v1_efficientnet_b0_E06_ls01_adamw,5540.15,20.02,0.0
+rf_v1_efficientnet_b0_baseline_01,5591.13,26.8,0.0

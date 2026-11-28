@@ -396,10 +396,10 @@ def _get_shared_connection(force_reconnect: bool = False) -> tuple[Any, bool]:
         _SHARED_ENGINE_TYPE = "sqlite"
         _SHARED_CONN_STR = str(DB)
         _ACTIVE_DB_INFO.update({
-            "engine": "SQL Database (Local Engine)",
+            "engine": "SQLite",
             "server": DB.name,
             "database": settings.get("DB_NAME") or "PigSkinTechDB",
-            "status": "Đang dùng SQL Database cục bộ (SQL Server chưa mở dịch vụ tại cổng 1433)",
+            "status": "Đang dùng cơ sở dữ liệu SQLite cục bộ.",
         })
         return _SHARED_RAW_CONN, False
 
@@ -1116,7 +1116,9 @@ def submit_expert_review(
     with conn() as c:
         row = c.execute("SELECT predicted_class FROM inspections WHERE id=?", (record_id,)).fetchone()
         pred = row["predicted_class"] if row else ""
-        final_label = pred if agreed_with_ai else (expert_label or pred)
+        final_label = pred if agreed_with_ai else (expert_label or "").strip()
+        if not final_label:
+            raise ValueError("Cần chọn nhãn bệnh trước khi lưu kết quả thẩm định.")
         expert_cls_meta = get_class_info(final_label)
         expert_display = expert_cls_meta.get("name_vi") or final_label
         c.execute(

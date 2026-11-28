@@ -1,0 +1,15 @@
+{
+  "shared_test_source_ids": 49,
+  "excluded": {
+    "conflicting_test_labels": 39,
+    "train_or_val_source_key_or_exact_hash": 2
+  },
+  "n": 8,
+  "class_counts": {
+    "Infected_Environmental_Dermatitis": 1,
+    "Infected_Parasitic_Mange": 2,
+    "Healthy": 2,
+    "Infected_Fungal_Pityriasis_Rosea": 1,
+    "Infected_Environmental_Sunburn": 2
+  }
+}

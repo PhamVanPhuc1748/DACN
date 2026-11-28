@@ -614,7 +614,10 @@ def build_expert_view(page: ft.Page, user: dict) -> ft.Control:
 
         def handle_submit_review(e):
             is_agree = decision_group.value == "agree"
-            chosen_label = pred_code if is_agree else (relabel_dropdown.value or pred_code)
+            chosen_label = pred_code if is_agree else relabel_dropdown.value
+            if not chosen_label:
+                show_snack(page, "Cần chọn nhãn bệnh trước khi lưu kết quả thẩm định.", "#DC2626")
+                return
             submit_expert_review(
                 record_id=int(rec["id"]),
                 agreed_with_ai=is_agree,

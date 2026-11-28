@@ -1,0 +1,422 @@
+{
+  "versions": [
+    "2.14.1+cpu",
+    "0.29.2+cpu"
+  ],
+  "models": {
+    "20261029_161050": {
+      "label": "MobileNetV2",
+      "top3": [
+        {
+          "label": "Infected_Viral_Swinepox",
+          "display_label": "Bệnh đậu heo (Swinepox)",
+          "confidence": 0.7697938084602356
+        },
+        {
+          "label": "Infected_Bacterial_Erysipelas",
+          "display_label": "Bệnh đóng dấu lợn (Erysipelas)",
+          "confidence": 0.11055353283882141
+        },
+        {
+          "label": "Infected_Environmental_Dermatitis",
+          "display_label": "Viêm da do môi trường (Dermatitis)",
+          "confidence": 0.0697629377245903
+        }
+      ],
+      "median_app_ms": 16.35,
+      "p95_app_ms": 18.45,
+      "median_classifier_wall_ms": 24.32250000128988,
+      "p95_classifier_wall_ms": 27.174499999091495,
+      "max_abs_reference_difference": 0.0,
+      "sum": 0.9999999441752152,
+      "swinepox_if_second_softmax": 0.1894325166940689,
+      "checkpoints": [
+        {
+          "file": "20261029_161050/best_model.pt",
+          "sha256": "d00dac8adf465aa3fb4f0653606e033c590cb088ee639a2d4450a296a1dd78d2",
+          "has_class_to_index": true
+        }
+      ],
+      "training": {
+        "optimizer": "Adam",
+        "label_smoothing": null,
+        "image_size": 224,
+        "best_epoch": null,
+        "augmentation": {
+          "enabled": true,
+          "horizontal_flip_probability": 0.5,
+          "rotation_degrees": 10.0,
+          "brightness": 0.1,
+          "contrast": 0.1,
+          "saturation": 0.05,
+          "hue": 0.0
+        }
+      }
+    },
+    "20261103_125653": {
+      "label": "MobileNetV2",
+      "top3": [
+        {
+          "label": "Infected_Viral_Swinepox",
+          "display_label": "Bệnh đậu heo (Swinepox)",
+          "confidence": 0.67526775598526
+        },
+        {
+          "label": "Infected_Bacterial_Erysipelas",
+          "display_label": "Bệnh đóng dấu lợn (Erysipelas)",
+          "confidence": 0.20892539620399475
+        },
+        {
+          "label": "Infected_Environmental_Dermatitis",
+          "display_label": "Viêm da do môi trường (Dermatitis)",
+          "confidence": 0.08056021481752396
+        }
+      ],
+      "median_app_ms": 18.72,
+      "p95_app_ms": 25.61,
+      "median_classifier_wall_ms": 27.39099999598693,
+      "p95_classifier_wall_ms": 34.47540000342997,
+      "max_abs_reference_difference": 0.0,
+      "sum": 1.0000000284053385,
+      "swinepox_if_second_softmax": 0.173604816198349,
+      "checkpoints": [
+        {
+          "file": "20261103_125653/best_model.pt",
+          "sha256": "d4f17fa44daff09f30cb885684d40da2f522e702f2b39fd700dab444b8f139d0",
+          "has_class_to_index": true
+        }
+      ],
+      "training": {
+        "optimizer": "Adam",
+        "label_smoothing": null,
+        "image_size": 224,
+        "best_epoch": null,
+        "augmentation": {
+          "enabled": true,
+          "horizontal_flip_probability": 0.5,
+          "rotation_degrees": 10.0,
+          "brightness": 0.1,
+          "contrast": 0.1,
+          "saturation": 0.05,
+          "hue": 0.0
+        }
+      }
+    },
+    "rf_v1_conservative_baseline_01": {
+      "label": "MobileNetV2 Roboflow Baseline E01",
+      "top3": [
+        {
+          "label": "Infected_Viral_Swinepox",
+          "display_label": "Bệnh đậu heo (Swinepox)",
+          "confidence": 0.5821235775947571
+        },
+        {
+          "label": "Infected_Environmental_Dermatitis",
+          "display_label": "Viêm da do môi trường (Dermatitis)",
+          "confidence": 0.22465242445468903
+        },
+        {
+          "label": "Infected_Viral_Foot_and_Mouth_Disease",
+          "display_label": "Lở mồm long móng (FMD)",
+          "confidence": 0.13702957332134247
+        }
+      ],
+      "median_app_ms": 19.31,
+      "p95_app_ms": 22.38,
+      "median_classifier_wall_ms": 27.36929999809945,
+      "p95_classifier_wall_ms": 31.23240000422811,
+      "max_abs_reference_difference": 0.0,
+      "sum": 1.000000035186531,
+      "swinepox_if_second_softmax": 0.15915679931640625,
+      "checkpoints": [
+        {
+          "file": "rf_v1_conservative_baseline_01/best_model.pt",
+          "sha256": "1885e1f0b36e0a5ffbbf6c54d7a2749e18f43fd949afdbaf33a729f2b656db15",
+          "has_class_to_index": true
+        }
+      ],
+      "training": {
+        "optimizer": "Adam",
+        "label_smoothing": null,
+        "image_size": 224,
+        "best_epoch": null,
+        "augmentation": {
+          "enabled": true,
+          "horizontal_flip_probability": 0.5,
+          "rotation_degrees": 10.0,
+          "brightness": 0.1,
+          "contrast": 0.1,
+          "saturation": 0.05,
+          "hue": 0.0
+        }
+      }
+    },
+    "20261103_125004": {
+      "label": "EfficientNet-B0",
+      "top3": [
+        {
+          "label": "Infected_Viral_Swinepox",
+          "display_label": "Bệnh đậu heo (Swinepox)",
+          "confidence": 0.7291250824928284
+        },
+        {
+          "label": "Infected_Bacterial_Erysipelas",
+          "display_label": "Bệnh đóng dấu lợn (Erysipelas)",
+          "confidence": 0.24587808549404144
+        },
+        {
+          "label": "Infected_Environmental_Dermatitis",
+          "display_label": "Viêm da do môi trường (Dermatitis)",
+          "confidence": 0.02100277505815029
+        }
+      ],
+      "median_app_ms": 28.45,
+      "p95_app_ms": 36.6,
+      "median_classifier_wall_ms": 37.42950000014389,
+      "p95_classifier_wall_ms": 46.15680000279099,
+      "max_abs_reference_difference": 0.0,
+      "sum": 0.9999999946630851,
+      "swinepox_if_second_softmax": 0.18222938477993011,
+      "checkpoints": [
+        {
+          "file": "20261103_125004/best_model.pt",
+          "sha256": "99351ed06dd5ffeaaddcf7351f89d0f703f982b4152596ee13b447230aacaaa5",
+          "has_class_to_index": true
+        }
+      ],
+      "training": {
+        "optimizer": "Adam",
+        "label_smoothing": null,
+        "image_size": 224,
+        "best_epoch": null,
+        "augmentation": {
+          "enabled": true,
+          "horizontal_flip_probability": 0.5,
+          "rotation_degrees": 10.0,
+          "brightness": 0.1,
+          "contrast": 0.1,
+          "saturation": 0.05,
+          "hue": 0.0
+        }
+      }
+    },
+    "rf_v1_E07-A": {
+      "label": "EfficientNet-B0 Ensemble E07-A",
+      "top3": [
+        {
+          "label": "Infected_Viral_Swinepox",
+          "display_label": "Bệnh đậu heo (Swinepox)",
+          "confidence": 0.4653257131576538
+        },
+        {
+          "label": "Infected_Bacterial_Erysipelas",
+          "display_label": "Bệnh đóng dấu lợn (Erysipelas)",
+          "confidence": 0.16944032907485962
+        },
+        {
+          "label": "Infected_Environmental_Dermatitis",
+          "display_label": "Viêm da do môi trường (Dermatitis)",
+          "confidence": 0.15335653722286224
+        }
+      ],
+      "median_app_ms": 51.14,
+      "p95_app_ms": 65.17,
+      "median_classifier_wall_ms": 59.476900001754984,
+      "p95_classifier_wall_ms": 74.1517999995267,
+      "max_abs_reference_difference": 0.0,
+      "sum": 0.9999999906867743,
+      "swinepox_if_second_softmax": 0.14268618822097778,
+      "checkpoints": [
+        {
+          "file": "rf_v1_efficientnet_b0_E03_ls01/best_model.pt",
+          "sha256": "0de930e0d089f6ed5b2835f12b1461ecf87fca217dfa442c2264b6beac8625d9",
+          "has_class_to_index": true
+        },
+        {
+          "file": "rf_v1_efficientnet_b0_E06_ls01_adamw/best_model.pt",
+          "sha256": "61b7198191df1fe9b9b1f42879dcab1fac8b946e2049735aeb7288f0a5d6bb96",
+          "has_class_to_index": true
+        }
+      ],
+      "training": {
+        "optimizer": null,
+        "label_smoothing": null,
+        "image_size": 224,
+        "best_epoch": null,
+        "augmentation": null
+      }
+    },
+    "rf_v1_efficientnet_b0_E03_ls01": {
+      "label": "EfficientNet-B0 Roboflow E03",
+      "top3": [
+        {
+          "label": "Infected_Viral_Swinepox",
+          "display_label": "Bệnh đậu heo (Swinepox)",
+          "confidence": 0.32247278094291687
+        },
+        {
+          "label": "Infected_Bacterial_Erysipelas",
+          "display_label": "Bệnh đóng dấu lợn (Erysipelas)",
+          "confidence": 0.23485195636749268
+        },
+        {
+          "label": "Infected_Environmental_Dermatitis",
+          "display_label": "Viêm da do môi trường (Dermatitis)",
+          "confidence": 0.1503322571516037
+        }
+      ],
+      "median_app_ms": 24.34,
+      "p95_app_ms": 25.92,
+      "median_classifier_wall_ms": 32.253199999104254,
+      "p95_classifier_wall_ms": 33.52019999874756,
+      "max_abs_reference_difference": 0.0,
+      "sum": 1.0000000353902578,
+      "swinepox_if_second_softmax": 0.12424413114786148,
+      "checkpoints": [
+        {
+          "file": "rf_v1_efficientnet_b0_E03_ls01/best_model.pt",
+          "sha256": "0de930e0d089f6ed5b2835f12b1461ecf87fca217dfa442c2264b6beac8625d9",
+          "has_class_to_index": true
+        }
+      ],
+      "training": {
+        "optimizer": "Adam",
+        "label_smoothing": 0.1,
+        "image_size": 224,
+        "best_epoch": null,
+        "augmentation": {
+          "enabled": true,
+          "horizontal_flip_probability": 0.5,
+          "rotation_degrees": 10.0,
+          "brightness": 0.1,
+          "contrast": 0.1,
+          "saturation": 0.05,
+          "hue": 0.0
+        }
+      }
+    },
+    "rf_v1_efficientnet_b0_E06_ls01_adamw": {
+      "label": "EfficientNet-B0 Roboflow E06",
+      "top3": [
+        {
+          "label": "Infected_Viral_Swinepox",
+          "display_label": "Bệnh đậu heo (Swinepox)",
+          "confidence": 0.6081786751747131
+        },
+        {
+          "label": "Infected_Environmental_Dermatitis",
+          "display_label": "Viêm da do môi trường (Dermatitis)",
+          "confidence": 0.1563808172941208
+        },
+        {
+          "label": "Infected_Bacterial_Erysipelas",
+          "display_label": "Bệnh đóng dấu lợn (Erysipelas)",
+          "confidence": 0.10402871668338776
+        }
+      ],
+      "median_app_ms": 25.03,
+      "p95_app_ms": 29.21,
+      "median_classifier_wall_ms": 33.23040000395849,
+      "p95_classifier_wall_ms": 37.05120000086026,
+      "max_abs_reference_difference": 0.0,
+      "sum": 0.9999999876599759,
+      "swinepox_if_second_softmax": 0.1632934808731079,
+      "checkpoints": [
+        {
+          "file": "rf_v1_efficientnet_b0_E06_ls01_adamw/best_model.pt",
+          "sha256": "61b7198191df1fe9b9b1f42879dcab1fac8b946e2049735aeb7288f0a5d6bb96",
+          "has_class_to_index": true
+        }
+      ],
+      "training": {
+        "optimizer": "AdamW",
+        "label_smoothing": 0.1,
+        "image_size": 224,
+        "best_epoch": null,
+        "augmentation": {
+          "enabled": true,
+          "horizontal_flip_probability": 0.5,
+          "rotation_degrees": 10.0,
+          "brightness": 0.1,
+          "contrast": 0.1,
+          "saturation": 0.05,
+          "hue": 0.0
+        }
+      }
+    },
+    "rf_v1_efficientnet_b0_baseline_01": {
+      "label": "EfficientNet-B0 Roboflow E02",
+      "top3": [
+        {
+          "label": "Infected_Viral_Swinepox",
+          "display_label": "Bệnh đậu heo (Swinepox)",
+          "confidence": 0.5931339263916016
+        },
+        {
+          "label": "Infected_Environmental_Dermatitis",
+          "display_label": "Viêm da do môi trường (Dermatitis)",
+          "confidence": 0.3444809317588806
+        },
+        {
+          "label": "Infected_Bacterial_Erysipelas",
+          "display_label": "Bệnh đóng dấu lợn (Erysipelas)",
+          "confidence": 0.06112944334745407
+        }
+      ],
+      "median_app_ms": 29.96,
+      "p95_app_ms": 63.74,
+      "median_classifier_wall_ms": 38.4868999972241,
+      "p95_classifier_wall_ms": 71.94929999968736,
+      "max_abs_reference_difference": 0.0,
+      "sum": 0.9999999909578037,
+      "swinepox_if_second_softmax": 0.16035611927509308,
+      "checkpoints": [
+        {
+          "file": "rf_v1_efficientnet_b0_baseline_01/best_model.pt",
+          "sha256": "e96d0f8571e8a3e354345ba79d3b17ba0bf14f88864da514148344041abac1ba",
+          "has_class_to_index": true
+        }
+      ],
+      "training": {
+        "optimizer": "Adam",
+        "label_smoothing": null,
+        "image_size": 224,
+        "best_epoch": null,
+        "augmentation": {
+          "enabled": true,
+          "horizontal_flip_probability": 0.5,
+          "rotation_degrees": 10.0,
+          "brightness": 0.1,
+          "contrast": 0.1,
+          "saturation": 0.05,
+          "hue": 0.0
+        }
+      }
+    }
+  },
+  "ensemble_max_abs_50_50_error": 1.4901161193847656e-08,
+  "historical_inspection_pair": {
+    "count": 2,
+    "identical_sha256": true,
+    "recorded_scores": [
+      {
+        "probability": 0.67526775598526,
+        "classifier": "MobileNetV2 | 20261103_125653 | CPU | 38.76ms"
+      },
+      {
+        "probability": 0.46532565355300903,
+        "classifier": "EfficientNet-B0 Ensemble E07-A | rf_v1_E07-A | CPU | 59.8ms"
+      }
+    ]
+  },
+  "historical_alert": {
+    "total_rows": 2,
+    "one_record_banner": false,
+    "two_record_banner": true,
+    "equal_user": true,
+    "equal_farm": true,
+    "equal_animal": true,
+    "animal_supplied": true,
+    "danger": "Cao"
+  }
+}

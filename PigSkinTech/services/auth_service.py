@@ -30,6 +30,7 @@ import requests
 
 from services.config_store import read_settings, save_settings
 from services.inference import model_ready
+from services.outbreak_service import EXISTING_ALERT_COUNT, summarize_surveillance
 from services.project_data import active_run, display_class, get_class_info, load_classes_config
 from services.store import _hash_password, conn, initialize, recent
 from theme import (
@@ -1250,27 +1251,33 @@ def generate_lesion_heatmap(image_path: str) -> str:
 
 
 def build_outbreak_alert_banner(records: list[dict], page: ft.Page | None = None) -> ft.Control | None:
-    """
-    Check the 10 most recent inspections: if >= 2 belong to 'Cao' or 'Khẩn cấp' danger level,
-    return an Epidemic Outbreak Warning Banner.
-    """
-    recent_10 = (records or [])[:10]
-    urgent_cases = []
-    for r in recent_10:
-        cls_code = r.get("expert_label") or r.get("predicted_class") or ""
-        info = get_class_info(cls_code)
-        danger = info.get("danger_level", "Trung bình")
-        if danger in ("Cao", "Khẩn cấp"):
-            urgent_cases.append((r, display_class(cls_code), danger))
-
-    if len(urgent_cases) < 2:
-        return None
-
     pal = get_theme_palette(page)
     dark = pal["IS_DARK"]
-    diseases_set = list(dict.fromkeys(d_name for _, d_name, _ in urgent_cases))
-    farms_set = list(dict.fromkeys((r.get("farm_name") or "Khu chuồng") for r, _, _ in urgent_cases))
-
+    alerts = []
+    for farm in summarize_surveillance(records):
+        if len(farm.suspected) + len(farm.expert_confirmed) < EXISTING_ALERT_COUNT:
+            continue
+        for labels, title, guidance in (
+            (farm.suspected, "Cảnh báo nguy cơ từ AI", "Kết quả sàng lọc cần bác sĩ thú y thẩm định."),
+            (farm.expert_confirmed, "Cảnh báo theo ca đã được chuyên gia xác nhận",
+             "Bác sĩ thú y đã xác nhận chẩn đoán ở các cá thể được đếm. Kết luận về ổ dịch cần đánh giá riêng."),
+        ):
+            if not labels:
+                continue
+            diseases = ", ".join(dict.fromkeys(display_class(label) for label in labels))
+            scope = f"{farm.name} • {farm.inspections} lượt khám trong cửa sổ giám sát"
+            if farm.unidentified_inspections:
+                scope += f", {farm.unidentified_inspections} lượt thiếu mã cá thể"
+            if farm.repeated_images:
+                scope += f", {farm.repeated_images} lượt dùng lại ảnh trên cùng cá thể"
+            alerts.append(ft.Column([
+                ft.Text(f"{title} · {len(labels)}/{farm.animals} cá thể thuộc nhóm nguy hiểm cao",
+                        size=15, weight=ft.FontWeight.BOLD, color="#FCA5A5" if dark else "#991B1B"),
+                ft.Text(f"{scope}. {diseases}. {guidance}",
+                        size=13.5, color="#FECACA" if dark else "#7F1D1D"),
+            ], spacing=4))
+    if not alerts:
+        return None
     return ft.Container(
         padding=ft.padding.symmetric(horizontal=20, vertical=14),
         border_radius=14,
@@ -1287,41 +1294,7 @@ def build_outbreak_alert_banner(records: list[dict], page: ft.Page | None = None
                     alignment=ft.alignment.center,
                     content=ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color="#F87171" if dark else "#DC2626", size=26),
                 ),
-                ft.Column(
-                    [
-                        ft.Row(
-                            [
-                                ft.Text(
-                                    f"🚨 Cảnh báo Dịch tễ Sớm: Phát hiện {len(urgent_cases)}/10 ca khám gần nhất thuộc nhóm Nguy hiểm cao",
-                                    size=15,
-                                    weight=ft.FontWeight.BOLD,
-                                    color="#FCA5A5" if dark else "#991B1B",
-                                    expand=True,
-                                ),
-                                ft.Container(
-                                    bgcolor="#DC2626",
-                                    padding=ft.padding.symmetric(horizontal=10, vertical=4),
-                                    border_radius=12,
-                                    content=ft.Text(
-                                        "CẦN CÁCH LY & SÁT TRÙNG",
-                                        size=12.5,
-                                        weight=ft.FontWeight.BOLD,
-                                        color="#FFFFFF",
-                                    ),
-                                ),
-                            ],
-                            spacing=8,
-                        ),
-                        ft.Text(
-                            f"Bệnh lý ghi nhận: {', '.join(diseases_set[:3])} • Khu vực: {', '.join(farms_set[:3])}. "
-                            "Khuyến nghị: Tách đàn cách ly ngay các cá thể nghi nhiễm, phun sát trùng chuồng trại và kiểm tra thân nhiệt toàn đàn.",
-                            size=13.5,
-                            color="#FECACA" if dark else "#7F1D1D",
-                        ),
-                    ],
-                    spacing=4,
-                    expand=True,
-                ),
+                ft.Column(alerts, spacing=10, expand=True),
             ],
             spacing=14,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,

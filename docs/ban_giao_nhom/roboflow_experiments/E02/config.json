@@ -1,0 +1,135 @@
+{
+  "model": "efficientnet_b0",
+  "label_mode": "single",
+  "classes": [
+    "Healthy",
+    "Infected_Bacterial_Erysipelas",
+    "Infected_Bacterial_Greasy_Pig_Disease",
+    "Infected_Environmental_Dermatitis",
+    "Infected_Environmental_Sunburn",
+    "Infected_Fungal_Pityriasis_Rosea",
+    "Infected_Fungal_Ringworm",
+    "Infected_Parasitic_Mange",
+    "Infected_Viral_Foot_and_Mouth_Disease",
+    "Infected_Viral_Swinepox"
+  ],
+  "class_to_index": {
+    "Healthy": 0,
+    "Infected_Bacterial_Erysipelas": 1,
+    "Infected_Bacterial_Greasy_Pig_Disease": 2,
+    "Infected_Environmental_Dermatitis": 3,
+    "Infected_Environmental_Sunburn": 4,
+    "Infected_Fungal_Pityriasis_Rosea": 5,
+    "Infected_Fungal_Ringworm": 6,
+    "Infected_Parasitic_Mange": 7,
+    "Infected_Viral_Foot_and_Mouth_Disease": 8,
+    "Infected_Viral_Swinepox": 9
+  },
+  "image_size": 224,
+  "normalization": {
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ]
+  },
+  "augmentation": {
+    "enabled": true,
+    "horizontal_flip_probability": 0.5,
+    "rotation_degrees": 10.0,
+    "brightness": 0.1,
+    "contrast": 0.1,
+    "saturation": 0.05,
+    "hue": 0.0
+  },
+  "multilabel_threshold": 0.5,
+  "pretrained": true,
+  "weights_source": "torchvision ImageNet DEFAULT",
+  "epochs": 30,
+  "skip_test": false,
+  "head_epochs": 5,
+  "head_lr": 0.001,
+  "finetune_lr": 0.0001,
+  "batch_size": 16,
+  "num_workers": 0,
+  "weight_decay": 0.0001,
+  "early_stopping_patience": 12,
+  "seed": 123,
+  "optimizer": "Adam",
+  "loss": "CrossEntropyLoss",
+  "manifest": "manifests/rf_v1_conservative/manifest_draft.csv",
+  "manifest_sha256": "d07aa8d72568457ae5ab97c1b9b1634111442cf6ab1af021edee77b9c2434300",
+  "classes_file_sha256": "4a069a6fb036ffb8e23bf0aea0f39e8dafcdd680515d4e3f059abbbc59cf169e",
+  "split_sha256": {
+    "train": "f257f77187030851b0db0f419a4ee5983d8a2e7817945cb650045168c3a8feed",
+    "val": "b5d9c870a9af894dd77ee96d94d9969c6b74b6667bbfefa396b396f7f4e9da7c",
+    "test": "ae5c41478680c47c76fbd5bea09258082a349ee11ee5d9d4b2c7f564ae539cc8"
+  },
+  "summary": {
+    "rows": 4413,
+    "split_counts": {
+      "test": 423,
+      "train": 3152,
+      "val": 838
+    },
+    "class_counts": {
+      "train": {
+        "Healthy": 340,
+        "Infected_Bacterial_Erysipelas": 275,
+        "Infected_Bacterial_Greasy_Pig_Disease": 316,
+        "Infected_Environmental_Dermatitis": 309,
+        "Infected_Environmental_Sunburn": 317,
+        "Infected_Fungal_Pityriasis_Rosea": 337,
+        "Infected_Fungal_Ringworm": 320,
+        "Infected_Parasitic_Mange": 332,
+        "Infected_Viral_Foot_and_Mouth_Disease": 284,
+        "Infected_Viral_Swinepox": 322
+      },
+      "val": {
+        "Healthy": 90,
+        "Infected_Bacterial_Erysipelas": 83,
+        "Infected_Bacterial_Greasy_Pig_Disease": 88,
+        "Infected_Environmental_Dermatitis": 86,
+        "Infected_Environmental_Sunburn": 86,
+        "Infected_Fungal_Pityriasis_Rosea": 73,
+        "Infected_Fungal_Ringworm": 82,
+        "Infected_Parasitic_Mange": 90,
+        "Infected_Viral_Foot_and_Mouth_Disease": 77,
+        "Infected_Viral_Swinepox": 83
+      },
+      "test": {
+        "Healthy": 39,
+        "Infected_Bacterial_Erysipelas": 45,
+        "Infected_Bacterial_Greasy_Pig_Disease": 36,
+        "Infected_Environmental_Dermatitis": 43,
+        "Infected_Environmental_Sunburn": 59,
+        "Infected_Fungal_Pityriasis_Rosea": 46,
+        "Infected_Fungal_Ringworm": 43,
+        "Infected_Parasitic_Mange": 34,
+        "Infected_Viral_Foot_and_Mouth_Disease": 28,
+        "Infected_Viral_Swinepox": 50
+      }
+    },
+    "groups": 4413,
+    "cross_split_group_leaks": 0,
+    "cross_split_exact_hash_leaks": 0,
+    "split_sha256": {
+      "train": "f257f77187030851b0db0f419a4ee5983d8a2e7817945cb650045168c3a8feed",
+      "val": "b5d9c870a9af894dd77ee96d94d9969c6b74b6667bbfefa396b396f7f4e9da7c",
+      "test": "ae5c41478680c47c76fbd5bea09258082a349ee11ee5d9d4b2c7f564ae539cc8"
+    }
+  },
+  "device_requested": "cuda",
+  "device": "cuda",
+  "gpu_name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+  "gpu_memory_gib": 7.95953369140625,
+  "deterministic_algorithms": true,
+  "cublas_workspace_config": ":4096:8",
+  "torch_version": "2.11.0+cu130",
+  "torchvision_version": "0.26.0+cu130"
+}

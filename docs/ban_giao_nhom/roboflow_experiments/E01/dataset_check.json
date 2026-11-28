@@ -1,0 +1,84 @@
+{
+  "rows": 4413,
+  "split_counts": {
+    "test": 423,
+    "train": 3152,
+    "val": 838
+  },
+  "class_counts": {
+    "train": {
+      "Healthy": 340,
+      "Infected_Bacterial_Erysipelas": 275,
+      "Infected_Bacterial_Greasy_Pig_Disease": 316,
+      "Infected_Environmental_Dermatitis": 309,
+      "Infected_Environmental_Sunburn": 317,
+      "Infected_Fungal_Pityriasis_Rosea": 337,
+      "Infected_Fungal_Ringworm": 320,
+      "Infected_Parasitic_Mange": 332,
+      "Infected_Viral_Foot_and_Mouth_Disease": 284,
+      "Infected_Viral_Swinepox": 322
+    },
+    "val": {
+      "Healthy": 90,
+      "Infected_Bacterial_Erysipelas": 83,
+      "Infected_Bacterial_Greasy_Pig_Disease": 88,
+      "Infected_Environmental_Dermatitis": 86,
+      "Infected_Environmental_Sunburn": 86,
+      "Infected_Fungal_Pityriasis_Rosea": 73,
+      "Infected_Fungal_Ringworm": 82,
+      "Infected_Parasitic_Mange": 90,
+      "Infected_Viral_Foot_and_Mouth_Disease": 77,
+      "Infected_Viral_Swinepox": 83
+    },
+    "test": {
+      "Healthy": 39,
+      "Infected_Bacterial_Erysipelas": 45,
+      "Infected_Bacterial_Greasy_Pig_Disease": 36,
+      "Infected_Environmental_Dermatitis": 43,
+      "Infected_Environmental_Sunburn": 59,
+      "Infected_Fungal_Pityriasis_Rosea": 46,
+      "Infected_Fungal_Ringworm": 43,
+      "Infected_Parasitic_Mange": 34,
+      "Infected_Viral_Foot_and_Mouth_Disease": 28,
+      "Infected_Viral_Swinepox": 50
+    }
+  },
+  "groups": 4413,
+  "cross_split_group_leaks": 0,
+  "cross_split_exact_hash_leaks": 0,
+  "split_sha256": {
+    "train": "f257f77187030851b0db0f419a4ee5983d8a2e7817945cb650045168c3a8feed",
+    "val": "b5d9c870a9af894dd77ee96d94d9969c6b74b6667bbfefa396b396f7f4e9da7c",
+    "test": "ae5c41478680c47c76fbd5bea09258082a349ee11ee5d9d4b2c7f564ae539cc8"
+  },
+  "status": "draft",
+  "split_policy": "preserve singleton split; keep reviewed clusters together, test > val > train",
+  "excluded": 88,
+  "changed_splits": 0,
+  "original_split_counts": {
+    "test": 436,
+    "train": 3212,
+    "val": 853
+  },
+  "review_backup_sha256": "7c4b953dcb4aee9b51527d02b1aa611c4a40965b8fc22270c6856c5f27263604",
+  "manifest_sha256": "d07aa8d72568457ae5ab97c1b9b1634111442cf6ab1af021edee77b9c2434300",
+  "conservative_exclusions": 88,
+  "manual_decisions_preserved": 0,
+  "dhash_threshold": 12,
+  "dhash_groups": 0,
+  "dhash_cross_split_groups": 0,
+  "dhash_direct_cross_split_pairs": [],
+  "heuristic_quality_pending_in_manifest": 1260,
+  "quality_flag_counts": {
+    "low_edge": 626,
+    "small_file": 388,
+    "extreme_mean": 9,
+    "bright_clipping": 36,
+    "stock_or_watermark_name": 137,
+    "screenshot_or_figure_name": 712,
+    "low_contrast": 98,
+    "dark_clipping": 47
+  },
+  "clip_sample_flags_pending_in_manifest": 79,
+  "limitations": "The 88 candidates were provisionally excluded without expert verification. Quality and CLIP flags are screening signals. dHash can miss crops, flips, different views and shared source or session."
+}

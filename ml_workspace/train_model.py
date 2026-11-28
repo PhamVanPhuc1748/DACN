@@ -64,6 +64,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train one supported image classifier using an explicitly reviewed CSV manifest."
     )
+    parser.add_argument("--label-smoothing", type=float, default=0.0, help="Label smoothing for single-label training.")
+    parser.add_argument("--lr-scheduler", choices=("none", "cosine"), default="none")
+    parser.add_argument("--min-lr", type=float, default=1e-6)
+    parser.add_argument("--optimizer", choices=("adam", "adamw"), default="adam")
     parser.add_argument("--manifest", type=Path, default=CONFIG["manifest"], help="CSV with relative_path, split, labels, and group_id columns.")
     parser.add_argument("--image-root", type=Path, default=CONFIG["image_root"], help="Root used to resolve manifest relative_path values.")
     parser.add_argument("--classes-file", type=Path, default=CONFIG["classes_file"], help="JSON list or class->index mapping approved for this dataset.")
@@ -429,8 +433,16 @@ def train(args: argparse.Namespace, rows: list[dict[str, Any]], classes: list[st
                                    num_workers=args.num_workers, pin_memory=(device.type == "cuda"))
     model = build_model().to(device)
     criterion = nn.CrossEntropyLoss() if args.label_mode == "single" else nn.BCEWithLogitsLoss()
+    train_criterion = (
+        nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+        if args.label_mode == "single" else criterion
+    )
     trainable = set_trainable(model, head_only=(args.head_epochs > 0))
-    optimizer = torch.optim.Adam(trainable, lr=args.head_lr, weight_decay=args.weight_decay)
+    optimizer_cls = (
+        torch.optim.AdamW if args.optimizer == "adamw"
+        else torch.optim.Adam
+    )
+    optimizer = optimizer_cls(trainable, lr=args.head_lr, weight_decay=args.weight_decay)
     torchvision_version = __import__("torchvision").__version__
     gpu_name = torch.cuda.get_device_name(device) if device.type == "cuda" else None
     gpu_memory_gib = (
@@ -463,6 +475,8 @@ def train(args: argparse.Namespace, rows: list[dict[str, Any]], classes: list[st
         "weights_source": "torchvision ImageNet DEFAULT" if args.pretrained else "random initialization",
         "epochs": args.epochs,
         "skip_test": args.skip_test,
+        "label_smoothing": args.label_smoothing,
+        "evaluation_label_smoothing": 0.0,
         "head_epochs": args.head_epochs,
         "head_lr": args.head_lr,
         "finetune_lr": args.finetune_lr,
@@ -471,7 +485,9 @@ def train(args: argparse.Namespace, rows: list[dict[str, Any]], classes: list[st
         "weight_decay": args.weight_decay,
         "early_stopping_patience": args.early_stopping_patience,
         "seed": args.seed,
-        "optimizer": "Adam",
+        "optimizer": optimizer_cls.__name__,
+        "lr_scheduler": args.lr_scheduler,
+        "min_lr": args.min_lr,
         "loss": "CrossEntropyLoss" if args.label_mode == "single" else "BCEWithLogitsLoss",
         "manifest": str(args.manifest.resolve()),
         "manifest_sha256": manifest_hash,
@@ -493,6 +509,13 @@ def train(args: argparse.Namespace, rows: list[dict[str, Any]], classes: list[st
     best_epoch = 0
     epochs_without_improvement = 0
     switched_to_finetune = args.head_epochs == 0
+    scheduler = None
+    if args.lr_scheduler == "cosine" and switched_to_finetune:
+        optimizer.param_groups[0]["lr"] = args.finetune_lr
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs,
+            eta_min=args.min_lr
+        )
 
     print("\n=== TRAINING CONFIGURATION ===")
     print(f"Model: {args.model} | classes: {len(classes)} | label_mode: {args.label_mode}")
@@ -509,7 +532,9 @@ def train(args: argparse.Namespace, rows: list[dict[str, Any]], classes: list[st
         "Determinism: torch.use_deterministic_algorithms=True | "
         f"CUBLAS_WORKSPACE_CONFIG={os.environ.get('CUBLAS_WORKSPACE_CONFIG', 'not set')}"
     )
-    print(f"Optimizer=Adam | loss={type(criterion).__name__}")
+    print(f"Optimizer={optimizer_cls.__name__} | loss={type(train_criterion).__name__}")
+    print(f"Training label smoothing={args.label_smoothing:g} | evaluation smoothing=0")
+    print(f"LR scheduler={args.lr_scheduler} | min_lr={args.min_lr:g}")
     print(f"Epochs: max={args.epochs}, head-only={args.head_epochs}, patience={args.early_stopping_patience}")
     print(f"Learning rates: head={args.head_lr:g}, fine-tune={args.finetune_lr:g} | weight_decay={args.weight_decay:g}")
     print(f"Batch size={args.batch_size} | image size={args.image_size}x{args.image_size} | workers={args.num_workers}")
@@ -531,8 +556,14 @@ def train(args: argparse.Namespace, rows: list[dict[str, Any]], classes: list[st
     for epoch in range(1, args.epochs + 1):
         if epoch == args.head_epochs + 1 and not switched_to_finetune:
             trainable = set_trainable(model, head_only=False)
-            optimizer = torch.optim.Adam(trainable, lr=args.finetune_lr, weight_decay=args.weight_decay)
+            optimizer = optimizer_cls(trainable, lr=args.finetune_lr, weight_decay=args.weight_decay)
             switched_to_finetune = True
+            if args.lr_scheduler == "cosine":
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer,
+                    T_max=args.epochs - args.head_epochs,
+                    eta_min=args.min_lr
+                )
             print(f"Epoch {epoch}: unfreezing backbone; LR={args.finetune_lr:g}")
         epoch_started = time.perf_counter()
         if device.type == "cuda":
@@ -543,7 +574,7 @@ def train(args: argparse.Namespace, rows: list[dict[str, Any]], classes: list[st
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad(set_to_none=True)
             logits = model(images)
-            loss = criterion(logits, labels)
+            loss = train_criterion(logits, labels)
             loss_value = float(loss.item())
             if not math.isfinite(loss_value):
                 raise RuntimeError(f"Non-finite training loss at epoch {epoch}, batch {batch}")
@@ -601,6 +632,8 @@ def train(args: argparse.Namespace, rows: list[dict[str, Any]], classes: list[st
             print(f"  New best checkpoint: epoch={best_epoch}, val_macro_f1={best_macro_f1:.4f}")
         else:
             epochs_without_improvement += 1
+        if scheduler is not None:
+            scheduler.step()
         if epochs_without_improvement >= args.early_stopping_patience:
             print(f"Early stopping after epoch {epoch}; best epoch was {best_epoch}.")
             break
@@ -633,6 +666,13 @@ def train(args: argparse.Namespace, rows: list[dict[str, Any]], classes: list[st
 
 def main() -> int:
     args = parse_args()
+    if args.lr_scheduler == "cosine":
+        if not 0 <= args.min_lr < args.finetune_lr:
+            raise SystemExit("min-lr must be >= 0 and below finetune-lr")
+    if not 0.0 <= args.label_smoothing <= 1.0:
+        raise SystemExit("label-smoothing must be between 0 and 1")
+    if args.label_mode != "single" and args.label_smoothing != 0.0:
+        raise SystemExit("Label smoothing requires single-label mode")
     if args.manifest is None or args.classes_file is None:
         print("Set CONFIG['manifest'] and CONFIG['classes_file'] near the top of train_model.py, or pass --manifest and --classes-file.", file=sys.stderr)
         return 2

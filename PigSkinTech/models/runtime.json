@@ -1,9 +1,0 @@
-{
-  "python_candidates": [
-    "ai_runtime\\python.exe",
-    "ai_runtime\\Scripts\\python.exe",
-    "..\\ai_runtime\\Scripts\\python.exe",
-    "../.venv_train/Scripts/python.exe"
-  ],
-  "purpose": "Isolated verified PyTorch inference runtime; PigSkin Studio .venv remains unchanged."
-}

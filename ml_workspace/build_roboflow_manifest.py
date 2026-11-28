@@ -12,7 +12,7 @@ from tempfile import TemporaryDirectory
 from audit_roboflow import EXTENSIONS, write_csv
 from train_model import PROJECT_ROOT, SPLIT_ALIASES, load_classes, validate_manifest
 
-CLASSES = PROJECT_ROOT / "PigSkinTech/models/classes.json"
+CLASSES = PROJECT_ROOT / "ml_workspace/manifests/pig_skin_single_label_v4/classes.json"
 FIELDS = ("relative_path", "split", "labels", "group_id")
 SPLIT_PRIORITY = {"train": 0, "val": 1, "test": 2}
 

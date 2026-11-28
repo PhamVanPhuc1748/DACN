@@ -1,0 +1,11 @@
+﻿True / Predicted,Healthy,Infected_Bacterial_Erysipelas,Infected_Bacterial_Greasy_Pig_Disease,Infected_Environmental_Dermatitis,Infected_Environmental_Sunburn,Infected_Fungal_Pityriasis_Rosea,Infected_Fungal_Ringworm,Infected_Parasitic_Mange,Infected_Viral_Foot_and_Mouth_Disease,Infected_Viral_Swinepox
+Healthy,89,0,0,0,0,0,0,0,0,1
+Infected_Bacterial_Erysipelas,2,60,4,3,3,2,1,5,1,2
+Infected_Bacterial_Greasy_Pig_Disease,1,0,56,0,16,0,0,8,6,1
+Infected_Environmental_Dermatitis,1,1,0,73,2,6,1,0,0,2
+Infected_Environmental_Sunburn,2,4,8,0,69,1,0,1,1,0
+Infected_Fungal_Pityriasis_Rosea,1,6,0,3,1,52,7,0,0,3
+Infected_Fungal_Ringworm,0,2,0,1,2,3,69,4,0,1
+Infected_Parasitic_Mange,2,2,15,0,5,3,2,56,2,3
+Infected_Viral_Foot_and_Mouth_Disease,2,0,2,0,0,1,0,3,68,1
+Infected_Viral_Swinepox,0,2,3,2,1,1,0,2,0,72

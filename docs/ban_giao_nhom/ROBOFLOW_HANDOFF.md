@@ -2,22 +2,18 @@
 
 ## Chạy ứng dụng và chọn model
 
-Dùng `git clone -b devN https://github.com/PhamVanPhuc1748/DACN.git`. Với clone sạch đang ở `devN`, dùng `git pull --ff-only origin devN`.
+Sau khi nhánh tích hợp được duyệt và công bố trên `devN`, dùng `git clone -b devN https://github.com/PhamVanPhuc1748/DACN.git`. Với clone sạch đang ở `devN`, dùng `git pull --ff-only origin devN`. Ghi chú này mô tả cách nhận bản đã công bố. Xem báo cáo phiên làm việc để biết trạng thái tích hợp hiện tại.
 
-Dùng PowerShell tại thư mục gốc. Môi trường ứng dụng và PyTorch tách riêng.
+Trên nền desktop devP dùng PowerShell tại thư mục gốc.
 
 ```powershell
-py -3.10 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r PigSkinTech/requirements.txt
-py -3.10 -m venv .venv_train
-.\.venv_train\Scripts\python.exe -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cpu
-$env:PIGSKIN_AI_PYTHON = (Resolve-Path .\.venv_train\Scripts\python.exe).Path
-Push-Location PigSkinTech
-..\.venv\Scripts\python.exe main.py
-Pop-Location
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+.\venv\Scripts\python.exe -m pip install -r PigSkinTech/requirements-clip.txt
+.\venv\Scripts\python.exe run_app.py
 ```
 
-Ứng dụng `devN` cần SQL Server LocalDB và ODBC Driver 17 hoặc 18 cho luồng tài khoản và hồ sơ. Dùng database đã cấu hình theo README của PigSkinTech. Việc tích hợp giữ nguyên xác thực, phân quyền và duyệt chéo. Sau khi đăng nhập, mở màn hình phân tích, chọn **MobileNetV2 — Roboflow Baseline 2026-11-28** tại **Checkpoint cho phiên phân tích** rồi chạy ảnh. Chọn **MobileNetV2 — 20261103_125653 (mặc định)** để chuyển lại. Điều khiển này chỉ áp dụng cho phiên hiện tại. Màn hình Model Operations cung cấp chỉ số tham khảo.
+OpenCLIP có thể tải trọng số ở lần chạy đầu. Admin mở **Mô hình AI & Danh mục Bệnh lý**, chọn **MobileNetV2 — Roboflow Baseline 2026-11-28**, xem thông số rồi lưu kích hoạt nếu muốn áp dụng chung. Chọn lại run `20261103_125653` theo cùng quy trình. Bản Roboflow được đăng ký để chọn thủ công và có cấu hình bỏ qua khi ứng dụng tìm model mặc định.
 
 Run đóng gói tại [PigSkinTech/models/runs/rf_v1_conservative_baseline_01](../../PigSkinTech/models/runs/rf_v1_conservative_baseline_01). `best_model.pt` SHA-256 `1885e1f0b36e0a5ffbbf6c54d7a2749e18f43fd949afdbaf33a729f2b656db15`. Nạp theo đúng class mapping kèm checkpoint. Chỉ số `test_metrics` ghi một lượt đánh giá cuối. Confusion matrix có hàng nhãn thật và cột nhãn dự đoán. `history.csv` lưu dữ liệu từng epoch. Báo cáo tuần giải thích kết quả và phạm vi sử dụng.
 
@@ -29,7 +25,7 @@ Dùng Python 3.10 x64 và venv riêng cho train. Ví dụ dưới đây dành ch
 py -3.10-64 -m venv .venv_train
 $py = '.\.venv_train\Scripts\python.exe'
 & $py -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu130
-& $py -m pip install -r ml_workspace/requirements-roboflow.txt
+& $py -m pip install -r ml_workspace/requirements.txt
 & $py -m pip check
 ```
 
@@ -62,27 +58,18 @@ $output = Join-Path (Read-Host 'Thư mục run trên ổ còn trống') (Get-Dat
   --early-stopping-patience 12 --num-workers 0 --output-dir $output
 ```
 
-Giữ `TORCH_HOME` ở ổ có đủ chỗ. Pilot dùng `--epochs 1 --head-epochs 0 --head-lr 0.0001 --skip-test`. `--skip-test` vẫn kiểm tra tính hợp lệ của manifest test. Công cụ ca chuyên gia của devP phụ thuộc kho hồ sơ devP và nằm ngoài phần tích hợp này. OpenCLIP là công cụ audit tùy chọn, tách khỏi luồng inference devN. Cài `PigSkinTech/requirements-clip.txt` và chuẩn bị cache trọng số trước khi chạy audit ngoại tuyến.
+Giữ `TORCH_HOME` ở ổ có đủ chỗ. Pilot dùng `--epochs 1 --head-epochs 0 --head-lr 0.0001 --skip-test`. `--skip-test` vẫn kiểm tra tính hợp lệ của manifest test. Công cụ ca chuyên gia `build_retrain_manifest.py` giữ mặc định cũ và hỗ trợ `--base-manifest`, `--classes-file`, `--base-image-root` và `--image-root`.
 
 ## Kiểm thử
 
-Bản tích hợp devN đã chạy 88 unit test ứng dụng, 2 test công cụ ML, smoke inference CPU và render Flet cho user, expert, admin. Kiểm thử chuyển cũ → Roboflow → cũ chạy trong cùng worker và kiểm tra 10 điểm softmax. Test đăng nhập, hồ sơ và duyệt chéo dùng kết nối giả lập trong bộ test devN. Kiểm thử không kết nối LocalDB thật.
-
-Phần tích hợp là commit chọn lọc trên lịch sử devN. Giữ luồng xác thực, OTP, phân quyền, lịch sử, duyệt chéo và runtime worker của devN. Checkpoint cũ được đóng gói từ artifact trùng SHA-256 đã ghi trong model manifest của devN. Tệp cấu hình runtime tìm Python theo đường dẫn tương đối hoặc biến môi trường.
-
 ```powershell
-Push-Location PigSkinTech
-..\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
-..\.venv\Scripts\python.exe -B -m tests.flet_runtime_smoke --layout
-Pop-Location
+.\venv\Scripts\python.exe -B -m unittest discover -s PigSkinTech/tests -v
 .\.venv_train\Scripts\python.exe -B -m unittest discover -s ml_workspace -p 'test_*.py' -v
 ```
 
 Xem [báo cáo tuần](BAO_CAO_TUAN_NHOM_5_2026-11-28.md) về giới hạn dữ liệu. Không dùng chỉ số của hai run trên hai tập khác nhau để xếp hạng model. Dataset, cache, venv, DB runtime và ảnh ca khám giữ ngoài nội dung bàn giao.
 
 ### Kết quả smoke trên nền desktop devP
-
-Phần dưới ghi lại QA của bản bàn giao nguồn. devN tiếp tục dùng runtime, workflow và LocalDB riêng. Test devN chạy trên dữ liệu giả lập độc lập với database thật, truy xuất đúng model qua cùng worker khi đổi phiên bản.
 
 | Kiểm tra | Kết quả |
 |---|---|

@@ -1,325 +1,1650 @@
-import json
-import shutil
-import threading
-from pathlib import Path
+"""SQL Database persistence (SQL Server via pyodbc + Local SQL Engine) for Users, Inspections, and ChatMessages."""
+from __future__ import annotations
+
 from datetime import datetime
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+import sqlite3
+import threading
+import time
+from typing import Any
 from uuid import uuid4
-from services.database import conn
-from services.inference import inspect_image
-from services.paths import DATA_ROOT
 
-IMAGE_DIR = DATA_ROOT / 'case_images'
-_initialized = False
-_initialize_lock = threading.Lock()
+try:
+    import pyodbc
+    pyodbc.pooling = True
+except ImportError:
+    pyodbc = None
 
-
-def _require_actor(connection, actor_id, roles):
-    if actor_id is None:
-        raise ValueError('Phiên đăng nhập không hợp lệ.')
-    actor = connection.execute(
-        'SELECT role,active FROM dbo.users WHERE id=?', (actor_id,)
-    ).fetchone()
-    if actor is None or not actor['active'] or actor['role'] not in roles:
-        raise ValueError('Tài khoản đã bị khóa hoặc quyền truy cập đã thay đổi. Hãy đăng nhập lại.')
-    return actor['role']
+from services.config_store import read_settings
+from services.project_data import get_class_info
 
 
-CASE_LIMITS = {'animal_id': 255, 'farm_name': 255, 'body_site': 255,
-               'symptoms': 8000, 'onset_date': 40, 'entered_at': 40}
+DB = Path(__file__).resolve().parents[1] / "pigskin_history.db"
+IMAGE_DIR = Path(__file__).resolve().parents[1] / "case_images"
+CURATED_DIR = Path(__file__).resolve().parents[1] / "curated_dataset"
 
-
-def _validate_case(case):
-    values={}
-    for key, limit in CASE_LIMITS.items():
-        value=case.get(key, '')
-        if not isinstance(value, str) or len(value.strip()) > limit:
-            raise ValueError(f'Trường {key} không hợp lệ hoặc vượt quá {limit} ký tự.')
-        values[key]=value.strip()
-    if values['onset_date']:
-        try:
-            datetime.strptime(values['onset_date'], '%Y-%m-%d')
-        except ValueError as exc:
-            raise ValueError('Ngày khởi phát phải theo định dạng YYYY-MM-DD và là ngày hợp lệ.') from exc
-    return values
+_ACTIVE_DB_INFO: dict[str, str] = {
+    "engine": "SQL Database",
+    "server": "localhost",
+    "database": "PigSkinTechDB",
+    "status": "Đang khởi tạo...",
+}
 
 CASE_COLUMNS = {
-    'case_id': 'NVARCHAR(80)',
-    'animal_id': 'NVARCHAR(255)',
-    'farm_name': 'NVARCHAR(255)',
-    'body_site': 'NVARCHAR(255)',
-    'symptoms': 'NVARCHAR(MAX)',
-    'onset_date': 'NVARCHAR(40)',
-    'entered_at': 'NVARCHAR(40)',
-    'image_path': 'NVARCHAR(2048)',
-    'review_status': 'NVARCHAR(40)',
-    'review_note': 'NVARCHAR(MAX)',
-    'scores_json': 'NVARCHAR(MAX)',
-    'model_info': 'NVARCHAR(MAX)',
-    'user_id': 'INT',
-    'result_status': "NVARCHAR(30) NOT NULL CONSTRAINT DF_inspections_result_status DEFAULT 'not_started'",
-    'result_category': 'NVARCHAR(30)',
-    'expert_result': 'NVARCHAR(MAX)',
-    'expert_notes': 'NVARCHAR(MAX)',
-    'expert_id': 'INT',
-    'result_submitted_at': 'NVARCHAR(19)',
-    'approved_by': 'INT',
-    'approved_at': 'NVARCHAR(19)',
-    'result_seen': 'BIT NOT NULL CONSTRAINT DF_inspections_result_seen DEFAULT 0',
+    "case_id": "TEXT NOT NULL DEFAULT ''",
+    "predicted_label": "TEXT NOT NULL DEFAULT ''",
+    "expert_display_name": "TEXT NOT NULL DEFAULT ''",
+    "inference_ms": "REAL DEFAULT 0.0",
+    "animal_id": "TEXT NOT NULL DEFAULT ''",
+    "farm_name": "TEXT NOT NULL DEFAULT ''",
+    "body_site": "TEXT NOT NULL DEFAULT ''",
+    "symptoms": "TEXT NOT NULL DEFAULT ''",
+    "onset_date": "TEXT NOT NULL DEFAULT ''",
+    "entered_at": "TEXT NOT NULL DEFAULT ''",
+    "image_path": "TEXT NOT NULL DEFAULT ''",
+    "review_status": "TEXT NOT NULL DEFAULT 'not_requested'",
+    "review_note": "TEXT NOT NULL DEFAULT ''",
+    "scores_json": "TEXT NOT NULL DEFAULT '[]'",
+    "model_info": "TEXT NOT NULL DEFAULT ''",
+    "user_id": "INTEGER NOT NULL DEFAULT 1",
+    "user_email": "TEXT NOT NULL DEFAULT 'nongdan.pigskin@gmail.com'",
+    "user_name": "TEXT NOT NULL DEFAULT 'Nguyễn Văn Nông'",
+    "requested_review": "INTEGER NOT NULL DEFAULT 0",
+    "agreed_with_ai": "INTEGER DEFAULT NULL",
+    "expert_label": "TEXT NOT NULL DEFAULT ''",
+    "expert_note": "TEXT NOT NULL DEFAULT ''",
+    "reviewed_by": "TEXT NOT NULL DEFAULT ''",
+    "reviewed_at": "TEXT NOT NULL DEFAULT ''",
+    "in_dataset": "INTEGER NOT NULL DEFAULT 0",
+    "danger_level": "TEXT NOT NULL DEFAULT ''",
+    "recommendation": "TEXT NOT NULL DEFAULT ''",
 }
 
 
-def initialize():
-    global _initialized
-    if _initialized:
+def _migrate_sqlite_review_default(c) -> None:
+    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='inspections'").fetchone()
+    if not row or not re.search(r"review_status\s+TEXT\s+NOT NULL\s+DEFAULT\s+'needs_review'", row["sql"], re.I):
         return
-    with _initialize_lock:
-        if _initialized:
-            return
-        with conn() as c:
-            c.execute('''IF OBJECT_ID('dbo.inspections', 'U') IS NULL
-                CREATE TABLE dbo.inspections (
-                id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                filename NVARCHAR(260) NOT NULL,
-                width INT NOT NULL,
-                height INT NOT NULL,
-                size_bytes BIGINT NOT NULL,
-                mode NVARCHAR(30) NOT NULL,
-                predicted_class NVARCHAR(255) NULL,
-                confidence FLOAT NULL,
-                created_at NVARCHAR(19) NOT NULL,
-                case_id NVARCHAR(80) NOT NULL DEFAULT '',
-                animal_id NVARCHAR(255) NOT NULL DEFAULT '',
-                farm_name NVARCHAR(255) NOT NULL DEFAULT '',
-                body_site NVARCHAR(255) NOT NULL DEFAULT '',
-                symptoms NVARCHAR(MAX) NOT NULL DEFAULT '',
-                onset_date NVARCHAR(40) NOT NULL DEFAULT '',
-                entered_at NVARCHAR(40) NOT NULL DEFAULT '',
-                image_path NVARCHAR(2048) NOT NULL DEFAULT '',
-                review_status NVARCHAR(40) NOT NULL DEFAULT 'needs_review',
-                review_note NVARCHAR(MAX) NOT NULL DEFAULT '',
-                scores_json NVARCHAR(MAX) NOT NULL DEFAULT '[]',
-                model_info NVARCHAR(MAX) NOT NULL DEFAULT '',
-                user_id INT NULL
-                )''')
-            for name, definition in CASE_COLUMNS.items():
-                exists = c.execute(
-                    'SELECT COL_LENGTH(?, ?) AS column_length',
-                    ('dbo.inspections', name)
-                ).fetchone()['column_length']
-                if exists is None:
-                    nullable = '' if 'NOT NULL' in definition else ' NULL'
-                    c.execute(f'ALTER TABLE dbo.inspections ADD [{name}] {definition}{nullable}')
-        _initialized = True
+    for table in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+        table_name = table["name"].replace('"', '""')
+        if any(table_name.lower() == "inspections" or fk["table"].lower() == "inspections"
+               for fk in c.execute(f'PRAGMA foreign_key_list("{table_name}")')):
+            raise RuntimeError("Cannot migrate inspections referenced by foreign keys automatically")
+    indexes = c.execute(
+        "SELECT sql FROM sqlite_master WHERE tbl_name='inspections' AND type='index' AND sql IS NOT NULL"
+    ).fetchall()
+    views = c.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='view' AND sql LIKE '%inspections%'"
+    ).fetchall()
+    create_sql = re.sub(r"\bCREATE\s+TABLE\s+inspections\b", "CREATE TABLE inspections_review_migration", row["sql"], count=1, flags=re.I)
+    create_sql = re.sub(r"(review_status\s+TEXT\s+NOT NULL\s+DEFAULT\s+)'needs_review'", r"\1'not_requested'", create_sql, count=1, flags=re.I)
+    if "inspections_review_migration" not in create_sql:
+        raise RuntimeError("Cannot safely migrate inspections table")
+    c.execute(create_sql)
+    columns = [item["name"] for item in c.execute("PRAGMA table_info(inspections)").fetchall()]
+    column_list = ", ".join('"' + name.replace('"', '""') + '"' for name in columns)
+    c.execute(f"INSERT INTO inspections_review_migration ({column_list}) SELECT {column_list} FROM inspections")
+    for view in views:
+        c.execute('DROP VIEW "' + view["name"].replace('"', '""') + '"')
+    c.execute("DROP TABLE inspections")
+    c.execute("ALTER TABLE inspections_review_migration RENAME TO inspections")
+    for index in indexes:
+        c.execute(index["sql"])
+    for view in views:
+        c.execute(view["sql"])
 
-def save(info, result, case=None, source_image=None, owner_id=None):
+DEFAULT_RBAC_USERS = [
+    {
+        "email": "nongdan.pigskin@gmail.com",
+        "username": "nongdan",
+        "full_name": "Nguyễn Văn Nông (Chủ trại)",
+        "role": "user",
+        "auth_provider": "local",
+        "avatar_url": "https://ui-avatars.com/api/?name=Nguyen+Nong&background=2E7D32&color=fff",
+    },
+    {
+        "email": "bs.thuy.pigskin@gmail.com",
+        "username": "bsthuy",
+        "full_name": "BS. Trần Thị Thúy (Thú y)",
+        "role": "expert",
+        "auth_provider": "local",
+        "avatar_url": "https://ui-avatars.com/api/?name=BS+Thuy&background=1565C0&color=fff",
+    },
+    {
+        "email": "admin.pigskin@gmail.com",
+        "username": "admin",
+        "full_name": "Quản trị viên PigSkinTech",
+        "role": "admin",
+        "auth_provider": "local",
+        "avatar_url": "https://ui-avatars.com/api/?name=Admin+PigSkin&background=AD1457&color=fff",
+    },
+]
+
+SAMPLE_GALLERY_CASES = [
+    {
+        "filename": "heo_dong_dau_01.jpg",
+        "title": "Ca 01 • Đóng dấu lợn",
+        "animal_id": "PIG-101",
+        "farm_name": "Trại An Phú - Khu A",
+        "body_site": "Vùng lưng và hông",
+        "symptoms": "Mảng đỏ hình thoi nổi rõ trên da lưng, heo sốt 41.2°C.",
+    },
+    {
+        "filename": "heo_nghi_ghe_02.jpg",
+        "title": "Ca 02 • Nghi ghẻ Sarcoptes",
+        "animal_id": "PIG-108",
+        "farm_name": "Trại An Phú - Khu B",
+        "body_site": "Vành tai và cổ",
+        "symptoms": "Da đóng vảy xám dày, heo cọ sát vào vách chuồng liên tục.",
+    },
+    {
+        "filename": "heo_viem_da_tiet_dich_03.jpg",
+        "title": "Ca 03 • Viêm da tiết dịch",
+        "animal_id": "PIG-089",
+        "farm_name": "Trại An Phú - Khu A",
+        "body_site": "Quanh mặt và cổ",
+        "symptoms": "Da rỉ dịch nhờn nâu đen, đóng vảy nứt nẻ ở heo con cai sữa.",
+    },
+    {
+        "filename": "heo_nam_da_04.jpg",
+        "title": "Ca 04 • Nấm da / Vảy phấn",
+        "animal_id": "PIG-094",
+        "farm_name": "Trại Hòa Bình",
+        "body_site": "Vùng vai và bụng",
+        "symptoms": "Vết tròn rụng lông, viền đỏ nhẹ có vảy trắng mịn.",
+    },
+    {
+        "filename": "heo_khoe_manh_05.jpg",
+        "title": "Ca 05 • Da khỏe mạnh",
+        "animal_id": "PIG-112",
+        "farm_name": "Trại An Phú - Khu C",
+        "body_site": "Toàn thân",
+        "symptoms": "Da hồng hào, lông mượt, ăn uống bình thường.",
+    },
+]
+
+
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _pick_odbc_driver(preferred: str) -> str:
+    if pyodbc is None:
+        return preferred
+    installed = list(pyodbc.drivers())
+    if preferred in installed:
+        return preferred
+    for cand in (
+        "ODBC Driver 18 for SQL Server",
+        "ODBC Driver 17 for SQL Server",
+        "SQL Server Native Client 11.0",
+        "SQL Server",
+    ):
+        if cand in installed:
+            return cand
+    return preferred
+
+
+def _build_sqlserver_conn_str(settings: dict[str, str], database: str | None = None) -> str:
+    server = (settings.get("DB_SERVER") or settings.get("SQLSERVER_HOST") or "localhost").strip()
+    port = (settings.get("SQLSERVER_PORT") or "1433").strip()
+    if port and port != "1433" and "," not in server and "\\" not in server:
+        server = f"{server},{port}"
+    db_name = (database or settings.get("DB_NAME") or settings.get("SQLSERVER_DATABASE") or "PigSkinTechDB").strip()
+    driver = _pick_odbc_driver(settings.get("SQLSERVER_DRIVER", "ODBC Driver 17 for SQL Server"))
+
+    parts = [
+        f"DRIVER={{{driver}}}",
+        f"SERVER={server}",
+        f"DATABASE={db_name}",
+    ]
+    user = (settings.get("DB_USER") or settings.get("SQLSERVER_USERNAME") or "").strip()
+    password = (settings.get("DB_PASSWORD") or settings.get("SQLSERVER_PASSWORD") or "").strip()
+    trusted_raw = (settings.get("Trusted_Connection") or settings.get("SQLSERVER_TRUSTED_CONNECTION") or "yes").strip().lower()
+    use_trusted = trusted_raw in ("yes", "true", "1") or not user
+    if use_trusted:
+        parts.append("Trusted_Connection=yes")
+    else:
+        parts.extend([f"UID={user}", f"PWD={password}"])
+    if "Driver 18" in driver:
+        parts.append("TrustServerCertificate=yes")
+    return ";".join(parts)
+
+
+def _ensure_sqlserver_database(settings: dict[str, str]) -> bool:
+    """Create the configured database on SQL Server when it does not exist.
+
+    Returns True only when this call created the database. Windows integrated
+    authentication is used by _build_sqlserver_conn_str; creation requires the
+    current Windows login to have CREATE DATABASE permission.
+    """
+    if pyodbc is None:
+        raise RuntimeError("Chưa cài thư viện pyodbc.")
+
+    db_name = (
+        settings.get("DB_NAME")
+        or settings.get("SQLSERVER_DATABASE")
+        or "PigSkinTechDB"
+    ).strip()
+    if not db_name or len(db_name) > 128:
+        raise ValueError("Tên database SQL Server phải có từ 1 đến 128 ký tự.")
+
+    quoted_name = f"[{db_name.replace(']', ']]')}]"
+    master = pyodbc.connect(
+        _build_sqlserver_conn_str(settings, database="master"),
+        timeout=3,
+        autocommit=True,
+    )
+    try:
+        cursor = master.cursor()
+        cursor.execute("SELECT DB_ID(?)", (db_name,))
+        if cursor.fetchone()[0] is not None:
+            return False
+        try:
+            cursor.execute(f"CREATE DATABASE {quoted_name}")
+            return True
+        except Exception:
+            # A second app instance may have created it between DB_ID and CREATE.
+            cursor.execute("SELECT DB_ID(?)", (db_name,))
+            if cursor.fetchone()[0] is not None:
+                return False
+            raise
+    finally:
+        master.close()
+
+
+class _DictRow(dict):
+    """Row wrapper supporting both row['col'] and row[0] indexing across pyodbc and sqlite3."""
+
+    def __init__(self, columns: list[str], values: tuple | list):
+        super().__init__(zip(columns, values))
+        self._values = tuple(values)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        if isinstance(key, str) and key not in self:
+            for k in self.keys():
+                if k.lower() == key.lower():
+                    return super().__getitem__(k)
+        return super().__getitem__(key)
+
+
+class _CursorWrapper:
+    def __init__(self, raw_cursor: Any, is_sqlserver: bool, lastrowid: int | None = None):
+        self._cur = raw_cursor
+        self._is_sqlserver = is_sqlserver
+        self.lastrowid = lastrowid if lastrowid is not None else getattr(raw_cursor, "lastrowid", None)
+        self.rowcount = getattr(raw_cursor, "rowcount", -1)
+
+    def _wrap(self, row: Any) -> _DictRow | None:
+        if row is None:
+            return None
+        if isinstance(row, sqlite3.Row):
+            cols = list(row.keys())
+            return _DictRow(cols, [row[k] for k in cols])
+        cols = [col[0] for col in (self._cur.description or [])]
+        return _DictRow(cols, list(row))
+
+    def fetchone(self) -> _DictRow | None:
+        return self._wrap(self._cur.fetchone())
+
+    def fetchall(self) -> list[_DictRow]:
+        rows = self._cur.fetchall()
+        return [self._wrap(r) for r in rows if r is not None]
+
+    def __iter__(self):
+        for r in self.fetchall():
+            yield r
+
+
+_SHARED_CONN_LOCK = threading.RLock()
+_SHARED_RAW_CONN: Any = None
+_SHARED_ENGINE_TYPE: str | None = None
+_SHARED_CONN_STR: str = ""
+_SQLSERVER_RETRY_AFTER = 0.0
+_SQLSERVER_FAILED_CONN_STR = ""
+_SCHEMA_INITIALIZED_KEY: str = ""
+
+
+def _get_shared_connection(force_reconnect: bool = False) -> tuple[Any, bool]:
+    """
+    Quản lý kết nối chia sẻ (Persistent Connection) kết hợp ODBC Connection Pooling (pyodbc.pooling = True).
+    Tự động tái sử dụng kết nối đang mở và tự động kết nối lại (auto-reconnect) nếu bị ngắt.
+    """
+    global _SHARED_RAW_CONN, _SHARED_ENGINE_TYPE, _SHARED_CONN_STR
+    global _SQLSERVER_RETRY_AFTER, _SQLSERVER_FAILED_CONN_STR
+    with _SHARED_CONN_LOCK:
+        settings = read_settings()
+        engine_pref = (settings.get("DATABASE_ENGINE") or "sqlserver").strip().lower()
+
+        if force_reconnect and _SHARED_RAW_CONN is not None:
+            try:
+                _SHARED_RAW_CONN.close()
+            except Exception:
+                pass
+            _SHARED_RAW_CONN = None
+            _SQLSERVER_RETRY_AFTER = 0.0
+            _SQLSERVER_FAILED_CONN_STR = ""
+
+        if pyodbc is not None and engine_pref == "sqlserver":
+            conn_str = _build_sqlserver_conn_str(settings)
+            # Don't block every DB operation by retrying an unavailable SQL Server.
+            # Retry after a short cooldown, or immediately when settings change.
+            if (
+                _SHARED_RAW_CONN is not None
+                and _SHARED_ENGINE_TYPE == "sqlite"
+                and _SQLSERVER_FAILED_CONN_STR == conn_str
+                and time.monotonic() < _SQLSERVER_RETRY_AFTER
+            ):
+                return _SHARED_RAW_CONN, False
+            # Kiểm tra kết nối SQL Server hiện tại
+            if _SHARED_RAW_CONN is not None and _SHARED_ENGINE_TYPE == "sqlserver" and _SHARED_CONN_STR == conn_str:
+                try:
+                    cur = _SHARED_RAW_CONN.cursor()
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+                    cur.close()
+                    return _SHARED_RAW_CONN, True
+                except Exception:
+                    try:
+                        _SHARED_RAW_CONN.close()
+                    except Exception:
+                        pass
+                    _SHARED_RAW_CONN = None
+
+            # Ensure the configured database exists, then connect to that
+            # database (not merely to master) before reporting SQL as active.
+            try:
+                database_created = _ensure_sqlserver_database(settings)
+                _SHARED_RAW_CONN = pyodbc.connect(conn_str, timeout=3)
+                _SHARED_ENGINE_TYPE = "sqlserver"
+                _SHARED_CONN_STR = conn_str
+                _SQLSERVER_FAILED_CONN_STR = ""
+                _SQLSERVER_RETRY_AFTER = 0.0
+                _ACTIVE_DB_INFO.update({
+                    "engine": "SQL Server (pyodbc)",
+                    "server": settings.get("DB_SERVER") or settings.get("SQLSERVER_HOST") or "localhost",
+                    "database": settings.get("DB_NAME") or "PigSkinTechDB",
+                    "status": (
+                        f"Đã tạo database {settings.get('DB_NAME') or 'PigSkinTechDB'} và kết nối SQL Server."
+                        if database_created
+                        else "Đã kết nối đúng database trên SQL Server (Connection Pooling Active)."
+                    ),
+                })
+                return _SHARED_RAW_CONN, True
+            except Exception as exc:
+                _ACTIVE_DB_INFO["last_error"] = str(exc)
+                _SQLSERVER_FAILED_CONN_STR = conn_str
+                _SQLSERVER_RETRY_AFTER = time.monotonic() + 30.0
+
+        # Fallback SQLite
+        if _SHARED_RAW_CONN is not None and _SHARED_ENGINE_TYPE == "sqlite" and _SHARED_CONN_STR == str(DB):
+            return _SHARED_RAW_CONN, False
+        if _SHARED_RAW_CONN is not None:
+            try:
+                _SHARED_RAW_CONN.close()
+            except Exception:
+                pass
+
+        _SHARED_RAW_CONN = sqlite3.connect(DB, check_same_thread=False)
+        _SHARED_RAW_CONN.row_factory = sqlite3.Row
+        _SHARED_ENGINE_TYPE = "sqlite"
+        _SHARED_CONN_STR = str(DB)
+        _ACTIVE_DB_INFO.update({
+            "engine": "SQL Database (Local Engine)",
+            "server": DB.name,
+            "database": settings.get("DB_NAME") or "PigSkinTechDB",
+            "status": "Đang dùng SQL Database cục bộ (SQL Server chưa mở dịch vụ tại cổng 1433)",
+        })
+        return _SHARED_RAW_CONN, False
+
+
+class _UnifiedConnection:
+    """
+    Giao diện kết nối SQL thống nhất:
+    - Sử dụng kết nối chia sẻ bền vững và ODBC Connection Pooling để tăng tốc độ truy vấn tối đa.
+    - Tự động Reconnect nếu mất kết nối giữa chừng mà không làm gián đoạn ứng dụng.
+    """
+
+    def __init__(self):
+        self._raw = None
+        self.is_sqlserver = False
+        self._cursors: list[Any] = []
+
+    def __enter__(self) -> "_UnifiedConnection":
+        _SHARED_CONN_LOCK.acquire()
+        try:
+            self._raw, self.is_sqlserver = _get_shared_connection()
+            return self
+        except Exception:
+            _SHARED_CONN_LOCK.release()
+            raise
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            for cur in self._cursors:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+            self._cursors.clear()
+            if self._raw is not None:
+                if exc_type is None:
+                    self._raw.commit()
+                else:
+                    self._raw.rollback()
+        except Exception:
+            pass
+        finally:
+            _SHARED_CONN_LOCK.release()
+
+    def execute(self, sql: str, params: tuple | list = ()) -> _CursorWrapper:
+        if self._raw is None:
+            self._raw, self.is_sqlserver = _get_shared_connection()
+        query = sql.strip()
+        if self.is_sqlserver:
+            # Dịch SQLite LIMIT 300 sang TOP 300 của T-SQL nếu có
+            if "LIMIT 300" in query:
+                query = query.replace("SELECT *", "SELECT TOP 300 *").replace("LIMIT 300", "")
+
+        try:
+            cur = self._raw.cursor()
+            self._cursors.append(cur)
+            cur.execute(query, tuple(params))
+        except Exception as exc:
+            # Tự động reconnect nếu mất kết nối mạng hoặc timeout
+            err_msg = str(exc).lower()
+            is_conn_lost = self.is_sqlserver and any(
+                code in err_msg for code in ("08s01", "08003", "hy000", "communication link", "closed", "connection reset")
+            )
+            if is_conn_lost:
+                raw_conn, is_sqlserver = _get_shared_connection(force_reconnect=True)
+                self._raw = raw_conn
+                self.is_sqlserver = is_sqlserver
+                cur = self._raw.cursor()
+                self._cursors.append(cur)
+                cur.execute(query, tuple(params))
+            else:
+                raise
+
+        last_id = None
+        if self.is_sqlserver and query.upper().startswith("INSERT "):
+            try:
+                cur.execute("SELECT CAST(COALESCE(SCOPE_IDENTITY(), @@IDENTITY) AS INT)")
+                id_row = cur.fetchone()
+                if id_row and id_row[0] is not None:
+                    last_id = int(id_row[0])
+            except Exception:
+                pass
+        return _CursorWrapper(cur, self.is_sqlserver, lastrowid=last_id)
+
+
+def conn() -> _UnifiedConnection:
+    return _UnifiedConnection()
+
+
+def get_db_status() -> dict[str, str]:
     initialize()
-    case = _validate_case(case or {})
+    return dict(_ACTIVE_DB_INFO)
+
+
+def test_sqlserver_connection(custom_settings: dict[str, str] | None = None) -> dict[str, Any]:
+    global _SHARED_RAW_CONN, _SQLSERVER_RETRY_AFTER, _SQLSERVER_FAILED_CONN_STR
+    if pyodbc is None:
+        return {"ok": False, "message": "Chưa cài đặt thư viện pyodbc."}
+    cfg = read_settings()
+    if custom_settings:
+        cfg.update(custom_settings)
+    try:
+        created = _ensure_sqlserver_database(cfg)
+        conn_str = _build_sqlserver_conn_str(cfg)
+        c = pyodbc.connect(conn_str, timeout=3)
+        cur = c.cursor()
+        cur.execute("SELECT @@VERSION, DB_NAME()")
+        row = cur.fetchone()
+        ver = row[0].splitlines()[0]
+        database = row[1]
+        c.close()
+        # Reset shared connection để cập nhật cấu hình mới nếu có
+        with _SHARED_CONN_LOCK:
+            if _SHARED_RAW_CONN is not None:
+                try:
+                    _SHARED_RAW_CONN.close()
+                except Exception:
+                    pass
+                _SHARED_RAW_CONN = None
+            _SQLSERVER_RETRY_AFTER = 0.0
+            _SQLSERVER_FAILED_CONN_STR = ""
+            global _SCHEMA_INITIALIZED_KEY
+            _SCHEMA_INITIALIZED_KEY = ""
+        state = "đã được tạo và kết nối" if created else "đã tồn tại và kết nối"
+        return {
+            "ok": True,
+            "message": f"SQL Server kết nối thành công; database '{database}' {state}. {ver}",
+        }
+    except Exception as exc:
+        server = (cfg.get("DB_SERVER") or cfg.get("SQLSERVER_HOST") or "localhost").strip()
+        port = (cfg.get("SQLSERVER_PORT") or "1433").strip()
+        detail = str(exc)
+        if "create database permission denied" in detail.lower():
+            return {
+                "ok": False,
+                "message": (
+                    f"Đã tới được SQL Server '{server}', nhưng tài khoản Windows hiện tại không có quyền tạo database. "
+                    "Cần cấp quyền dbcreator/CREATE DATABASE hoặc nhờ quản trị viên tạo database trước. "
+                    f"Chi tiết: {detail}"
+                ),
+            }
+        return {
+            "ok": False,
+            "message": (
+                f"Không kết nối được SQL Server '{server}' (cổng {port}). "
+                "Hãy kiểm tra tên máy/instance, dịch vụ SQL Server đang chạy, TCP/IP và firewall. "
+                "Nếu dùng SQL Express, nhập dạng TEN-MAY\\SQLEXPRESS. "
+                f"Chi tiết ODBC: {detail}"
+            ),
+        }
+
+
+def initialize(force: bool = False):
+    """
+    Tự động khởi tạo các bảng Users, Inspections, ChatMessages, DiseaseCatalog, ModelVersions
+    và View dbo.vw_DashboardKPIs nếu chưa tồn tại.
+    Đồng thời đảm bảo tương thích 100% với kịch bản database_setup.sql.
+    """
+    global _SCHEMA_INITIALIZED_KEY
     with conn() as c:
-        _require_actor(c, owner_id, {'user', 'expert'})
-    case_id = case.get('case_id','').strip()
-    archived_path=''
+        target_key = f"{'sqlserver' if c.is_sqlserver else 'sqlite'}:{_SHARED_CONN_STR}"
+        if not force and _SCHEMA_INITIALIZED_KEY == target_key:
+            return
+        if c.is_sqlserver:
+            c.execute(
+                """
+                IF OBJECT_ID(N'dbo.users', N'U') IS NULL
+                CREATE TABLE dbo.users (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    email NVARCHAR(255) NOT NULL UNIQUE,
+                    username NVARCHAR(128) NOT NULL DEFAULT '',
+                    password_hash NVARCHAR(255) NOT NULL DEFAULT '',
+                    full_name NVARCHAR(255) NOT NULL DEFAULT '',
+                    avatar_url NVARCHAR(1000) NOT NULL DEFAULT '',
+                    google_sub NVARCHAR(255) NOT NULL DEFAULT '',
+                    role NVARCHAR(64) NOT NULL DEFAULT 'user',
+                    auth_provider NVARCHAR(64) NOT NULL DEFAULT 'local',
+                    is_active INT NOT NULL DEFAULT 1,
+                    created_at NVARCHAR(64) NOT NULL
+                );
+                """
+            )
+            c.execute("IF COL_LENGTH('dbo.users', 'username') IS NULL ALTER TABLE dbo.users ADD username NVARCHAR(128) NOT NULL DEFAULT '';")
+            c.execute(
+                """
+                IF OBJECT_ID(N'dbo.inspections', N'U') IS NULL
+                CREATE TABLE dbo.inspections (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    filename NVARCHAR(500) NOT NULL DEFAULT '',
+                    width INT NOT NULL DEFAULT 0,
+                    height INT NOT NULL DEFAULT 0,
+                    size_bytes INT NOT NULL DEFAULT 0,
+                    mode NVARCHAR(64) NOT NULL DEFAULT 'ai',
+                    predicted_class NVARCHAR(255) NULL,
+                    predicted_label NVARCHAR(255) NULL,
+                    confidence FLOAT NULL,
+                    created_at NVARCHAR(64) NOT NULL,
+                    case_id NVARCHAR(64) NOT NULL DEFAULT '',
+                    animal_id NVARCHAR(128) NOT NULL DEFAULT '',
+                    farm_name NVARCHAR(255) NOT NULL DEFAULT '',
+                    body_site NVARCHAR(255) NOT NULL DEFAULT '',
+                    symptoms NVARCHAR(MAX) NOT NULL DEFAULT '',
+                    onset_date NVARCHAR(64) NOT NULL DEFAULT '',
+                    entered_at NVARCHAR(64) NOT NULL DEFAULT '',
+                    image_path NVARCHAR(1000) NOT NULL DEFAULT '',
+                    review_status NVARCHAR(64) NOT NULL DEFAULT 'not_requested',
+                    review_note NVARCHAR(MAX) NOT NULL DEFAULT '',
+                    scores_json NVARCHAR(MAX) NOT NULL DEFAULT '[]',
+                    model_info NVARCHAR(255) NOT NULL DEFAULT '',
+                    user_id INT NOT NULL DEFAULT 1,
+                    user_email NVARCHAR(255) NOT NULL DEFAULT 'nongdan.pigskin@gmail.com',
+                    user_name NVARCHAR(255) NOT NULL DEFAULT N'Nguyễn Văn Nông',
+                    requested_review INT NOT NULL DEFAULT 0,
+                    agreed_with_ai INT NULL,
+                    expert_label NVARCHAR(255) NOT NULL DEFAULT '',
+                    expert_display_name NVARCHAR(255) NULL,
+                    expert_note NVARCHAR(MAX) NOT NULL DEFAULT '',
+                    reviewed_by NVARCHAR(255) NOT NULL DEFAULT '',
+                    reviewed_at NVARCHAR(64) NOT NULL DEFAULT '',
+                    in_dataset INT NOT NULL DEFAULT 0,
+                    danger_level NVARCHAR(128) NOT NULL DEFAULT '',
+                    recommendation NVARCHAR(MAX) NOT NULL DEFAULT '',
+                    inference_ms FLOAT NULL
+                );
+                """
+            )
+            # Đảm bảo các cột bắt buộc luôn hiện diện trên SQL Server (tương thích 100% với database_setup.sql)
+            for col_name, col_def in (
+                ("filename", "NVARCHAR(500) NOT NULL DEFAULT ''"),
+                ("width", "INT NOT NULL DEFAULT 0"),
+                ("height", "INT NOT NULL DEFAULT 0"),
+                ("size_bytes", "INT NOT NULL DEFAULT 0"),
+                ("mode", "NVARCHAR(64) NOT NULL DEFAULT 'ai'"),
+                ("body_site", "NVARCHAR(255) NOT NULL DEFAULT ''"),
+                ("onset_date", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+                ("entered_at", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+                ("review_note", "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+                ("scores_json", "NVARCHAR(MAX) NOT NULL DEFAULT '[]'"),
+                ("model_info", "NVARCHAR(255) NOT NULL DEFAULT ''"),
+                ("predicted_label", "NVARCHAR(255) NULL"),
+                ("expert_display_name", "NVARCHAR(255) NULL"),
+                ("inference_ms", "FLOAT NULL"),
+                ("case_id", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+            ):
+                c.execute(f"IF COL_LENGTH('dbo.inspections', '{col_name}') IS NULL ALTER TABLE dbo.inspections ADD {col_name} {col_def};")
+            c.execute("IF COL_LENGTH('dbo.inspections', 'requested_review') IS NULL ALTER TABLE dbo.inspections ADD requested_review INT NOT NULL DEFAULT 0;")
+            c.execute("IF COL_LENGTH('dbo.inspections', 'review_status') IS NULL ALTER TABLE dbo.inspections ADD review_status NVARCHAR(64) NOT NULL DEFAULT 'not_requested';")
+            c.execute("IF COL_LENGTH('dbo.inspections', 'expert_label') IS NULL ALTER TABLE dbo.inspections ADD expert_label NVARCHAR(255) NOT NULL DEFAULT '';")
+            c.execute("IF COL_LENGTH('dbo.inspections', 'reviewed_at') IS NULL ALTER TABLE dbo.inspections ADD reviewed_at NVARCHAR(64) NOT NULL DEFAULT '';")
+            c.execute("IF COL_LENGTH('dbo.inspections', 'in_dataset') IS NULL ALTER TABLE dbo.inspections ADD in_dataset INT NOT NULL DEFAULT 0;")
+            c.execute("""
+                DECLARE @default_name sysname, @default_sql nvarchar(max), @drop_sql nvarchar(max);
+                SELECT @default_name = dc.name, @default_sql = dc.definition
+                FROM sys.default_constraints dc
+                JOIN sys.columns col ON col.object_id = dc.parent_object_id AND col.column_id = dc.parent_column_id
+                WHERE dc.parent_object_id = OBJECT_ID(N'dbo.inspections') AND col.name = N'review_status';
+                IF @default_sql IS NULL OR @default_sql NOT LIKE '%not_requested%'
+                BEGIN
+                    IF @default_name IS NOT NULL
+                    BEGIN
+                        SET @drop_sql = N'ALTER TABLE dbo.inspections DROP CONSTRAINT ' + QUOTENAME(@default_name);
+                        EXEC(@drop_sql);
+                    END;
+                    ALTER TABLE dbo.inspections ADD CONSTRAINT DF_inspections_review_status_current
+                        DEFAULT 'not_requested' FOR review_status;
+                END;
+            """)
+            c.execute("IF COL_LENGTH('dbo.inspections', 'model_name') IS NOT NULL ALTER TABLE dbo.inspections ALTER COLUMN model_name VARCHAR(150) NULL;")
+
+            c.execute(
+                """
+                IF OBJECT_ID(N'dbo.ChatMessages', N'U') IS NULL
+                CREATE TABLE dbo.ChatMessages (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    timestamp NVARCHAR(64) NOT NULL DEFAULT '',
+                    user_id INT NULL,
+                    user_email NVARCHAR(255) NOT NULL DEFAULT '',
+                    role NVARCHAR(32) NOT NULL DEFAULT 'user',
+                    content NVARCHAR(MAX) NOT NULL DEFAULT '',
+                    case_id NVARCHAR(64) NOT NULL DEFAULT '',
+                    model_name NVARCHAR(128) NOT NULL DEFAULT ''
+                );
+                """
+            )
+            for col_name, col_def in (
+                ("timestamp", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+                ("role", "NVARCHAR(32) NOT NULL DEFAULT 'user'"),
+                ("content", "NVARCHAR(MAX) NOT NULL DEFAULT ''"),
+                ("model_name", "NVARCHAR(128) NOT NULL DEFAULT ''"),
+                ("case_id", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+            ):
+                c.execute(f"IF COL_LENGTH('dbo.ChatMessages', '{col_name}') IS NULL ALTER TABLE dbo.ChatMessages ADD [{col_name}] {col_def};")
+            c.execute("IF COL_LENGTH('dbo.ChatMessages', 'message_text') IS NOT NULL ALTER TABLE dbo.ChatMessages ALTER COLUMN message_text NVARCHAR(MAX) NULL;")
+
+            c.execute(
+                """
+                IF OBJECT_ID(N'dbo.DiseaseCatalog', N'U') IS NULL
+                CREATE TABLE dbo.DiseaseCatalog (
+                    code NVARCHAR(128) PRIMARY KEY,
+                    name_vi NVARCHAR(255) NOT NULL,
+                    danger_level NVARCHAR(64) NOT NULL DEFAULT N'Trung bình',
+                    symptoms NVARCHAR(MAX) NOT NULL DEFAULT '',
+                    prevention NVARCHAR(MAX) NOT NULL DEFAULT '',
+                    treatment NVARCHAR(MAX) NOT NULL DEFAULT '',
+                    updated_at NVARCHAR(64) NOT NULL DEFAULT ''
+                );
+                """
+            )
+            for col_name, col_def in (
+                ("code", "NVARCHAR(128) NULL"),
+                ("name_vi", "NVARCHAR(255) NULL"),
+                ("treatment", "NVARCHAR(MAX) NULL"),
+                ("updated_at", "NVARCHAR(64) NOT NULL DEFAULT ''"),
+            ):
+                c.execute(f"IF COL_LENGTH('dbo.DiseaseCatalog', '{col_name}') IS NULL ALTER TABLE dbo.DiseaseCatalog ADD {col_name} {col_def};")
+            c.execute("IF COL_LENGTH('dbo.DiseaseCatalog', 'class_key') IS NOT NULL ALTER TABLE dbo.DiseaseCatalog ALTER COLUMN class_key VARCHAR(120) NULL;")
+            c.execute("IF COL_LENGTH('dbo.DiseaseCatalog', 'display_name') IS NOT NULL ALTER TABLE dbo.DiseaseCatalog ALTER COLUMN display_name NVARCHAR(255) NULL;")
+
+            c.execute(
+                """
+                IF OBJECT_ID(N'dbo.ModelVersions', N'U') IS NULL
+                CREATE TABLE dbo.ModelVersions (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    version_name NVARCHAR(200) NOT NULL,
+                    architecture VARCHAR(100) NOT NULL,
+                    weights_path NVARCHAR(500) NOT NULL UNIQUE,
+                    accuracy FLOAT NULL,
+                    is_active BIT NOT NULL DEFAULT 0,
+                    activated_by NVARCHAR(255) NULL,
+                    activated_at NVARCHAR(64) NOT NULL DEFAULT ''
+                );
+                """
+            )
+            # Khởi tạo hoặc cập nhật View dbo.vw_DashboardKPIs
+            c.execute(
+                """
+                EXEC(N'
+                CREATE OR ALTER VIEW dbo.vw_DashboardKPIs AS
+                SELECT
+                    (SELECT COUNT(1) FROM dbo.users WHERE is_active = 1) AS total_users,
+                    COUNT(1) AS total_inspections,
+                    ISNULL(SUM(CASE WHEN requested_review = 1 AND review_status = ''needs_review'' THEN 1 ELSE 0 END), 0) AS pending_reviews,
+                    ISNULL(SUM(CASE WHEN review_status = ''reviewed'' THEN 1 ELSE 0 END), 0) AS reviewed_count,
+                    ISNULL(SUM(CASE WHEN review_status = ''reviewed'' AND agreed_with_ai = 1 THEN 1 ELSE 0 END), 0) AS agreed_count,
+                    CAST(
+                        CASE 
+                            WHEN SUM(CASE WHEN review_status = ''reviewed'' THEN 1 ELSE 0 END) > 0 
+                            THEN (SUM(CASE WHEN review_status = ''reviewed'' AND agreed_with_ai = 1 THEN 1.0 ELSE 0.0 END) * 100.0) 
+                                 / SUM(CASE WHEN review_status = ''reviewed'' THEN 1.0 ELSE 0.0 END)
+                            ELSE 0.0 
+                        END AS DECIMAL(5,1)
+                    ) AS ai_agreement_rate,
+                    ISNULL(SUM(CASE WHEN in_dataset = 1 THEN 1 ELSE 0 END), 0) AS dataset_count,
+                    ISNULL(AVG(confidence), 0.0) AS avg_confidence,
+                    (SELECT COUNT(1) FROM dbo.ChatMessages) AS total_chats
+                FROM dbo.inspections;
+                ');
+                """
+            )
+        else:
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email TEXT NOT NULL UNIQUE,
+                    username TEXT NOT NULL DEFAULT '',
+                    password_hash TEXT NOT NULL DEFAULT '',
+                    full_name TEXT NOT NULL DEFAULT '',
+                    avatar_url TEXT NOT NULL DEFAULT '',
+                    google_sub TEXT NOT NULL DEFAULT '',
+                    role TEXT NOT NULL DEFAULT 'user',
+                    auth_provider TEXT NOT NULL DEFAULT 'local',
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            existing_user_cols = {row["name"] for row in c.execute("PRAGMA table_info(users)")}
+            if "google_sub" not in existing_user_cols:
+                c.execute("ALTER TABLE users ADD COLUMN google_sub TEXT NOT NULL DEFAULT ''")
+
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS inspections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    mode TEXT NOT NULL,
+                    predicted_class TEXT,
+                    predicted_label TEXT,
+                    confidence REAL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            existing = {row["name"] for row in c.execute("PRAGMA table_info(inspections)")}
+            for name, definition in CASE_COLUMNS.items():
+                if name not in existing:
+                    c.execute(f"ALTER TABLE inspections ADD COLUMN {name} {definition}")
+            _migrate_sqlite_review_default(c)
+
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS ChatMessages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    user_id INTEGER,
+                    user_email TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    case_id TEXT NOT NULL DEFAULT '',
+                    model_name TEXT NOT NULL DEFAULT ''
+                )"""
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS DiseaseCatalog (
+                    code TEXT PRIMARY KEY,
+                    name_vi TEXT NOT NULL,
+                    danger_level TEXT NOT NULL DEFAULT 'Trung bình',
+                    symptoms TEXT NOT NULL DEFAULT '',
+                    prevention TEXT NOT NULL DEFAULT '',
+                    treatment TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT ''
+                )"""
+            )
+            c.execute(
+                """CREATE TABLE IF NOT EXISTS ModelVersions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version_name TEXT NOT NULL,
+                    architecture TEXT NOT NULL,
+                    weights_path TEXT NOT NULL UNIQUE,
+                    accuracy REAL,
+                    is_active INTEGER NOT NULL DEFAULT 0,
+                    activated_by TEXT,
+                    activated_at TEXT NOT NULL DEFAULT ''
+                )"""
+            )
+            view_row = c.execute(
+                "SELECT sql FROM sqlite_master WHERE type='view' AND name='vw_DashboardKPIs'"
+            ).fetchone()
+            if view_row and "needs_review" not in view_row["sql"]:
+                c.execute("DROP VIEW vw_DashboardKPIs")
+            c.execute(
+                """
+                CREATE VIEW IF NOT EXISTS vw_DashboardKPIs AS
+                SELECT
+                    (SELECT COUNT(1) FROM users WHERE is_active = 1) AS total_users,
+                    COUNT(1) AS total_inspections,
+                    COALESCE(SUM(CASE WHEN requested_review = 1 AND review_status = 'needs_review' THEN 1 ELSE 0 END), 0) AS pending_reviews,
+                    COALESCE(SUM(CASE WHEN review_status = 'reviewed' THEN 1 ELSE 0 END), 0) AS reviewed_count,
+                    COALESCE(SUM(CASE WHEN review_status = 'reviewed' AND agreed_with_ai = 1 THEN 1 ELSE 0 END), 0) AS agreed_count,
+                    CASE 
+                        WHEN SUM(CASE WHEN review_status = 'reviewed' THEN 1 ELSE 0 END) > 0 
+                        THEN (SUM(CASE WHEN review_status = 'reviewed' AND agreed_with_ai = 1 THEN 1.0 ELSE 0.0 END) * 100.0) 
+                             / SUM(CASE WHEN review_status = 'reviewed' THEN 1.0 ELSE 0.0 END)
+                        ELSE 0.0 
+                    END AS ai_agreement_rate,
+                    COALESCE(SUM(CASE WHEN in_dataset = 1 THEN 1 ELSE 0 END), 0) AS dataset_count,
+                    COALESCE(AVG(confidence), 0.0) AS avg_confidence,
+                    (SELECT COUNT(1) FROM ChatMessages) AS total_chats
+                FROM inspections;
+                """
+            )
+
+        c.execute("""UPDATE inspections SET review_status='needs_review'
+            WHERE requested_review=1 AND review_status IN ('pending', 'not_requested')
+            AND (reviewed_at IS NULL OR reviewed_at='')
+            AND (expert_label IS NULL OR expert_label='')""")
+        c.execute("""UPDATE inspections SET review_status='not_requested'
+            WHERE requested_review=0 AND review_status IN ('pending', 'needs_review')
+            AND (reviewed_at IS NULL OR reviewed_at='')
+            AND (expert_label IS NULL OR expert_label='')""")
+
+        # Backfill case_id nếu có bản ghi cũ bị thiếu mã
+        if c.is_sqlserver:
+            try:
+                c.execute("""
+                UPDATE dbo.inspections
+                SET case_id = 'PS-' + RIGHT('000000' + CAST(id AS VARCHAR(10)), 6)
+                WHERE case_id IS NULL OR case_id = ''
+                """)
+            except Exception:
+                pass
+        else:
+            try:
+                c.execute("""
+                UPDATE inspections
+                SET case_id = printf('PS-%06d', id)
+                WHERE case_id IS NULL OR case_id = ''
+                """)
+            except Exception:
+                pass
+
+        # Backfill predicted_label theo danh mục bệnh
+        from services.project_data import load_classes_config
+        classes_cfg = load_classes_config()
+        for code, info in classes_cfg.items():
+            name_vi = info.get("name_vi") or code
+            try:
+                c.execute(
+                    "UPDATE inspections SET predicted_label = ? WHERE predicted_class = ? AND (predicted_label IS NULL OR predicted_label = '')",
+                    (name_vi, code),
+                )
+            except Exception:
+                pass
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        demo_password = read_settings().get("PIGSKIN_DEMO_PASSWORD", "").strip()
+        default_pw = _hash_password(demo_password) if demo_password else ""
+        for acc in DEFAULT_RBAC_USERS if demo_password else ():
+            existing_u = c.execute("SELECT id FROM users WHERE LOWER(email)=?", (acc["email"].lower(),)).fetchone()
+            if not existing_u:
+                c.execute(
+                    """INSERT INTO users
+                    (email, username, password_hash, full_name, avatar_url, google_sub, role, auth_provider, is_active, created_at)
+                    VALUES (?, ?, ?, ?, ?, '', ?, ?, 1, ?)""",
+                    (
+                        acc["email"],
+                        acc["username"],
+                        default_pw,
+                        acc["full_name"],
+                        acc["avatar_url"],
+                        acc["role"],
+                        acc["auth_provider"],
+                        now_str,
+                    ),
+                )
+        _SCHEMA_INITIALIZED_KEY = target_key
+
+
+def get_sample_gallery() -> list[dict]:
+    """Return the 5 real pig skin images from PigSkinTech/assets/demo/ for running real AI model inference."""
+    items = []
+    for sample in SAMPLE_GALLERY_CASES:
+        p = Path(__file__).resolve().parents[1] / "assets" / "demo" / sample["filename"]
+        items.append({**sample, "path": str(p), "image_path": str(p), "exists": p.is_file()})
+    return items
+
+
+def save(info, result, case=None, source_image=None):
+    initialize()
+    case = case or {}
+    case_id = (case.get("case_id") or "").strip()
+    archived_path = ""
     if source_image:
-        source=Path(source_image)
-        inspect_image(source)
-        if not source.is_file() or source.suffix.lower() not in ('.jpg','.jpeg','.png','.webp'):
-            raise ValueError('Không thể lưu ảnh hồ sơ không hợp lệ.')
-        IMAGE_DIR.mkdir(parents=True,exist_ok=True)
-        destination=IMAGE_DIR / f'{uuid4().hex}{source.suffix.lower()}'
-        shutil.copy2(source,destination)
-        archived_path=str(destination)
+        source = Path(source_image)
+        if not source.is_file() or source.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
+            raise ValueError("Không thể lưu ảnh hồ sơ không hợp lệ.")
+        IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+        destination = IMAGE_DIR / f"{uuid4().hex}{source.suffix.lower()}"
+        shutil.copy2(source, destination)
+        archived_path = str(destination)
+
+    label = result.get("label") or ""
+    cls_meta = get_class_info(label)
+    display_label = (result.get("display_label") or cls_meta.get("name_vi") or str(label)).strip()
+    danger_level = result.get("danger_level") or cls_meta.get("danger_level", "Trung bình")
+    recommendation = result.get("recommendation") or cls_meta.get("treatment", "")
+    inference_ms = float(result.get("inference_ms") or 0.0)
+
     try:
         with conn() as c:
-            _require_actor(c, owner_id, {'user', 'expert'})
-            cur = c.execute('''INSERT INTO dbo.inspections
-        (filename,width,height,size_bytes,mode,predicted_class,confidence,created_at,image_path,
-         case_id,animal_id,farm_name,body_site,symptoms,onset_date,entered_at,review_status,
-         review_note,scores_json,model_info,user_id)
-        OUTPUT INSERTED.id
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (
-            info['name'],info['width'],info['height'],info['bytes'],result['mode'],
-            result.get('label'),result.get('confidence'),datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            archived_path,
-            case_id,case.get('animal_id','').strip(),case.get('farm_name','').strip(),
-            case.get('body_site','').strip(),case.get('symptoms','').strip(),
-            case.get('onset_date','').strip(),case.get('entered_at','').strip(),
-            case.get('review_status','needs_review'),
-            case.get('review_note','').strip(),
-            json.dumps(result.get('scores',[]),ensure_ascii=False),
-            result.get('model_info',''),owner_id))
-            record_id = cur.fetchone()['id']
-            if not case_id:
-                case_id = f'PS-{record_id:06d}'
-                c.execute('UPDATE dbo.inspections SET case_id=? WHERE id=?',(case_id,record_id))
-            return record_id
+            # Dùng mã tạm duy nhất khi INSERT để tránh đụng độ UNIQUE constraint (UQ_Inspections_CaseId) nếu có bản ghi cũ từng bị xóa
+            auto_assign_code = not case_id
+            if auto_assign_code:
+                case_id = f"TMP-{uuid4().hex[:8].upper()}"
+
+            cur = c.execute(
+                """INSERT INTO inspections
+                (filename,width,height,size_bytes,mode,predicted_class,predicted_label,confidence,created_at,image_path,
+                 case_id,animal_id,farm_name,body_site,symptoms,onset_date,entered_at,review_status,
+                 review_note,scores_json,model_info,user_id,user_email,user_name,requested_review,
+                 danger_level,recommendation,inference_ms)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    info["name"],
+                    int(info["width"]),
+                    int(info["height"]),
+                    int(info["bytes"]),
+                    result.get("mode", "production"),
+                    label,
+                    display_label,
+                    float(result.get("confidence") or 0.0),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    archived_path,
+                    case_id,
+                    case.get("animal_id", "").strip(),
+                    case.get("farm_name", "").strip(),
+                    case.get("body_site", "").strip(),
+                    case.get("symptoms", "").strip(),
+                    case.get("onset_date", "").strip(),
+                    case.get("entered_at", "").strip(),
+                    case.get("review_status", "needs_review"),
+                    case.get("review_note", "").strip(),
+                    json.dumps(result.get("scores", []), ensure_ascii=False),
+                    str(result.get("model_info", "")),
+                    int(case.get("user_id") or 1),
+                    case.get("user_email", "nongdan.pigskin@gmail.com").strip(),
+                    case.get("user_name", "Người chăn nuôi").strip(),
+                    int(case.get("requested_review") or 0),
+                    danger_level,
+                    recommendation,
+                    inference_ms,
+                ),
+            )
+            row_id = int(cur.lastrowid or 0)
+            if row_id == 0:
+                try:
+                    last_row = c.execute("SELECT MAX(id) AS mid FROM inspections").fetchone()
+                    if last_row and last_row["mid"]:
+                        row_id = int(last_row["mid"])
+                except Exception:
+                    pass
+
+            if row_id > 0 and (auto_assign_code or case_id.startswith("TMP-")):
+                actual_code = f"PS-{row_id:06d}"
+                if case_id != actual_code:
+                    try:
+                        c.execute("UPDATE inspections SET case_id=? WHERE id=?", (actual_code, row_id))
+                        case_id = actual_code
+                    except Exception:
+                        fallback_code = f"PS-{row_id:06d}-{uuid4().hex[:3].upper()}"
+                        c.execute("UPDATE inspections SET case_id=? WHERE id=?", (fallback_code, row_id))
+                        case_id = fallback_code
+
+            return row_id
     except Exception:
         if archived_path:
             Path(archived_path).unlink(missing_ok=True)
         raise
 
-def recent(keyword='', owner_id=None, actor_id=None, limit=300, offset=0, status=None):
-    initialize()
-    if not isinstance(keyword, str):
-        raise ValueError('Từ khóa tìm kiếm không hợp lệ.')
-    if (isinstance(limit, bool) or not isinstance(limit, int)
-            or isinstance(offset, bool) or not isinstance(offset, int)
-            or not 1 <= limit <= 300 or offset < 0):
-        raise ValueError('Tham số phân trang không hợp lệ.')
-    if status is not None and status not in {'not_started','returned','pending_approval','published'}:
-        raise ValueError('Trạng thái hồ sơ không hợp lệ.')
-    with conn() as c:
-        role = _require_actor(c, actor_id, {'user', 'expert', 'admin'})
-        if role == 'user' and owner_id != actor_id:
-            raise ValueError('Bạn chỉ có thể xem hồ sơ của mình.')
-        if role != 'user' and owner_id is not None:
-            raise ValueError('Bộ lọc chủ sở hữu không hợp lệ cho vai trò này.')
-        pattern = '%'+keyword+'%'
-        where = '(filename LIKE ? OR case_id LIKE ? OR animal_id LIKE ? OR farm_name LIKE ?)'
-        parameters = [pattern] * 4
-        if owner_id is not None:
-            where = 'user_id=? AND ' + where
-            parameters.insert(0, owner_id)
-        if status is not None:
-            where += ' AND result_status=?'
-            parameters.append(status)
-        rows = c.execute(f'''SELECT * FROM dbo.inspections WHERE {where}
-            ORDER BY id DESC OFFSET ? ROWS FETCH NEXT ? ROWS ONLY''',
-            (*parameters, offset, limit)).fetchall()
-        result = [dict(r) for r in rows]
-        for item in result:
-            item['result_status'] = item.get('result_status') or 'not_started'
-            item['result_seen'] = bool(item.get('result_seen'))
-            if role == 'user' and item['result_status'] != 'published':
-                for key in ('result_category','expert_result','expert_notes',
-                            'expert_id','result_submitted_at','approved_by','approved_at'):
-                    item[key] = None
-        return result
 
-
-def count_cases(keyword='', owner_id=None, actor_id=None, status=None):
-    initialize()
-    if not isinstance(keyword, str):
-        raise ValueError('Từ khóa tìm kiếm không hợp lệ.')
-    if status is not None and status not in {'not_started','returned','pending_approval','published'}:
-        raise ValueError('Trạng thái hồ sơ không hợp lệ.')
-    with conn() as c:
-        role = _require_actor(c, actor_id, {'user', 'expert', 'admin'})
-        if role == 'user' and owner_id != actor_id:
-            raise ValueError('Bạn chỉ có thể xem hồ sơ của mình.')
-        if role != 'user' and owner_id is not None:
-            raise ValueError('Bộ lọc chủ sở hữu không hợp lệ cho vai trò này.')
-        pattern = '%'+keyword+'%'
-        where = '(filename LIKE ? OR case_id LIKE ? OR animal_id LIKE ? OR farm_name LIKE ?)'
-        parameters = [pattern] * 4
-        if owner_id is not None:
-            where = 'user_id=? AND ' + where
-            parameters.insert(0, owner_id)
-        if status is not None:
-            where += ' AND result_status=?'
-            parameters.append(status)
-        return c.execute(f'SELECT COUNT(*) AS count FROM dbo.inspections WHERE {where}',
-                         parameters).fetchone()[0]
-
-
-def case_summary(actor_id):
-    """Exact dashboard counts, independent of history pagination."""
-    initialize()
-    with conn() as c:
-        role = _require_actor(c, actor_id, {'user', 'expert'})
-        where = 'WHERE user_id=?' if role == 'user' else ''
-        parameters = (actor_id, actor_id) if role == 'user' else (actor_id,)
-        row = c.execute(f'''SELECT COUNT(*) AS total,
-            SUM(CASE WHEN result_status IN ('not_started','returned') THEN 1 ELSE 0 END) AS pending,
-            SUM(CASE WHEN result_status='pending_approval' THEN 1 ELSE 0 END) AS second_review,
-            SUM(CASE WHEN result_status='published' THEN 1 ELSE 0 END) AS published,
-            SUM(CASE WHEN mode='ai' AND predicted_class IS NOT NULL THEN 1 ELSE 0 END) AS inferred,
-            SUM(CASE WHEN expert_id=? THEN 1 ELSE 0 END) AS authored
-            FROM dbo.inspections {where}''', parameters).fetchone()
-    return {key: row[key] or 0 for key in
-        ('total','pending','second_review','published','inferred','authored')}
-
-
-def authorized_image_path(record_id, actor_id):
-    """Resolve an archived image only after checking the current account."""
-    initialize()
-    with conn() as c:
-        role = _require_actor(c, actor_id, {'user', 'expert', 'admin'})
-        if role == 'user':
-            row = c.execute(
-                'SELECT image_path FROM dbo.inspections WHERE id=? AND user_id=?',
-                (record_id, actor_id)
-            ).fetchone()
+def ensure_case_code(record: dict) -> dict:
+    """Bổ sung mã hồ sơ chuẩn `PS-000001` và tên nhãn tiếng Việt `predicted_label`."""
+    if not (record.get("case_id") or "").strip():
+        if record.get("id"):
+            record["case_id"] = f"PS-{int(record['id']):06d}"
         else:
-            row = c.execute(
-                'SELECT image_path FROM dbo.inspections WHERE id=?', (record_id,)
-            ).fetchone()
-    if row is None or not row['image_path']:
-        raise ValueError('Không tìm thấy ảnh hoặc bạn không có quyền xem hồ sơ.')
-    path = Path(row['image_path']).resolve()
-    if IMAGE_DIR.resolve() not in path.parents or not path.is_file():
-        raise ValueError('Không tìm thấy ảnh đã lưu trong hồ sơ.')
-    return path
+            record["case_id"] = record.get("animal_id") or "PS-000001"
+    if not (record.get("predicted_label") or "").strip():
+        pred_cls = record.get("predicted_class") or ""
+        cls_info = get_class_info(pred_cls)
+        record["predicted_label"] = cls_info.get("name_vi") or pred_cls
+    if not (record.get("expert_display_name") or "").strip() and record.get("expert_label"):
+        exp_cls = record.get("expert_label") or ""
+        cls_info = get_class_info(exp_cls)
+        record["expert_display_name"] = cls_info.get("name_vi") or exp_cls
+    return record
 
-def delete(record_id, owner_id):
+
+def recent(keyword=""):
     initialize()
-    if owner_id is None:
-        raise ValueError('Hãy đăng nhập bằng tài khoản người dùng để xóa hồ sơ.')
     with conn() as c:
-        actor=c.execute('SELECT role,active FROM dbo.users WHERE id=?',(owner_id,)).fetchone()
-        if actor is None or actor['role']!='user' or not actor['active']:
-            raise ValueError('Chỉ người dùng đang hoạt động mới được xóa hồ sơ của mình.')
-        row=c.execute('''SELECT image_path FROM dbo.inspections WITH (UPDLOCK,HOLDLOCK)
-            WHERE id=? AND user_id=? AND result_status='not_started'
-                AND expert_id IS NULL AND approved_by IS NULL
-                AND review_status='needs_review' ''',(record_id,owner_id)).fetchone()
-        if row is None:
-            raise ValueError(
-                'Chỉ có thể xóa hồ sơ của bạn chưa được chuyên gia tiếp nhận hoặc xử lý.'
+        pattern = "%" + keyword + "%"
+        rows = c.execute(
+            """SELECT * FROM inspections
+            WHERE filename LIKE ? OR case_id LIKE ? OR animal_id LIKE ? OR farm_name LIKE ?
+            ORDER BY id DESC LIMIT 300""",
+            (pattern, pattern, pattern, pattern),
+        ).fetchall()
+        return [ensure_case_code(dict(r)) for r in rows]
+
+
+def list_user_inspections(user_email: str, date_filter: str = "", disease_filter: str = "all") -> list[dict]:
+    initialize()
+    clauses = ["LOWER(user_email) = LOWER(?)"]
+    params: list[Any] = [user_email.strip()]
+
+    if date_filter.strip():
+        clauses.append("created_at LIKE ?")
+        params.append(f"%{date_filter.strip()}%")
+    if disease_filter and disease_filter != "all":
+        clauses.append("COALESCE(NULLIF(expert_label, ''), predicted_class) = ?")
+        params.append(disease_filter)
+
+    where_sql = " AND ".join(clauses)
+    with conn() as c:
+        rows = c.execute(
+            f"SELECT * FROM inspections WHERE {where_sql} ORDER BY id DESC",
+            tuple(params),
+        ).fetchall()
+    return [ensure_case_code(dict(r)) for r in rows]
+
+
+def request_expert_review(record_id: int) -> None:
+    initialize()
+    with conn() as c:
+        c.execute(
+            """UPDATE inspections SET requested_review=1, review_status='needs_review'
+            WHERE id=? AND requested_review=0 AND review_status!='reviewed'""",
+            (record_id,),
+        )
+
+
+def list_review_queue(include_reviewed: bool = False) -> list[dict]:
+    """Return user-requested pending cases; optionally include completed reviews for history."""
+    initialize()
+    with conn() as c:
+        rows = c.execute(
+            """SELECT * FROM inspections
+            WHERE (requested_review = 1 AND review_status = 'needs_review')
+               OR (? = 1 AND review_status = 'reviewed')
+            ORDER BY CASE WHEN review_status='needs_review' THEN 0 ELSE 1 END, id DESC""",
+            (1 if include_reviewed else 0,),
+        ).fetchall()
+    return [ensure_case_code(dict(r)) for r in rows]
+
+
+def submit_expert_review(
+    record_id: int,
+    agreed_with_ai: bool,
+    expert_label: str,
+    expert_note: str,
+    expert_email: str,
+) -> None:
+    initialize()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with conn() as c:
+        row = c.execute("SELECT predicted_class FROM inspections WHERE id=?", (record_id,)).fetchone()
+        pred = row["predicted_class"] if row else ""
+        final_label = pred if agreed_with_ai else (expert_label or pred)
+        expert_cls_meta = get_class_info(final_label)
+        expert_display = expert_cls_meta.get("name_vi") or final_label
+        c.execute(
+            """UPDATE inspections
+            SET review_status='reviewed',
+                agreed_with_ai=?,
+                expert_label=?,
+                expert_display_name=?,
+                expert_note=?,
+                review_note=?,
+                reviewed_by=?,
+                reviewed_at=?
+            WHERE id=?""",
+            (
+                1 if agreed_with_ai else 0,
+                final_label,
+                expert_display,
+                expert_note.strip(),
+                expert_note.strip(),
+                expert_email.strip(),
+                now_str,
+                record_id,
+            ),
+        )
+
+
+def list_curated_candidates() -> list[dict]:
+    """Return all cases that have been standardized/labeled by an Expert."""
+    initialize()
+    with conn() as c:
+        rows = c.execute(
+            """SELECT * FROM inspections
+            WHERE review_status='reviewed' AND expert_label != ''
+            ORDER BY reviewed_at DESC, id DESC"""
+        ).fetchall()
+    return [ensure_case_code(dict(r)) for r in rows]
+
+
+def approve_for_dataset(record_id: int, approved: bool = True) -> str:
+    """Mark a standardized expert-reviewed image as included in the clean training dataset."""
+    initialize()
+    with conn() as c:
+        row = c.execute("SELECT * FROM inspections WHERE id=?", (record_id,)).fetchone()
+        if not row:
+            raise ValueError("Không tìm thấy bản ghi chẩn đoán.")
+        if approved:
+            if row["review_status"] != "reviewed" or not (row["expert_label"] or "").strip():
+                raise ValueError("Hồ sơ cần được chuyên gia duyệt và gắn nhãn trước khi đưa vào dataset.")
+            if not row["image_path"] or not Path(row["image_path"]).is_file():
+                raise ValueError("Không tìm thấy ảnh gốc của hồ sơ để đưa vào dataset.")
+        c.execute("UPDATE inspections SET in_dataset=? WHERE id=?", (1 if approved else 0, record_id))
+        if approved:
+            label_dir = CURATED_DIR / row["expert_label"]
+            label_dir.mkdir(parents=True, exist_ok=True)
+            dest = label_dir / f"{row['case_id']}_{Path(row['image_path']).name}"
+            shutil.copy2(row["image_path"], dest)
+            return str(dest)
+    return ""
+
+
+def get_system_stats() -> dict:
+    """
+    Truy vấn siêu tốc toàn bộ số liệu thống kê KPI chỉ trong 1 lần gọi DB qua View dbo.vw_DashboardKPIs,
+    kèm phân bố bệnh và biểu đồ dịch tễ 7 ngày.
+    """
+    initialize()
+    total_users = 0
+    total_inspections = 0
+    reviewed_count = 0
+    agreed_count = 0
+    pending_count = 0
+    curated_count = 0
+    avg_confidence = 0.0
+    total_chats = 0
+    ai_accuracy_vs_expert = 0.0
+
+    with conn() as c:
+        # 1. Truy vấn KPI gộp qua View dbo.vw_DashboardKPIs (1 lần gọi DB duy nhất)
+        kpi_row = None
+        try:
+            view_name = "dbo.vw_DashboardKPIs" if c.is_sqlserver else "vw_DashboardKPIs"
+            kpi_row = c.execute(f"SELECT * FROM {view_name}").fetchone()
+        except Exception:
+            kpi_row = None
+
+        if kpi_row is not None:
+            total_users = int(kpi_row.get("total_users") or 0)
+            total_inspections = int(kpi_row.get("total_inspections") or 0)
+            reviewed_count = int(kpi_row.get("reviewed_count") or 0)
+            agreed_count = int(kpi_row.get("agreed_count") or 0)
+            pending_count = int(
+                kpi_row.get("pending_reviews")
+                if kpi_row.get("pending_reviews") is not None
+                else (kpi_row.get("pending_count") or max(0, total_inspections - reviewed_count))
             )
-        result=c.execute('''DELETE FROM dbo.inspections
-            WHERE id=? AND user_id=? AND result_status='not_started'
-                AND expert_id IS NULL AND approved_by IS NULL
-                AND review_status='needs_review' ''',(record_id,owner_id))
-        if result.rowcount != 1:
-            raise ValueError('Hồ sơ vừa thay đổi trạng thái; hãy tải lại lịch sử rồi thử lại.')
-    if row and row['image_path']:
-        image_file=Path(row['image_path']).resolve()
-        archive_root=IMAGE_DIR.resolve()
+            curated_count = int(kpi_row.get("dataset_count") or kpi_row.get("curated_count") or 0)
+            ai_accuracy_vs_expert = float(
+                kpi_row.get("ai_agreement_rate")
+                if kpi_row.get("ai_agreement_rate") is not None
+                else ((agreed_count / reviewed_count * 100.0) if reviewed_count > 0 else 0.0)
+            )
+            avg_confidence = float(kpi_row.get("avg_confidence") or 0.0)
+            total_chats = int(kpi_row.get("total_chats") or 0)
+        else:
+            # Fallback nếu View chưa tồn tại: gộp chung 1 câu SELECT duy nhất
+            u_tbl = "dbo.users" if c.is_sqlserver else "users"
+            i_tbl = "dbo.inspections" if c.is_sqlserver else "inspections"
+            c_tbl = "dbo.ChatMessages" if c.is_sqlserver else "ChatMessages"
+            single_sql = f"""
+            SELECT
+                (SELECT COUNT(1) FROM {u_tbl} WHERE is_active=1) AS total_users,
+                (SELECT COUNT(1) FROM {i_tbl}) AS total_inspections,
+                (SELECT COUNT(1) FROM {i_tbl} WHERE review_status='reviewed' AND agreed_with_ai IS NOT NULL) AS reviewed_count,
+                (SELECT COUNT(1) FROM {i_tbl} WHERE review_status='reviewed' AND agreed_with_ai=1) AS agreed_count,
+                (SELECT COUNT(1) FROM {i_tbl} WHERE review_status != 'reviewed') AS pending_count,
+                (SELECT COUNT(1) FROM {i_tbl} WHERE in_dataset=1) AS curated_count,
+                (SELECT COALESCE(AVG(confidence), 0.0) FROM {i_tbl}) AS avg_confidence,
+                (SELECT COUNT(1) FROM {c_tbl}) AS total_chats
+            """
+            merged_row = c.execute(single_sql).fetchone()
+            if merged_row:
+                total_users = int(merged_row["total_users"] or 0)
+                total_inspections = int(merged_row["total_inspections"] or 0)
+                reviewed_count = int(merged_row["reviewed_count"] or 0)
+                agreed_count = int(merged_row["agreed_count"] or 0)
+                pending_count = int(merged_row["pending_count"] or 0)
+                curated_count = int(merged_row["curated_count"] or 0)
+                avg_confidence = float(merged_row["avg_confidence"] or 0.0)
+                total_chats = int(merged_row["total_chats"] or 0)
+                ai_accuracy_vs_expert = (agreed_count / reviewed_count * 100.0) if reviewed_count > 0 else 0.0
+
+        # Nếu chưa có avg_confidence hoặc total_chats mà có inspections
+        if avg_confidence == 0.0 and total_inspections > 0:
+            try:
+                avg_row = c.execute("SELECT AVG(confidence) AS avg_c FROM inspections").fetchone()
+                if avg_row and avg_row["avg_c"] is not None:
+                    avg_confidence = float(avg_row["avg_c"])
+            except Exception:
+                pass
+
+        if total_chats == 0:
+            try:
+                chat_row = c.execute("SELECT COUNT(1) AS cnt FROM ChatMessages").fetchone()
+                if chat_row and chat_row["cnt"] is not None:
+                    total_chats = int(chat_row["cnt"])
+            except Exception:
+                pass
+
+        # 2. Phân bố bệnh lý
+        dist_rows = c.execute(
+            """
+            SELECT COALESCE(NULLIF(expert_label, ''), predicted_class) AS lbl, COUNT(*) AS cnt
+            FROM inspections
+            WHERE COALESCE(NULLIF(expert_label, ''), predicted_class) IS NOT NULL
+              AND COALESCE(NULLIF(expert_label, ''), predicted_class) != ''
+            GROUP BY COALESCE(NULLIF(expert_label, ''), predicted_class)
+            ORDER BY cnt DESC
+            """
+        ).fetchall()
+
+        # 3. Xu hướng 7 ngày
+        date_expr = "LEFT(created_at, 10)" if c.is_sqlserver else "SUBSTR(created_at, 1, 10)"
+        trend_rows = c.execute(
+            f"""
+            SELECT {date_expr} AS d, COUNT(*) AS cnt
+            FROM inspections
+            WHERE created_at IS NOT NULL AND created_at != ''
+            GROUP BY {date_expr}
+            ORDER BY d DESC
+            """
+        ).fetchall()
+
+    distribution = {r["lbl"]: int(r["cnt"]) for r in dist_rows if r.get("lbl")}
+    relabeled_count = max(0, reviewed_count - agreed_count)
+    ai_accuracy_vs_expert = (agreed_count / reviewed_count * 100.0) if reviewed_count > 0 else 0.0
+
+    # Phân loại mức độ nguy hiểm dịch tễ từ danh mục bệnh chuẩn
+    from services.project_data import load_classes_config
+
+    classes_cfg = load_classes_config()
+    severity_counts = {"safe": 0, "warning": 0, "danger": 0}
+    for cls_code, cnt in distribution.items():
+        lvl = str((classes_cfg.get(cls_code) or {}).get("danger_level", "Trung bình")).strip()
+        if lvl in ("An toàn", "Thấp") or cls_code == "Healthy":
+            severity_counts["safe"] += cnt
+        elif lvl in ("Cao", "Khẩn cấp"):
+            severity_counts["danger"] += cnt
+        else:
+            severity_counts["warning"] += cnt
+
+    daily_trend = [
+        {"date": str(r["d"]), "count": int(r["cnt"] or 0)}
+        for r in reversed(trend_rows[:7])
+        if r.get("d")
+    ]
+
+    return {
+        "total_users": total_users,
+        "total_inspections": total_inspections,
+        "reviewed_count": reviewed_count,
+        "agreed_count": agreed_count,
+        "relabeled_count": relabeled_count,
+        "ai_accuracy_vs_expert": ai_accuracy_vs_expert,
+        "avg_confidence": avg_confidence,
+        "pending_count": pending_count,
+        "curated_count": curated_count,
+        "distribution": distribution,
+        "severity_counts": severity_counts,
+        "daily_trend": daily_trend,
+        "total_chats": total_chats,
+        "db_status": dict(_ACTIVE_DB_INFO),
+    }
+
+
+def sync_disease_catalog_to_sql(catalog: dict) -> None:
+    """Đồng bộ danh mục bệnh lý & phác đồ điều trị từ models/classes.json vào bảng DiseaseCatalog trong SQL."""
+    initialize()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with conn() as c:
+        c.execute("DELETE FROM DiseaseCatalog")
+        for code, info in (catalog or {}).items():
+            if not isinstance(info, dict):
+                continue
+            c_key = str(code).strip()
+            c_name = str(info.get("name_vi") or code).strip()
+            c_danger = str(info.get("danger_level") or "Trung bình").strip()
+            c_symp = str(info.get("symptoms") or "").strip()
+            c_prev = str(info.get("prevention") or "").strip()
+            c_treat = str(info.get("treatment") or "").strip()
+            if c.is_sqlserver:
+                try:
+                    c.execute(
+                        """INSERT INTO DiseaseCatalog
+                        (code, name_vi, class_key, display_name, danger_level, symptoms, prevention, treatment, treatment_protocol, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (c_key, c_name, c_key, c_name, c_danger, c_symp, c_prev, c_treat, c_treat, now_str),
+                    )
+                    continue
+                except Exception:
+                    pass
+            c.execute(
+                """INSERT INTO DiseaseCatalog (code, name_vi, danger_level, symptoms, prevention, treatment, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (c_key, c_name, c_danger, c_symp, c_prev, c_treat, now_str),
+            )
+
+
+def sync_model_version_to_sql(details: dict, activated_by: str = "admin") -> None:
+    """Đồng bộ phiên bản mô hình đang kích hoạt vào bảng ModelVersions trong SQL."""
+    initialize()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    w_path = str(details.get("checkpoint") or "")
+    v_name = str(details.get("run_name") or "")
+    arch = str(details.get("model") or "mobilenet_v2")
+    acc = details.get("test_accuracy")
+    acc_val = float(acc) if isinstance(acc, (int, float)) else None
+    with conn() as c:
+        c.execute("UPDATE ModelVersions SET is_active = 0")
+        existing = c.execute("SELECT id FROM ModelVersions WHERE weights_path = ?", (w_path,)).fetchone()
+        if existing:
+            c.execute(
+                "UPDATE ModelVersions SET is_active = 1, accuracy = ?, activated_by = ?, activated_at = ? WHERE id = ?",
+                (acc_val, activated_by, now_str, existing["id"]),
+            )
+        else:
+            c.execute(
+                """INSERT INTO ModelVersions (version_name, architecture, weights_path, accuracy, is_active, activated_by, activated_at)
+                VALUES (?, ?, ?, ?, 1, ?, ?)""",
+                (v_name, arch, w_path, acc_val, activated_by, now_str),
+            )
+
+
+def list_users(role_filter: str = "all", search_query: str = "") -> list[dict]:
+    initialize()
+    clauses = []
+    params: list[Any] = []
+    if role_filter and role_filter != "all":
+        clauses.append("role = ?")
+        params.append(role_filter)
+    q = (search_query or "").strip()
+    if q:
+        like_q = f"%{q}%"
+        clauses.append("(LOWER(full_name) LIKE LOWER(?) OR LOWER(email) LIKE LOWER(?) OR LOWER(username) LIKE LOWER(?))")
+        params.extend([like_q, like_q, like_q])
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with conn() as c:
+        rows = c.execute(f"SELECT * FROM users {where_sql} ORDER BY id ASC", tuple(params)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def create_user_account(
+    email: str,
+    full_name: str,
+    role: str = "user",
+    auth_provider: str = "local",
+    password: str = "",
+) -> dict:
+    initialize()
+    clean_email = (email or "").strip().lower()
+    clean_name = (full_name or "").strip()
+    if not clean_email or "@" not in clean_email:
+        raise ValueError("Email không hợp lệ.")
+    if not clean_name:
+        clean_name = clean_email.split("@")[0].replace(".", " ").title()
+    if role not in ("user", "expert", "admin"):
+        role = "user"
+    password = (password or "").strip()
+    if auth_provider == "local" and not password:
+        raise ValueError("Vui lòng nhập mật khẩu khởi tạo.")
+    username = clean_email.split("@")[0]
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with conn() as c:
+        existing = c.execute("SELECT id FROM users WHERE LOWER(email)=?", (clean_email,)).fetchone()
+        if existing:
+            raise ValueError(f"Email '{clean_email}' đã tồn tại trong hệ thống.")
+        cur = c.execute(
+            """INSERT INTO users
+            (email, username, password_hash, full_name, avatar_url, google_sub, role, auth_provider, is_active, created_at)
+            VALUES (?, ?, ?, ?, ?, '', ?, ?, 1, ?)""",
+            (
+                clean_email,
+                username,
+                _hash_password(password) if password else "",
+                clean_name,
+                f"https://ui-avatars.com/api/?name={clean_name.replace(' ', '+')}&background=059669&color=fff",
+                role,
+                auth_provider,
+                now_str,
+            ),
+        )
+        row = c.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
+        return dict(row)
+
+
+def update_user_profile(
+    user_id: int,
+    full_name: str,
+    avatar_url: str | None = None,
+    email: str | None = None,
+) -> dict:
+    """Update profile fields and keep email-keyed account history in sync."""
+    initialize()
+    clean_name = (full_name or "").strip()
+    if not 2 <= len(clean_name) <= 100:
+        raise ValueError("Tên hiển thị cần từ 2 đến 100 ký tự.")
+    clean_email = (email or "").strip().lower() if email is not None else None
+    if clean_email is not None:
+        local_part, separator, domain = clean_email.partition("@")
+        if (
+            not separator
+            or not local_part
+            or "." not in domain
+            or any(char.isspace() for char in clean_email)
+            or len(clean_email) > 254
+        ):
+            raise ValueError("Vui lòng nhập địa chỉ email hợp lệ.")
+
+    with conn() as c:
+        row = c.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
+        if not row:
+            raise ValueError("Không tìm thấy tài khoản.")
+        old_email = str(row["email"] or "").strip().lower()
+        next_email = clean_email if clean_email is not None else old_email
+        if next_email != old_email:
+            if row["auth_provider"] == "google" and not row["google_sub"]:
+                raise ValueError(
+                    "Tài khoản Google chưa lưu mã định danh liên kết, nên chưa thể đổi email an toàn."
+                )
+            duplicate = c.execute(
+                "SELECT id FROM users WHERE LOWER(email)=LOWER(?) AND id<>?",
+                (next_email, int(user_id)),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("Email này đã được một tài khoản khác sử dụng.")
+        next_avatar = row["avatar_url"] if avatar_url is None else str(avatar_url).strip()
+        c.execute(
+            "UPDATE users SET full_name=?, email=?, avatar_url=? WHERE id=?",
+            (clean_name, next_email, next_avatar, int(user_id)),
+        )
+        if next_email != old_email:
+            c.execute(
+                "UPDATE inspections SET user_email=? WHERE user_id=? OR LOWER(user_email)=LOWER(?)",
+                (next_email, int(user_id), old_email),
+            )
+            c.execute(
+                "UPDATE ChatMessages SET user_email=? WHERE user_id=? OR LOWER(user_email)=LOWER(?)",
+                (next_email, int(user_id), old_email),
+            )
+        updated = c.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
+    return dict(updated)
+
+
+def change_user_password(
+    user_id: int,
+    current_password: str,
+    new_password: str,
+) -> None:
+    """Verify the current password and replace it for a local account."""
+    initialize()
+    current = (current_password or "").strip()
+    replacement = new_password or ""
+    if replacement != replacement.strip():
+        raise ValueError("Mật khẩu mới không được bắt đầu hoặc kết thúc bằng khoảng trắng.")
+    if len(replacement) < 8:
+        raise ValueError("Mật khẩu mới cần có ít nhất 8 ký tự.")
+    if len(replacement) > 128:
+        raise ValueError("Mật khẩu mới không được dài quá 128 ký tự.")
+    if current == replacement:
+        raise ValueError("Mật khẩu mới phải khác mật khẩu hiện tại.")
+
+    with conn() as c:
+        row = c.execute("SELECT password_hash FROM users WHERE id=?", (int(user_id),)).fetchone()
+        if not row:
+            raise ValueError("Không tìm thấy tài khoản.")
+        if not row["password_hash"]:
+            raise ValueError("Tài khoản này dùng đăng nhập Google và chưa có mật khẩu riêng.")
+        if _hash_password(current) != row["password_hash"]:
+            raise ValueError("Mật khẩu hiện tại chưa chính xác.")
+        c.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (_hash_password(replacement), int(user_id)),
+        )
+
+
+def toggle_user_lock(user_id: int) -> bool:
+    initialize()
+    with conn() as c:
+        row = c.execute("SELECT is_active FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            raise ValueError("Không tìm thấy người dùng.")
+        new_state = 0 if int(row["is_active"]) == 1 else 1
+        c.execute("UPDATE users SET is_active=? WHERE id=?", (new_state, user_id))
+        return bool(new_state)
+
+
+def update_user_role(user_id: int, new_role: str) -> None:
+    if new_role not in ("user", "expert", "admin"):
+        raise ValueError("Role không hợp lệ.")
+    initialize()
+    with conn() as c:
+        c.execute("UPDATE users SET role=? WHERE id=?", (new_role, user_id))
+
+
+def delete(record_id):
+    initialize()
+    with conn() as c:
+        row = c.execute("SELECT image_path FROM inspections WHERE id=?", (record_id,)).fetchone()
+        c.execute("DELETE FROM inspections WHERE id=?", (record_id,))
+    if row and row["image_path"]:
+        image_file = Path(row["image_path"]).resolve()
+        archive_root = IMAGE_DIR.resolve()
         if archive_root in image_file.parents:
-            image_file.unlink(missing_ok=True)
+            try:
+                image_file.unlink(missing_ok=True)
+            except OSError:
+                pass
 
-def update_review(record_id, status, note='', actor_id=None):
-    initialize()
-    allowed = {'needs_review','reviewed','lab_requested','closed'}
-    if status not in allowed or not isinstance(note, str) or len(note.strip()) > 4000:
-        raise ValueError('Trạng thái rà soát không hợp lệ.')
-    with conn() as c:
-        _require_actor(c, actor_id, {'expert'})
-        result=c.execute('UPDATE dbo.inspections SET review_status=?,review_note=? WHERE id=?',
-                         (status,note.strip(),record_id))
-        if result.rowcount != 1:
-            raise ValueError('Không tìm thấy hồ sơ cần cập nhật.')
 
-def update_case(record_id, case, owner_id=None):
+def update_case(record_id, case):
     initialize()
-    if owner_id is None:
-        raise ValueError('Cần tài khoản người dùng để sửa hồ sơ.')
-    case = _validate_case(case)
     with conn() as c:
-        _require_actor(c, owner_id, {'user'})
-        ownership_clause = ' AND user_id=? AND result_status IN (\'not_started\',\'returned\')' \
-            if owner_id is not None else ''
-        review_reset = (
-            ",review_status='needs_review',review_note='',result_status='not_started',"
-            "result_category=NULL,expert_result=NULL,expert_notes=NULL,expert_id=NULL,"
-            "result_submitted_at=NULL,approved_by=NULL,approved_at=NULL,result_seen=0"
-        ) if owner_id is not None else ''
-        parameters = [
-            case.get('animal_id','').strip(),case.get('farm_name','').strip(),
-            case.get('body_site','').strip(),case.get('symptoms','').strip(),
-            case.get('onset_date','').strip(),case.get('entered_at','').strip(),record_id]
-        if owner_id is not None:
-            parameters.append(owner_id)
-        cur = c.execute(f'''UPDATE dbo.inspections SET animal_id=?,farm_name=?,body_site=?,
-            symptoms=?,onset_date=?,entered_at=?{review_reset} WHERE id=?{ownership_clause}''',
-            parameters)
+        cur = c.execute(
+            """UPDATE inspections SET animal_id=?,farm_name=?,body_site=?,
+            symptoms=?,onset_date=?,entered_at=? WHERE id=?""",
+            (
+                case.get("animal_id", "").strip(),
+                case.get("farm_name", "").strip(),
+                case.get("body_site", "").strip(),
+                case.get("symptoms", "").strip(),
+                case.get("onset_date", "").strip(),
+                case.get("entered_at", "").strip(),
+                record_id,
+            ),
+        )
         return cur.rowcount > 0
+
+
+# --- ChatMessages SQL Persistence ---
+
+def save_chat_message(
+    user_email: str,
+    role: str,
+    content: str,
+    user_id: int | None = None,
+    case_id: str = "",
+    model_name: str = "",
+) -> int:
+    """Ghi trực tiếp tin nhắn hội thoại Chatbot vào bảng ChatMessages trong SQL Database."""
+    initialize()
+    final_content = (content or "").strip()
+    if role == "assistant":
+        from services.chatbot_service import ensure_disclaimer
+
+        final_content = ensure_disclaimer(final_content)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    clean_email = (user_email or "nongdan.pigskin@gmail.com").strip().lower()
+    with conn() as c:
+        cur = c.execute(
+            """INSERT INTO ChatMessages (timestamp, user_id, user_email, role, content, case_id, model_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (now_str, user_id, clean_email, role, final_content, str(case_id or ""), str(model_name or "")),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def list_chat_messages(user_email: str, limit: int = 60) -> list[dict]:
+    """Truy vấn lịch sử chat từ bảng ChatMessages trong SQL Database."""
+    initialize()
+    from services.chatbot_service import ensure_disclaimer
+
+    clean_email = (user_email or "nongdan.pigskin@gmail.com").strip().lower()
+    with conn() as c:
+        rows = c.execute(
+            "SELECT id, timestamp, user_id, user_email, role, content, case_id, model_name FROM ChatMessages WHERE LOWER(user_email)=? ORDER BY id DESC",
+            (clean_email,),
+        ).fetchall()
+    items = []
+    for r in rows[:limit]:
+        item = dict(r)
+        if item.get("role") == "assistant":
+            item["content"] = ensure_disclaimer(str(item.get("content") or ""))
+        items.append(item)
+    items.reverse()
+    return items
+
+
+def clear_chat_messages(user_email: str) -> None:
+    initialize()
+    clean_email = (user_email or "nongdan.pigskin@gmail.com").strip().lower()
+    with conn() as c:
+        c.execute("DELETE FROM ChatMessages WHERE LOWER(user_email)=?", (clean_email,))

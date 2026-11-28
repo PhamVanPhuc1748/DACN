@@ -1,0 +1,35 @@
+{
+  "model": "efficientnet_b0",
+  "classes": [
+    "Healthy",
+    "Infected_Bacterial_Erysipelas",
+    "Infected_Bacterial_Greasy_Pig_Disease",
+    "Infected_Environmental_Dermatitis",
+    "Infected_Environmental_Sunburn",
+    "Infected_Fungal_Pityriasis_Rosea",
+    "Infected_Fungal_Ringworm",
+    "Infected_Parasitic_Mange",
+    "Infected_Viral_Foot_and_Mouth_Disease",
+    "Infected_Viral_Swinepox"
+  ],
+  "image_size": 224,
+  "normalization": {
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ]
+  },
+  "label_mode": "single",
+  "manifest": "manifests/rf_v1_conservative/manifest_draft.csv",
+  "manifest_sha256": "d07aa8d72568457ae5ab97c1b9b1634111442cf6ab1af021edee77b9c2434300",
+  "dataset": "Roboflow Pig Skin Disease Single Label v4",
+  "default_candidate": false,
+  "version": "E07-A",
+  "display_name": "EfficientNet-B0 Ensemble E07-A"
+}

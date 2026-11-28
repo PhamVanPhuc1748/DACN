@@ -62,7 +62,7 @@
   "seed": 123,
   "optimizer": "Adam",
   "loss": "CrossEntropyLoss",
-  "manifest": "ml_workspace/runs/rf_v1_gate_a/rf_v1_conservative_pilot_01/manifest/manifest_draft.csv",
+  "manifest": "manifests/rf_v1_conservative/manifest_draft.csv",
   "manifest_sha256": "d07aa8d72568457ae5ab97c1b9b1634111442cf6ab1af021edee77b9c2434300",
   "classes_file_sha256": "4a069a6fb036ffb8e23bf0aea0f39e8dafcdd680515d4e3f059abbbc59cf169e",
   "split_sha256": {
@@ -132,7 +132,8 @@
   "cublas_workspace_config": ":4096:8",
   "torch_version": "2.11.0+cu130",
   "torchvision_version": "0.26.0+cu130",
-  "display_name": "MobileNetV2 ? Roboflow Baseline 2026-11-28",
-  "default_candidate": false,
-  "checkpoint_sha256": "1885e1f0b36e0a5ffbbf6c54d7a2749e18f43fd949afdbaf33a729f2b656db15"
+  "version": "E01",
+  "dataset": "Roboflow Pig Skin Disease Single Label v4",
+  "display_name": "MobileNetV2 Roboflow Baseline E01",
+  "default_candidate": false
 }

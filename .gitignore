@@ -1,26 +1,25 @@
 # Môi trường ảo Python
 venv/
-/.venv/
 /.venv_train/
-/ml_workspace/runs/
-/dataset_comparison.csv
-/dataset_statistics.csv
-/dedupe*_report*.csv
-/dedupe_final_check.csv
-/pairs*.jpg
 .env
 __pycache__/
 *.pyc
 
-# Dữ liệu ảnh và models (quá nặng để push lên Git)
-data/
+# Thư mục dữ liệu ảnh gốc và models (quá nặng để push lên Git)
+/data/
 ml_workspace/weights/*.pt
 ml_workspace/weights/*.h5
 ml_workspace/weights/*.onnx
+ml_workspace/runs/
+
+# Frontend dependencies & build
+node_modules/
+dist/
 
 # IDEs
 .vscode/
 .idea/
+.1devtool/
 
 # Hệ điều hành
 .DS_Store
@@ -32,8 +31,28 @@ PigSkinTech/__pycache__/
 PigSkinTech/**/__pycache__/
 PigSkinTech/*.pyc
 PigSkinTech/**/*.pyc
-PigSkinTech/pigskin_history.db*
+PigSkinTech/pigskin_history.db-shm
+PigSkinTech/pigskin_history.db-wal
+PigSkinTech/case_images/heatmap_cache/
+PigSkinTech/exports/
+PigSkinTech/profile_avatars/
+PigSkinTech/config/database.json
+PigSkinTech/models/active_model.json
+PigSkinTech/pigskin_history.db
 PigSkinTech/case_images/
-PigSkinTech/models/*.pth
-PigSkinTech/models/*.pt
-PigSkinTech/models/*.onnx
+/dataset_comparison.csv
+/dataset_statistics.csv
+/dedupe*_report*.csv
+/dedupe_final_check.csv
+/pairs*.jpg
+
+# Local runtime and handoff test data
+.venv/
+*.db-journal
+*.log
+PigSkinTech/curated_dataset/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3

@@ -1,5 +1,7 @@
-flet==0.28.3
-Pillow>=12,<13
-pyodbc>=5.2,<6
-# Real inference uses the isolated interpreter configured in models/runtime.json.
-# Do not add torch here unless intentionally moving inference into the Studio venv.
+flet[desktop]==0.28.3
+Pillow>=10.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+pyodbc>=5.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0

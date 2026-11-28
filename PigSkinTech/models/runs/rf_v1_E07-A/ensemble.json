@@ -1,0 +1,6 @@
+{
+  "members": [
+    "../rf_v1_efficientnet_b0_E03_ls01/best_model.pt",
+    "../rf_v1_efficientnet_b0_E06_ls01_adamw/best_model.pt"
+  ]
+}

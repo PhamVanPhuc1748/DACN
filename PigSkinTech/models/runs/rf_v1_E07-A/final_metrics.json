@@ -1,0 +1,8 @@
+{
+  "best_val_accuracy": 0.7935560859188544,
+  "best_val_macro_f1": 0.7947430455609533,
+  "test_metrics": {
+    "accuracy": 0.7659574468085106,
+    "macro_f1": 0.764107463225095
+  }
+}

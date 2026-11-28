@@ -1,4 +1,0 @@
-# Install the matching torch and torchvision pair separately from PyTorch's wheel index.
-numpy==2.2.6
-Pillow==12.3.0
-scikit-learn==1.7.1

@@ -1,0 +1,33 @@
+{
+  "E01": {
+    "run": "rf_v1_conservative_baseline_01",
+    "sha256": "1885e1f0b36e0a5ffbbf6c54d7a2749e18f43fd949afdbaf33a729f2b656db15"
+  },
+  "E02": {
+    "run": "rf_v1_efficientnet_b0_baseline_01",
+    "sha256": "e96d0f8571e8a3e354345ba79d3b17ba0bf14f88864da514148344041abac1ba"
+  },
+  "E03": {
+    "run": "rf_v1_efficientnet_b0_E03_ls01",
+    "sha256": "0de930e0d089f6ed5b2835f12b1461ecf87fca217dfa442c2264b6beac8625d9"
+  },
+  "E04": {
+    "run": "rf_v1_efficientnet_b0_E04_ls01_lr5e5"
+  },
+  "E05": {
+    "run": "rf_v1_efficientnet_b0_E05_ls01_cosine_retry01"
+  },
+  "E06": {
+    "run": "rf_v1_efficientnet_b0_E06_ls01_adamw",
+    "sha256": "61b7198191df1fe9b9b1f42879dcab1fac8b946e2049735aeb7288f0a5d6bb96"
+  },
+  "E07": {
+    "run": "rf_v1_E07_ensemble_20261128_234403_195549"
+  },
+  "E08": {
+    "run": "rf_v1_E08_ensemble_tta_20261128_234505_410343"
+  },
+  "E09": {
+    "run": "rf_v1_E09_final_test_20261128_234732_450340"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "best_epoch": 18,
+  "best_val_macro_f1": 0.7709379576746589,
+  "epochs_completed": 30,
+  "training_seconds": 577.8263554999976,
+  "checkpoint_size_bytes": 16382905,
+  "cuda_peak_allocated_mib": 1497.24853515625,
+  "cuda_peak_reserved_mib": 1654.0,
+  "test_skipped": true
+}

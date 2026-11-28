@@ -1,0 +1,203 @@
+{
+  "best_epoch": 14,
+  "best_val_macro_f1": 0.7496384654752739,
+  "epochs_completed": 26,
+  "training_seconds": 735.0018992999994,
+  "checkpoint_size_bytes": 9194315,
+  "cuda_peak_allocated_mib": 1320.8291015625,
+  "cuda_peak_reserved_mib": 1458.0,
+  "test_metrics": {
+    "accuracy": 0.7186761229314421,
+    "macro_precision": 0.7250661791523136,
+    "macro_recall": 0.7285182744894498,
+    "macro_f1": 0.7208263314550407,
+    "weighted_precision": 0.7280364599178293,
+    "weighted_recall": 0.7186761229314421,
+    "weighted_f1": 0.7175833023416232,
+    "per_class": {
+      "Healthy": {
+        "precision": 0.8863636363636364,
+        "recall": 1.0,
+        "f1": 0.9397590361445783,
+        "support": 39
+      },
+      "Infected_Bacterial_Erysipelas": {
+        "precision": 0.8125,
+        "recall": 0.5777777777777777,
+        "f1": 0.6753246753246753,
+        "support": 45
+      },
+      "Infected_Bacterial_Greasy_Pig_Disease": {
+        "precision": 0.5897435897435898,
+        "recall": 0.6388888888888888,
+        "f1": 0.6133333333333333,
+        "support": 36
+      },
+      "Infected_Environmental_Dermatitis": {
+        "precision": 0.7692307692307693,
+        "recall": 0.6976744186046512,
+        "f1": 0.7317073170731707,
+        "support": 43
+      },
+      "Infected_Environmental_Sunburn": {
+        "precision": 0.7647058823529411,
+        "recall": 0.6610169491525424,
+        "f1": 0.7090909090909091,
+        "support": 59
+      },
+      "Infected_Fungal_Pityriasis_Rosea": {
+        "precision": 0.6326530612244898,
+        "recall": 0.6739130434782609,
+        "f1": 0.6526315789473685,
+        "support": 46
+      },
+      "Infected_Fungal_Ringworm": {
+        "precision": 0.7222222222222222,
+        "recall": 0.6046511627906976,
+        "f1": 0.6582278481012658,
+        "support": 43
+      },
+      "Infected_Parasitic_Mange": {
+        "precision": 0.5510204081632653,
+        "recall": 0.7941176470588235,
+        "f1": 0.6506024096385542,
+        "support": 34
+      },
+      "Infected_Viral_Foot_and_Mouth_Disease": {
+        "precision": 0.8,
+        "recall": 0.8571428571428571,
+        "f1": 0.8275862068965517,
+        "support": 28
+      },
+      "Infected_Viral_Swinepox": {
+        "precision": 0.7222222222222222,
+        "recall": 0.78,
+        "f1": 0.75,
+        "support": 50
+      }
+    },
+    "confusion_matrix": [
+      [
+        39,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        26,
+        0,
+        2,
+        4,
+        2,
+        2,
+        4,
+        3,
+        2
+      ],
+      [
+        0,
+        0,
+        23,
+        1,
+        4,
+        0,
+        0,
+        4,
+        2,
+        2
+      ],
+      [
+        0,
+        1,
+        0,
+        30,
+        1,
+        4,
+        0,
+        4,
+        0,
+        3
+      ],
+      [
+        3,
+        2,
+        6,
+        1,
+        39,
+        5,
+        0,
+        2,
+        1,
+        0
+      ],
+      [
+        0,
+        1,
+        0,
+        1,
+        0,
+        31,
+        7,
+        3,
+        0,
+        3
+      ],
+      [
+        0,
+        1,
+        0,
+        0,
+        2,
+        5,
+        26,
+        4,
+        0,
+        5
+      ],
+      [
+        1,
+        0,
+        3,
+        1,
+        0,
+        1,
+        1,
+        27,
+        0,
+        0
+      ],
+      [
+        0,
+        1,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        24,
+        0
+      ],
+      [
+        1,
+        0,
+        4,
+        3,
+        1,
+        1,
+        0,
+        1,
+        0,
+        39
+      ]
+    ],
+    "loss": 0.9179405229029645
+  }
+}

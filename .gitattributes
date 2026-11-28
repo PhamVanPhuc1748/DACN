@@ -1,3 +1,5 @@
 # Preserve the bytes checked by each model manifest on Windows and Linux.
 PigSkinTech/models/classes.json -text whitespace=cr-at-eol
 PigSkinTech/models/runs/*/classes.json -text whitespace=cr-at-eol
+
+ml_workspace/manifests/rf_v1_conservative/* -text whitespace=cr-at-eol

@@ -47,6 +47,7 @@ DEFAULTS = {
     "GOOGLE_CLIENT_ID": "",
     "GOOGLE_CLIENT_SECRET": "",
     "GOOGLE_REDIRECT_URI": "http://127.0.0.1:8765/callback",
+    "PIGSKIN_DEMO_MODE": "false",
     "PIGSKIN_DEMO_PASSWORD": "",
     "GEMINI_API_KEY": "",
     "GEMINI_MODEL": "gemini-2.5-flash",
@@ -126,6 +127,12 @@ def read_settings() -> dict[str, str]:
         values["DB_PASSWORD"] = values["SQLSERVER_PASSWORD"]
 
     return values
+
+
+def demo_login_password(settings: dict[str, str]) -> str:
+    if settings.get("PIGSKIN_DEMO_MODE", "").strip().lower() != "true":
+        return ""
+    return settings.get("PIGSKIN_DEMO_PASSWORD", "").strip()
 
 
 def save_settings(new_values: dict[str, str]) -> Path:

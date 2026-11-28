@@ -19,7 +19,7 @@ try:
 except ImportError:
     pyodbc = None
 
-from services.config_store import read_settings
+from services.config_store import demo_login_password, read_settings
 from services.project_data import get_class_info
 
 
@@ -903,7 +903,7 @@ def initialize(force: bool = False):
                 pass
 
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        demo_password = read_settings().get("PIGSKIN_DEMO_PASSWORD", "").strip()
+        demo_password = demo_login_password(read_settings())
         default_pw = _hash_password(demo_password) if demo_password else ""
         for acc in DEFAULT_RBAC_USERS if demo_password else ():
             existing_u = c.execute("SELECT id FROM users WHERE LOWER(email)=?", (acc["email"].lower(),)).fetchone()

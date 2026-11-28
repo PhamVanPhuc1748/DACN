@@ -22,6 +22,8 @@ from services.auth_service import (
     show_snack,
     theme_tokens,
 )
+from services.config_store import demo_login_password, read_settings
+from services.store import DEFAULT_RBAC_USERS
 from theme import make_smooth_animation
 
 
@@ -57,6 +59,8 @@ def build_auth_view(page: ft.Page) -> ft.Control:
     page.appbar = None
 
     bg_img_path = _resolve_login_bg_image()
+    demo_password = demo_login_password(read_settings())
+    demo_emails = {account["role"]: account["email"] for account in DEFAULT_RBAC_USERS}
 
     error_text = ft.Text("", size=12.5, color="#DC2626", weight=ft.FontWeight.W_600, visible=False)
     shake_wrapper = ft.Container(
@@ -325,10 +329,13 @@ def build_auth_view(page: ft.Page) -> ft.Control:
             page.run_task(_run_google_oauth_task)
 
     def quick_login_role(email_val: str):
+        if not demo_password or login_state["running"]:
+            return
         email_input.value = email_val
-        password_input.value = ""
+        password_input.value = demo_password
         error_text.visible = False
         page.update()
+        handle_local_login()
 
     def handle_forgot_password(e):
         password_input.value = ""
@@ -556,6 +563,7 @@ def build_auth_view(page: ft.Page) -> ft.Control:
 
     # (8) 1-Click Quick Role Selector Box at bottom of Card
     quick_roles_box = ft.Container(
+        visible=bool(demo_password),
         width=float("inf"),
         padding=ft.padding.symmetric(horizontal=14, vertical=12),
         bgcolor="#F8FAFC",
@@ -571,9 +579,9 @@ def build_auth_view(page: ft.Page) -> ft.Control:
                 ),
                 ft.Row(
                     [
-                        _quick_role_pill("🌾 Nông dân", "nongdan.pigskin@gmail.com", "#059669", "#ECFDF5", "#A7F3D0"),
-                        _quick_role_pill("🩺 Chuyên gia", "bs.thuy.pigskin@gmail.com", "#0284C7", "#EFF6FF", "#BAE6FD"),
-                        _quick_role_pill("🛡️ Quản trị", "admin.pigskin@gmail.com", "#7C3AED", "#F3E8FF", "#DDD6FE"),
+                        _quick_role_pill("🌾 Nông dân", demo_emails["user"], "#059669", "#ECFDF5", "#A7F3D0"),
+                        _quick_role_pill("🩺 Chuyên gia", demo_emails["expert"], "#0284C7", "#EFF6FF", "#BAE6FD"),
+                        _quick_role_pill("🛡️ Quản trị", demo_emails["admin"], "#7C3AED", "#F3E8FF", "#DDD6FE"),
                     ],
                     spacing=8,
                 ),

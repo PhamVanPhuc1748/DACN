@@ -94,7 +94,7 @@ python main.py
 
 ### Tài khoản demo
 
-Đặt `PIGSKIN_DEMO_PASSWORD` trong `PigSkinTech/.env` trước khi khởi động CSDL demo. Ứng dụng tạo các tài khoản còn thiếu và giữ mật khẩu hiện có.
+Đặt `PIGSKIN_DEMO_MODE=true` và `PIGSKIN_DEMO_PASSWORD` trong `PigSkinTech/.env` trước khi khởi động với CSDL demo. Ba nút đăng nhập nhanh điền thông tin tài khoản demo và gửi qua luồng đăng nhập thường. Ứng dụng tạo các tài khoản demo còn thiếu và giữ mật khẩu hiện có trong CSDL, vì vậy mật khẩu cấu hình phải khớp với các tài khoản demo đã tồn tại.
 
 | Vai trò | Email đăng nhập | Username | Đường dẫn (Route) |
 |---|---|---|---|

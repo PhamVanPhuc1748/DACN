@@ -38,6 +38,7 @@ with patch.object(config_store, 'read_settings', return_value={'DATABASE_ENGINE'
             demo_password = secrets.token_urlsafe(24)
             with patch.multiple(store, DB=root / "test.db", IMAGE_DIR=root / "images",
                                 read_settings=lambda: {"DATABASE_ENGINE": "sqlite",
+                                                       "PIGSKIN_DEMO_MODE": "true",
                                                        "PIGSKIN_DEMO_PASSWORD": demo_password}, pyodbc=None,
                                 _SHARED_RAW_CONN=None, _SHARED_ENGINE_TYPE=None, _SHARED_CONN_STR="",
                                 _SCHEMA_INITIALIZED_KEY=None, _ACTIVE_DB_INFO={}), \

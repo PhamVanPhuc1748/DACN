@@ -4,6 +4,7 @@ __pycache__/
 *.db
 .env
 models/*.pth
+!models/best.pth
 models/*.pt
 logs/
 build/

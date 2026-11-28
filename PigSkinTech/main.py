@@ -19,7 +19,7 @@ from services.accounts import (
 )
 from services.dataset_audit import audit_dataset
 from services.experiment_metrics import METRIC_NAMES,load_experiment_metrics
-from services.inference import (inspect_image,predict,model_ready,model_spec,
+from services.inference import (DEFAULT_MODEL_ID,MODEL_OPTIONS,inspect_image,predict,model_ready,model_spec,
     model_status,prewarm_ai_worker,shutdown_ai_worker)
 from services.store import authorized_image_path,case_summary,count_cases,delete,recent,save,update_case
 from services.workflow import (
@@ -111,6 +111,7 @@ def main(page:ft.Page):
     page.window.width=1366;page.window.height=768;page.window.min_width=1000;page.window.min_height=690
     page.theme=ft.Theme(color_scheme_seed=BLUE)
     current_user={'value':None}
+    research_model={'id': ''}
     selected={'path':None,'info':None,'result':None,'record_id':None}
     selected_support={'thread_id':None,'status':None,'updated_at':None}
     dataset_ui={'path':None,'path_field':None,'results':None,'report':None}
@@ -437,7 +438,8 @@ def main(page:ft.Page):
             actor_id=current_user['value']['id']
             info=await asyncio.to_thread(inspect_image,path)
             started=time.perf_counter()
-            result=await asyncio.to_thread(predict,path)
+            model_id=research_model['id']
+            result=await asyncio.to_thread(predict,path,model_id) if model_id else await asyncio.to_thread(predict,path)
             if (not session_alive['value'] or current_user['value'] is None
                     or current_user['value']['id']!=actor_id or selected['path']!=path):
                 return
@@ -502,13 +504,19 @@ def main(page:ft.Page):
     def analysis():
         render_result()
         try:
-            ai_spec=model_spec()
+            ai_spec=model_spec(research_model['id'])
             ai_description=(f"{ai_spec['architecture']} • run {ai_spec['run_id']} • "
                 f"{ai_spec['class_count']} lớp • input {ai_spec['preprocessing']['resize'][0]}×"
                 f"{ai_spec['preprocessing']['resize'][1]}")
         except (OSError,ValueError,KeyError,json.JSONDecodeError):
             ai_description='Chưa có model metadata hợp lệ'
-        ai_status=model_status()
+        ai_status=model_status(research_model['id'])
+        def select_research_model(event):
+            research_model['id']=event.control.value if event.control.value != DEFAULT_MODEL_ID else ''
+            navigate(1)
+        model_selector=ft.Dropdown(label='Checkpoint cho phiên phân tích', value=research_model['id'] or DEFAULT_MODEL_ID,
+            options=[ft.dropdown.Option(key, title) for key, title in MODEL_OPTIONS],
+            on_change=select_research_model)
         case_header=ft.Container(bgcolor=HEADER_BG,border=ft.border.all(1,BORDER),border_radius=8,padding=12,
             content=ft.Row([ft.Icon(ft.Icons.FOLDER_SHARED_OUTLINED,color=CYAN,size=22),
                 ft.Column([label('CASE WORKSPACE • PIG SKIN',10,CYAN,True),case_identifier],spacing=3,expand=True),
@@ -524,7 +532,7 @@ def main(page:ft.Page):
             ft.Row([ft.ElevatedButton('CHỌN ẢNH',icon=ft.Icons.FOLDER_OPEN,on_click=choose_image,bgcolor=CYAN,color=BG),
                 ft.OutlinedButton('XÓA ẢNH',icon=ft.Icons.DELETE,on_click=clear_image),
                 ft.ElevatedButton('PHÂN TÍCH',icon=ft.Icons.PLAY_ARROW,on_click=process_image,bgcolor=BLUE,color=WHITE)],wrap=True),
-            notice],expand=3)
+            model_selector,notice],expand=3)
         result_panel=block([ft.Row([caption_head('AI findings','Kết quả hỗ trợ nghiên cứu',ft.Icons.BIOTECH),
                     ft.Container(expand=True),ft.Container(bgcolor=CHIP_BG,padding=8,border_radius=6,
                         content=label('CLASSIFICATION',9,CYAN,True))]),
@@ -1518,6 +1526,7 @@ def main(page:ft.Page):
     }
 
     def logout(e=None):
+        research_model['id']=''
         current_user['value']=None
         selected.update(path=None,info=None,result=None,record_id=None)
         selected_support.update(thread_id=None,status=None,updated_at=None)

@@ -1,0 +1,3 @@
+# Optional zero-shot image-scope gate. Compatible with the project's Torch 2.5.1.
+# Keep <3: newer OpenCLIP releases require newer PyTorch and may replace CUDA builds.
+open_clip_torch==2.32.0

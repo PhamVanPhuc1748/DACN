@@ -9,6 +9,7 @@ project_data = [
     ('models/classes.json', 'models'),
     ('models/model_manifest.json', 'models'),
     ('models/runtime.json', 'models'),
+    ('models/runs/rf_v1_conservative_baseline_01', 'models/runs/rf_v1_conservative_baseline_01'),
     # The external AI interpreter needs physical modules; modules stored only
     # in PyInstaller's PYZ archive cannot be imported by that interpreter.
     ('services/inference_worker.py', 'services'),

@@ -1,5 +1,13 @@
 # Môi trường ảo Python
 venv/
+/.venv/
+/.venv_train/
+/ml_workspace/runs/
+/dataset_comparison.csv
+/dataset_statistics.csv
+/dedupe*_report*.csv
+/dedupe_final_check.csv
+/pairs*.jpg
 .env
 __pycache__/
 *.pyc

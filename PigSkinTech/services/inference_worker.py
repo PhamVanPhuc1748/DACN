@@ -35,7 +35,7 @@ def serve() -> int:
             if command != 'predict' or not isinstance(request.get('path'), str):
                 raise ValueError('Yêu cầu AI worker không hợp lệ.')
             requested = time.perf_counter()
-            result = _predict_local(request['path'])
+            result = _predict_local(request['path'], request.get('model_id'))
             result['runtime_timings']['worker_request_total_ms'] = (
                 time.perf_counter() - requested) * 1000
             _write({'id': request_id, 'ok': True, 'result': result})

@@ -29,6 +29,21 @@ MAX_BYTES = 10 * 1024 * 1024
 MAX_PIXELS = 24_000_000
 WORKER_START_TIMEOUT = 45.0
 WORKER_REQUEST_TIMEOUT = 60.0
+ROBOFLOW_RUN = 'rf_v1_conservative_baseline_01'
+DEFAULT_MODEL_ID = '20261103_125653'
+MODEL_OPTIONS = (
+    (DEFAULT_MODEL_ID, 'MobileNetV2 — 20261103_125653 (mặc định)'),
+    (ROBOFLOW_RUN, 'MobileNetV2 — Roboflow Baseline 2026-11-28'),
+)
+
+
+def model_paths(model_id=None):
+    if not model_id or model_id == DEFAULT_MODEL_ID:
+        return WEIGHTS, CLASSES, MODEL_MANIFEST
+    if model_id != ROBOFLOW_RUN:
+        raise ValueError('Phiên bản model không được đăng ký.')
+    folder = MODEL_ROOT / 'runs' / ROBOFLOW_RUN
+    return folder / 'best_model.pt', folder / 'classes.json', folder / 'model_manifest.json'
 
 
 def _sha256(path: Path) -> str:
@@ -62,8 +77,8 @@ def inspect_image(path):
             'width': width, 'height': height}
 
 
-def labels():
-    raw = json.loads(CLASSES.read_text(encoding='utf-8'))
+def labels(model_id=None):
+    raw = json.loads(model_paths(model_id)[1].read_text(encoding='utf-8'))
     if isinstance(raw, list):
         result = raw
     elif isinstance(raw, dict) and all(str(index) in raw for index in range(len(raw))):
@@ -80,8 +95,8 @@ def labels():
     return result
 
 
-def model_spec():
-    raw = json.loads(MODEL_MANIFEST.read_text(encoding='utf-8'))
+def model_spec(model_id=None):
+    raw = json.loads(model_paths(model_id)[2].read_text(encoding='utf-8'))
     required = {'run_id', 'architecture', 'checkpoint_sha256', 'manifest_sha256',
                 'classes_sha256', 'preprocessing', 'validation'}
     if not isinstance(raw, dict) or not required.issubset(raw):
@@ -89,23 +104,23 @@ def model_spec():
     return raw
 
 
-def _asset_error():
+def _asset_error(model_id=None):
     def display_path(path):
         try:
             return str(path.relative_to(ROOT))
         except ValueError:
             return str(path)
 
-    missing = [display_path(path) for path in
-               (WEIGHTS, CLASSES, MODEL_MANIFEST) if not path.is_file()]
+    weights, classes, manifest = model_paths(model_id)
+    missing = [display_path(path) for path in (weights, classes, manifest) if not path.is_file()]
     if missing:
         return 'Cần bổ sung: ' + ', '.join(missing)
     try:
-        names = labels()
-        spec = model_spec()
-        if _sha256(WEIGHTS) != str(spec['checkpoint_sha256']).lower():
+        names = labels(model_id)
+        spec = model_spec(model_id)
+        if _sha256(weights) != str(spec['checkpoint_sha256']).lower():
             return 'SHA-256 checkpoint không khớp model_manifest.json.'
-        if _sha256(CLASSES) != str(spec['classes_sha256']).lower():
+        if _sha256(classes) != str(spec['classes_sha256']).lower():
             return 'SHA-256 classes.json không khớp model_manifest.json.'
         if spec.get('class_count') != len(names):
             return 'Số lớp trong model manifest không khớp classes.json.'
@@ -117,9 +132,9 @@ def _asset_error():
     return None
 
 
-def model_ready():
+def model_ready(model_id=None):
     """True only when all model assets and their recorded hashes agree."""
-    return _asset_error() is None
+    return _asset_error(model_id) is None
 
 
 def _external_python():
@@ -190,9 +205,9 @@ def _probe_external_runtime(python_path: Path):
     return value
 
 
-def model_status():
+def model_status(model_id=None):
     """Describe readiness without blocking the Flet thread on PyTorch import."""
-    asset_error = _asset_error()
+    asset_error = _asset_error(model_id)
     if asset_error:
         return {'available': False, 'missing': [], 'message': asset_error}
     if importlib.util.find_spec('torch') is not None and importlib.util.find_spec('torchvision') is not None:
@@ -215,6 +230,7 @@ def model_status():
 _cached = None
 _cached_signature = None
 _cached_load_timings = None
+_model_load_lock = threading.Lock()
 
 
 def _build_model(torch, models, architecture, class_count):
@@ -229,7 +245,12 @@ def _build_model(torch, models, architecture, class_count):
     raise ValueError(f'Kiến trúc checkpoint chưa được hỗ trợ: {architecture}')
 
 
-def _ensure_local_model():
+def _ensure_local_model(model_id=None):
+    with _model_load_lock:
+        return _load_local_model(model_id)
+
+
+def _load_local_model(model_id):
     """Load and verify the model once in the current process."""
     global _cached, _cached_signature, _cached_load_timings
     import_started = time.perf_counter()
@@ -237,19 +258,25 @@ def _ensure_local_model():
     from torchvision import models, transforms
     runtime_import_ms = (time.perf_counter() - import_started) * 1000
 
-    names = labels()
-    spec = model_spec()
-    signature = (WEIGHTS.stat().st_mtime_ns, CLASSES.stat().st_mtime_ns,
-                 MODEL_MANIFEST.stat().st_mtime_ns)
+    weights, classes, manifest = model_paths(model_id)
+    names = labels(model_id)
+    spec = model_spec(model_id)
+    signature = (model_id, tuple((path, path.stat().st_mtime_ns, path.stat().st_size)
+                                  for path in (weights, classes, manifest)))
     if _cached is None or _cached_signature != signature:
         load_started = time.perf_counter()
-        checkpoint = torch.load(str(WEIGHTS), map_location='cpu', weights_only=True)
+        asset_error = _asset_error(model_id)
+        if asset_error:
+            raise ValueError(asset_error)
+        checkpoint = torch.load(str(weights), map_location='cpu', weights_only=True)
         required = {'model', 'label_mode', 'classes', 'class_to_index', 'image_size',
                     'normalization', 'state_dict', 'best_epoch', 'val_metrics'}
         if not isinstance(checkpoint, dict) or not required.issubset(checkpoint):
             raise ValueError('Checkpoint không chứa schema metadata/state_dict đã xác minh.')
         if checkpoint['model'] != spec['architecture'] or checkpoint['classes'] != names:
             raise ValueError('Kiến trúc hoặc thứ tự lớp trong checkpoint không khớp manifest.')
+        if checkpoint['class_to_index'] != {name: index for index, name in enumerate(names)}:
+            raise ValueError('Class mapping trong checkpoint không khớp thứ tự labels.')
         if checkpoint['label_mode'] != 'single':
             raise ValueError('Checkpoint phải là mô hình phân loại single-label.')
         preprocessing = spec['preprocessing']
@@ -276,11 +303,11 @@ def _ensure_local_model():
     })
 
 
-def _predict_local(path):
+def _predict_local(path, model_id=None):
     validation_started = time.perf_counter()
     info = inspect_image(path)
     image_validation_ms = (time.perf_counter() - validation_started) * 1000
-    (net, checkpoint, names, spec, transforms, torch), load_timings = _ensure_local_model()
+    (net, checkpoint, names, spec, transforms, torch), load_timings = _ensure_local_model(model_id)
     normalization = checkpoint['normalization']
     size = checkpoint['image_size']
     pipeline = transforms.Compose([
@@ -295,6 +322,8 @@ def _predict_local(path):
     inference_started = time.perf_counter()
     with torch.inference_mode():
         probabilities = torch.softmax(net(tensor)[0], dim=0)
+        if not bool(torch.isfinite(probabilities).all()):
+            raise RuntimeError('Model trả điểm phân loại không hữu hạn.')
         values, indices = torch.topk(probabilities, k=len(names))
     inference_ms = (time.perf_counter() - inference_started) * 1000
     ranking = [{'label': names[int(index)], 'confidence': float(value)}
@@ -305,9 +334,9 @@ def _predict_local(path):
         'confidence': ranking[0]['confidence'],
         'scores': ranking,
         'model_info': (
-            f"{spec['architecture']} • run {spec['run_id']} • "
+            f"{spec.get('display_name', spec['architecture'])} • run {spec['run_id']} • "
             f"sha256={spec['checkpoint_sha256'][:12]} • "
-            f"modified={datetime.fromtimestamp(WEIGHTS.stat().st_mtime, timezone.utc).isoformat(timespec='seconds')}"
+            f"modified={datetime.fromtimestamp(model_paths(model_id)[0].stat().st_mtime, timezone.utc).isoformat(timespec='seconds')}"
         ),
         'message': 'Kết quả checkpoint thật; chỉ hỗ trợ nghiên cứu và phải được chuyên gia xác minh.',
         'runtime_timings': {
@@ -401,7 +430,7 @@ class AIWorkerClient:
         self.startup_timings['worker_start_total_ms'] = (
             time.perf_counter() - started) * 1000
 
-    def predict(self, path):
+    def predict(self, path, model_id=None):
         with self._lock:
             last_error = None
             for attempt in range(2):
@@ -411,6 +440,8 @@ class AIWorkerClient:
                     request_id = self._request_id
                     request = {'id': request_id, 'command': 'predict',
                                'path': str(Path(path).resolve())}
+                    if model_id:
+                        request['model_id'] = model_id
                     self._process.stdin.write(json.dumps(request) + '\n')
                     self._process.stdin.flush()
                     message = self._wait_message(self.request_timeout)
@@ -506,17 +537,18 @@ def prewarm_ai_worker():
 atexit.register(shutdown_ai_worker)
 
 
-def predict(path):
+def predict(path, model_id=None):
     """Return real top-k scores; never synthesize a disease prediction."""
     inspect_image(path)
-    if not model_ready():
+    ready = model_ready(model_id) if model_id else model_ready()
+    if not ready:
         return {'mode': 'unavailable', 'label': None, 'confidence': None, 'scores': [],
-                'message': _asset_error() or 'Model chưa sẵn sàng.'}
+                'message': _asset_error(model_id) or 'Model chưa sẵn sàng.'}
     if importlib.util.find_spec('torch') is not None and importlib.util.find_spec('torchvision') is not None:
-        return _predict_local(path)
+        return _predict_local(path, model_id)
     external = _external_python()
     if external is not None and os.environ.get('PIGSKIN_AI_WORKER') != '1':
         # Worker readiness performs a stricter check by loading the checkpoint;
         # avoid paying for a second torch/torchvision import before startup.
-        return _persistent_worker(external).predict(path)
+        return _persistent_worker(external).predict(path, model_id)
     raise RuntimeError('Thiếu PyTorch/torchvision cho môi trường suy luận AI.')

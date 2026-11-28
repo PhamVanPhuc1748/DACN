@@ -2,6 +2,11 @@
 
 ## Current development status (November 2026)
 
+The analysis screen offers **MobileNetV2 — Roboflow Baseline 2026-11-28**
+as a session-level choice. Run `20261103_125653` remains the default.
+See the [setup and handoff guide](../docs/ban_giao_nhom/ROBOFLOW_HANDOFF.md)
+and [Group 5 report](../docs/ban_giao_nhom/BAO_CAO_TUAN_NHOM_5_2026-11-28.md).
+
 Run the existing application from this directory with the virtual environment
 in the parent folder:
 
@@ -31,9 +36,8 @@ Run the read-only operational audit against LocalDB:
 The readiness audit issues only metadata/aggregate `SELECT` statements and
 rolls back before closing. It does not initialize schemas or run migrations.
 
-The verified data snapshot is at
-`C:\Users\ADMIN\Documents\PigSkinBackups\20261103_152116_979` and the
-procedure is documented in `docs/PHASE0_BACKUP.md`. The application still uses SQL Server LocalDB. Do not
+The backup procedure is documented in `docs/PHASE0_BACKUP.md`.
+The application still uses SQL Server LocalDB. Do not
 rerun `migrate_database.py` against an existing database.
 
 Current improvements include session revalidation on navigation, service-level

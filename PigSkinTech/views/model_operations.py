@@ -4,7 +4,8 @@ import json
 
 import flet as ft
 
-from services.inference import CLASSES, MODEL_MANIFEST, WEIGHTS, labels, model_spec, model_status
+from services.inference import (CLASSES, MODEL_MANIFEST, ROBOFLOW_RUN, WEIGHTS, labels,
+                                model_paths, model_ready, model_spec, model_status)
 
 
 def build_model_view(palette, label, block, caption_head):
@@ -80,8 +81,25 @@ def build_model_view(palette, label, block, caption_head):
             label('Trạng thái file và runtime • chưa thay thế validation model', 11)], spacing=4),
             ft.Container(expand=True), ft.Container(bgcolor=STATUS_BG, padding=9, border_radius=6,
                 content=label(overall, 10, TEAL if status['available'] else AMBER, True))])
+    baseline_info = label('Chưa xác minh được file Roboflow.', 11, AMBER)
+    if model_ready(ROBOFLOW_RUN):
+        try:
+            spec = model_spec(ROBOFLOW_RUN)
+            metrics = json.loads((model_paths(ROBOFLOW_RUN)[0].parent / 'final_metrics.json').read_text(encoding='utf-8'))
+            baseline_info = label(
+                f"{spec['display_name']} · epoch {spec['validation']['best_epoch']} · "
+                f"Val macro-F1 {spec['validation']['macro_f1']:.2%} · "
+                f"Test accuracy {metrics['test_metrics']['accuracy']:.2%} · "
+                f"Test macro-F1 {metrics['test_metrics']['macro_f1']:.2%}", 11, WHITE)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    baseline_panel = block([
+        caption_head('Checkpoint Roboflow', 'Chọn trong màn hình phân tích. Model cũ vẫn mặc định.', ft.Icons.SCIENCE),
+        baseline_info,
+        label('Hai checkpoint dùng các tập test khác nhau.', 10, AMBER),
+    ], padding=14)
     return [
         heading,
         ft.Row([dependencies, specification], spacing=10,
                vertical_alignment=ft.CrossAxisAlignment.START),
-        class_panel]
+        class_panel, baseline_panel]

@@ -122,6 +122,31 @@ class UISmokeTests(unittest.TestCase):
     def test_admin_dashboard_build(self):
         self.build_role('admin')
 
+    def test_analysis_dropdown_switches_and_restores_default(self):
+        page = self.build_role('user')
+        account = {'id': 7, 'email': 'user@example.test', 'display_name': 'User',
+                   'role': 'user', 'active': True}
+        nav = page.controls[0].controls[0].content
+        button = next(button for column in nav.controls
+                      for button in getattr(column, 'controls', [])
+                      if getattr(button, 'tooltip', None) == 'Phân tích ảnh')
+
+        def selector():
+            return next(item for item in self.controls_of_type(page.controls[0], app.ft.Dropdown)
+                        if item.label == 'Checkpoint cho phiên phân tích')
+
+        with patch.object(app, 'current_account', return_value=account), \
+             patch.object(app, 'unseen_result_count', return_value=0), \
+             patch.object(app, 'support_unread_count', return_value=0):
+            self.click(button)
+            self.assertEqual(selector().value, app.DEFAULT_MODEL_ID)
+            new_run = app.MODEL_OPTIONS[1][0]
+            for key in (new_run, app.DEFAULT_MODEL_ID):
+                control = selector()
+                control.value = key
+                control.on_change(types.SimpleNamespace(control=control))
+                self.assertEqual(selector().value, key)
+
     def test_admin_navigation_highlight_and_content_are_synchronized(self):
         page=self.build_role('admin')
         shell=page.controls[0]
@@ -138,7 +163,7 @@ class UISmokeTests(unittest.TestCase):
         ), patch.object(app,'support_threads',return_value=[]), patch.object(
             app,'support_unread_count',return_value=0):
             for name,expected_sections in [('Dataset',3),('Huấn luyện',5),
-                                           ('Mô hình AI',3),('Quản lý tài khoản',2),
+                                           ('Mô hình AI',4),('Quản lý tài khoản',2),
                                            ('Hỗ trợ',2)]:
                 item=next(control for control in nav.controls if control.tooltip==name)
                 item.on_click(types.SimpleNamespace(control=item))
@@ -199,7 +224,8 @@ class UISmokeTests(unittest.TestCase):
     def test_model_operations_build_with_verified_checkpoint(self):
         controls = build_model_view(app.PALETTES['dark'], app.label,
                                     app.block, app.caption_head)
-        self.assertEqual(len(controls), 3)
+        self.assertEqual(len(controls), 4)
+        self.assertIn('Checkpoint Roboflow', self.text_values(controls[-1]))
 
     def test_database_startup_error_renders_recoverable_auth_screen(self):
         page=FakePage()
